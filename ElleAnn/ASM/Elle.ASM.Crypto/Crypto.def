@@ -1,0 +1,8 @@
+LIBRARY Elle.ASM.Crypto
+EXPORTS
+    ASM_SHA256
+    ASM_AES256Encrypt
+    ASM_AES256Decrypt
+    ASM_XorCipher
+    ASM_CRC32
+    ASM_RandomBytes

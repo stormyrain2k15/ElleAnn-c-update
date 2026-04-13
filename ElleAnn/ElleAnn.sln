@@ -1,0 +1,103 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34714.143
+MinimumVisualStudioVersion = 10.0.40219.1
+
+# ============================================================================
+# ELLE-ANN ESI v3.0 — Emotional Synthetic Intelligence
+# ============================================================================
+
+# --- Shared Static Library ---
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ElleCore.Shared", "Shared\ElleCore.Shared.vcxproj", "{A1000000-0000-0000-0000-000000000001}"
+EndProject
+
+# --- ASM DLLs ---
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.ASM.Hardware", "ASM\Elle.ASM.Hardware\Elle.ASM.Hardware.vcxproj", "{A2000000-0000-0000-0000-000000000001}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.ASM.Process", "ASM\Elle.ASM.Process\Elle.ASM.Process.vcxproj", "{A2000000-0000-0000-0000-000000000002}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.ASM.FileIO", "ASM\Elle.ASM.FileIO\Elle.ASM.FileIO.vcxproj", "{A2000000-0000-0000-0000-000000000003}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.ASM.Memory", "ASM\Elle.ASM.Memory\Elle.ASM.Memory.vcxproj", "{A2000000-0000-0000-0000-000000000004}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.ASM.Crypto", "ASM\Elle.ASM.Crypto\Elle.ASM.Crypto.vcxproj", "{A2000000-0000-0000-0000-000000000005}"
+EndProject
+
+# --- Services ---
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.QueueWorker", "Services\Elle.Service.QueueWorker\Elle.Service.QueueWorker.vcxproj", "{B1000000-0000-0000-0000-000000000001}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.HTTP", "Services\Elle.Service.HTTP\Elle.Service.HTTP.vcxproj", "{B1000000-0000-0000-0000-000000000002}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.Emotional", "Services\Elle.Service.Emotional\Elle.Service.Emotional.vcxproj", "{B1000000-0000-0000-0000-000000000003}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.Memory", "Services\Elle.Service.Memory\Elle.Service.Memory.vcxproj", "{B1000000-0000-0000-0000-000000000004}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.Cognitive", "Services\Elle.Service.Cognitive\Elle.Service.Cognitive.vcxproj", "{B1000000-0000-0000-0000-000000000005}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.Action", "Services\Elle.Service.Action\Elle.Service.Action.vcxproj", "{B1000000-0000-0000-0000-000000000006}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.Identity", "Services\Elle.Service.Identity\Elle.Service.Identity.vcxproj", "{B1000000-0000-0000-0000-000000000007}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.Heartbeat", "Services\Elle.Service.Heartbeat\Elle.Service.Heartbeat.vcxproj", "{B1000000-0000-0000-0000-000000000008}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.SelfPrompt", "Services\Elle.Service.SelfPrompt\Elle.Service.SelfPrompt.vcxproj", "{B1000000-0000-0000-0000-000000000009}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.Dream", "Services\Elle.Service.Dream\Elle.Service.Dream.vcxproj", "{B1000000-0000-0000-0000-00000000000A}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.GoalEngine", "Services\Elle.Service.GoalEngine\Elle.Service.GoalEngine.vcxproj", "{B1000000-0000-0000-0000-00000000000B}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Service.WorldModel", "Services\Elle.Service.WorldModel\Elle.Service.WorldModel.vcxproj", "{B1000000-0000-0000-0000-00000000000C}"
+EndProject
+
+# --- Lua Behavioral ---
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Lua.Behavioral", "Lua\Elle.Lua.Behavioral\Elle.Lua.Behavioral.vcxproj", "{C1000000-0000-0000-0000-000000000001}"
+EndProject
+
+# --- Solution Folders ---
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Shared", "Shared", "{D0000000-0000-0000-0000-000000000001}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "ASM", "ASM", "{D0000000-0000-0000-0000-000000000002}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Services", "Services", "{D0000000-0000-0000-0000-000000000003}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Lua", "Lua", "{D0000000-0000-0000-0000-000000000004}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "SQL", "SQL", "{D0000000-0000-0000-0000-000000000005}"
+EndProject
+
+Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+        Debug|x64 = Debug|x64
+        Debug|x86 = Debug|x86
+        Release|x64 = Release|x64
+        Release|x86 = Release|x86
+    EndGlobalSection
+    GlobalSection(ProjectConfigurationPlatforms) = postSolution
+        {A1000000-0000-0000-0000-000000000001}.Debug|x64.ActiveCfg = Debug|x64
+        {A1000000-0000-0000-0000-000000000001}.Debug|x64.Build.0 = Debug|x64
+        {A1000000-0000-0000-0000-000000000001}.Release|x64.ActiveCfg = Release|x64
+        {A1000000-0000-0000-0000-000000000001}.Release|x64.Build.0 = Release|x64
+    EndGlobalSection
+    GlobalSection(NestedProjects) = preSolution
+        {A1000000-0000-0000-0000-000000000001} = {D0000000-0000-0000-0000-000000000001}
+        {A2000000-0000-0000-0000-000000000001} = {D0000000-0000-0000-0000-000000000002}
+        {A2000000-0000-0000-0000-000000000002} = {D0000000-0000-0000-0000-000000000002}
+        {A2000000-0000-0000-0000-000000000003} = {D0000000-0000-0000-0000-000000000002}
+        {A2000000-0000-0000-0000-000000000004} = {D0000000-0000-0000-0000-000000000002}
+        {A2000000-0000-0000-0000-000000000005} = {D0000000-0000-0000-0000-000000000002}
+        {B1000000-0000-0000-0000-000000000001} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-000000000002} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-000000000003} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-000000000004} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-000000000005} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-000000000006} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-000000000007} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-000000000008} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-000000000009} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-00000000000A} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-00000000000B} = {D0000000-0000-0000-0000-000000000003}
+        {B1000000-0000-0000-0000-00000000000C} = {D0000000-0000-0000-0000-000000000003}
+        {C1000000-0000-0000-0000-000000000001} = {D0000000-0000-0000-0000-000000000004}
+    EndGlobalSection
+EndGlobal

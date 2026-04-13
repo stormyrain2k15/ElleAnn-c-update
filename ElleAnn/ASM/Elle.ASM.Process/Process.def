@@ -1,0 +1,10 @@
+LIBRARY Elle.ASM.Process
+EXPORTS
+    ASM_LaunchProcess
+    ASM_KillProcess
+    ASM_EnumProcesses
+    ASM_GetProcessName
+    ASM_IsProcessRunning
+    ASM_SuspendProcess
+    ASM_ResumeProcess
+    ASM_InjectDLL

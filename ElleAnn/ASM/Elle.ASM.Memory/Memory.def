@@ -1,0 +1,9 @@
+LIBRARY Elle.ASM.Memory
+EXPORTS
+    ASM_PoolAlloc
+    ASM_PoolFree
+    ASM_MapFile
+    ASM_UnmapFile
+    ASM_FastMemCopy
+    ASM_FastMemSet
+    ASM_MemCompare

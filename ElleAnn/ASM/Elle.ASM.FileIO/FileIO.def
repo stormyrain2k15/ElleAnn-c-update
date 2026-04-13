@@ -1,0 +1,12 @@
+LIBRARY Elle.ASM.FileIO
+EXPORTS
+    ASM_ReadFile
+    ASM_WriteFile
+    ASM_AppendFile
+    ASM_DeleteFile
+    ASM_FileExists
+    ASM_WatchDirectory
+    ASM_LockFile
+    ASM_UnlockFile
+    ASM_GetFileSize
+    ASM_CopyFileFast

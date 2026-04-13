@@ -1,0 +1,25 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.9.34714.143
+MinimumVisualStudioVersion = 10.0.40219.1
+
+# ============================================================================
+# ELLE-ANN ESI v3.0 — Debug Tools
+# ============================================================================
+
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Debug.ServiceHarness", "Elle.Debug.ServiceHarness\Elle.Debug.ServiceHarness.vcxproj", "{E1000000-0000-0000-0000-000000000001}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Debug.QueueInspector", "Elle.Debug.QueueInspector\Elle.Debug.QueueInspector.vcxproj", "{E1000000-0000-0000-0000-000000000002}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Debug.EmotionViewer", "Elle.Debug.EmotionViewer\Elle.Debug.EmotionViewer.vcxproj", "{E1000000-0000-0000-0000-000000000003}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Elle.Debug.AsmTestBench", "Elle.Debug.AsmTestBench\Elle.Debug.AsmTestBench.vcxproj", "{E1000000-0000-0000-0000-000000000004}"
+EndProject
+
+Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+        Debug|x64 = Debug|x64
+        Release|x64 = Release|x64
+    EndGlobalSection
+EndGlobal

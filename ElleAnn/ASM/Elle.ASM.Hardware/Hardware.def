@@ -1,0 +1,10 @@
+LIBRARY Elle.ASM.Hardware
+EXPORTS
+    ASM_SetCPUAffinity
+    ASM_GetCPUUsage
+    ASM_GetMemoryInfo
+    ASM_SetProcessPriority
+    ASM_QueryPerfCounters
+    ASM_GetPowerStatus
+    ASM_CPUID
+    ASM_RDTSC
