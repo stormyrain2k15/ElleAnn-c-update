@@ -473,7 +473,8 @@ bool ElleServiceBase::InitializeCore() {
 
     /* 8. Initialize LLM engine if this service needs it */
     if (m_serviceId == SVC_COGNITIVE || m_serviceId == SVC_SELF_PROMPT || 
-        m_serviceId == SVC_DREAM || m_serviceId == SVC_GOAL_ENGINE) {
+        m_serviceId == SVC_DREAM || m_serviceId == SVC_GOAL_ENGINE ||
+        m_serviceId == SVC_HTTP_SERVER) {
         if (!ElleLLMEngine::Instance().Initialize()) {
             ELLE_WARN("LLM engine failed to initialize — AI features degraded");
         } else {
