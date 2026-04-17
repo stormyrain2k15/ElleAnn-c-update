@@ -13,6 +13,7 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 
 #include <string>
@@ -218,6 +219,14 @@ private:
     }
 
     void HandleClient(SOCKET clientSocket) {
+        /* Set socket options for reliable send */
+        int optval = 1;
+        setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&optval, sizeof(optval));
+
+        /* Set receive timeout */
+        DWORD recvTimeout = 5000;
+        setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recvTimeout, sizeof(recvTimeout));
+
         char buffer[65536];
         int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
         if (bytesRead <= 0) {
@@ -234,9 +243,7 @@ private:
             HTTPResponse resp;
             resp.status = 204;
             resp.statusText = "No Content";
-            std::string data = resp.Serialize();
-            send(clientSocket, data.c_str(), (int)data.size(), 0);
-            closesocket(clientSocket);
+            SendResponse(clientSocket, resp);
             return;
         }
 
@@ -248,8 +255,30 @@ private:
 
         /* Route request */
         HTTPResponse resp = m_router.Dispatch(req);
+        SendResponse(clientSocket, resp);
+    }
+
+    void SendResponse(SOCKET clientSocket, const HTTPResponse& resp) {
         std::string data = resp.Serialize();
-        send(clientSocket, data.c_str(), (int)data.size(), 0);
+        int totalSent = 0;
+        int remaining = (int)data.size();
+        const char* ptr = data.c_str();
+
+        /* Send all data reliably */
+        while (remaining > 0) {
+            int sent = send(clientSocket, ptr + totalSent, remaining, 0);
+            if (sent == SOCKET_ERROR) break;
+            totalSent += sent;
+            remaining -= sent;
+        }
+
+        /* Graceful shutdown — let client read all data before closing */
+        shutdown(clientSocket, SD_SEND);
+        
+        /* Drain any remaining incoming data */
+        char drain[1024];
+        while (recv(clientSocket, drain, sizeof(drain), 0) > 0) {}
+        
         closesocket(clientSocket);
     }
 
