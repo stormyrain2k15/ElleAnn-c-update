@@ -465,6 +465,15 @@ bool ElleServiceBase::InitializeCore() {
 
     /* 6. Set IPC message handler */
     m_ipcHub.SetMessageHandler([this](const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) {
+        /* Auto-respond to heartbeat pings */
+        if (msg.header.msg_type == IPC_HEARTBEAT) {
+            auto reply = ElleIPCMessage::Create(IPC_HEARTBEAT, m_serviceId, SVC_HEARTBEAT);
+            m_ipcHub.Send(SVC_HEARTBEAT, reply);
+            /* Also update our own heartbeat in DB */
+            ElleDB::UpdateWorkerHeartbeat(m_serviceId);
+            return;
+        }
+        /* Forward to service-specific handler */
         this->OnMessage(msg, sender);
     });
 
