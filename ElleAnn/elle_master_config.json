@@ -295,7 +295,7 @@
             "timeout_ms": 5000
         },
         "sql_pipes": {
-            "connection_string": "Server=np:\\\\.\\pipe\\MSSQL$SQLEXPRESS\\sql\\query;Database=ElleCore;Trusted_Connection=yes;",
+            "connection_string": "Server=DESKTOP-IIREG0M\\ELLEANN;Database=ElleCore;Trusted_Connection=yes;",
             "pool_size": 8,
             "command_timeout_seconds": 30,
             "retry_count": 3,

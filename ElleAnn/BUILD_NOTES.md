@@ -65,7 +65,7 @@ Edit `elle_master_config.json`:
     },
     "services": {
         "sql_pipes": {
-            "connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=np:\\\\.\\pipe\\MSSQL$SQLEXPRESS\\sql\\query;Database=ElleCore;Trusted_Connection=yes;"
+            "connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=DESKTOP-IIREG0M\\ELLEANN;Database=ElleCore;Trusted_Connection=yes;"
         }
     }
 }
