@@ -219,43 +219,63 @@ private:
     }
 
     void HandleClient(SOCKET clientSocket) {
-        /* Set socket options for reliable send */
-        int optval = 1;
-        setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&optval, sizeof(optval));
+        try {
+            /* Set socket options for reliable send */
+            int optval = 1;
+            setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (const char*)&optval, sizeof(optval));
 
-        /* Set receive timeout */
-        DWORD recvTimeout = 5000;
-        setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recvTimeout, sizeof(recvTimeout));
+            /* Set receive timeout */
+            DWORD recvTimeout = 5000;
+            setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recvTimeout, sizeof(recvTimeout));
 
-        char buffer[65536];
-        int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-        if (bytesRead <= 0) {
-            closesocket(clientSocket);
-            return;
-        }
-        buffer[bytesRead] = '\0';
+            char buffer[65536];
+            int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+            if (bytesRead <= 0) {
+                closesocket(clientSocket);
+                return;
+            }
+            buffer[bytesRead] = '\0';
 
-        /* Parse HTTP request */
-        HTTPRequest req = ParseRequest(std::string(buffer, bytesRead));
+            /* Parse HTTP request */
+            HTTPRequest req = ParseRequest(std::string(buffer, bytesRead));
 
-        /* CORS preflight */
-        if (req.method == "OPTIONS") {
-            HTTPResponse resp;
-            resp.status = 204;
-            resp.statusText = "No Content";
+            ELLE_DEBUG("HTTP %s %s", req.method.c_str(), req.path.c_str());
+
+            /* CORS preflight */
+            if (req.method == "OPTIONS") {
+                HTTPResponse resp;
+                resp.status = 204;
+                resp.statusText = "No Content";
+                SendResponse(clientSocket, resp);
+                return;
+            }
+
+            /* WebSocket upgrade */
+            if (req.isWebSocket) {
+                HandleWebSocketUpgrade(clientSocket, req);
+                return;
+            }
+
+            /* Route request */
+            HTTPResponse resp = m_router.Dispatch(req);
             SendResponse(clientSocket, resp);
-            return;
-        }
 
-        /* WebSocket upgrade */
-        if (req.isWebSocket) {
-            HandleWebSocketUpgrade(clientSocket, req);
-            return;
+        } catch (const std::exception& e) {
+            ELLE_ERROR("HTTP handler exception: %s", e.what());
+            try {
+                SendResponse(clientSocket, HTTPResponse::Error(500, 
+                    std::string("Internal error: ") + e.what()));
+            } catch (...) {
+                closesocket(clientSocket);
+            }
+        } catch (...) {
+            ELLE_ERROR("HTTP handler unknown exception");
+            try {
+                SendResponse(clientSocket, HTTPResponse::Error(500, "Unknown internal error"));
+            } catch (...) {
+                closesocket(clientSocket);
+            }
         }
-
-        /* Route request */
-        HTTPResponse resp = m_router.Dispatch(req);
-        SendResponse(clientSocket, resp);
     }
 
     void SendResponse(SOCKET clientSocket, const HTTPResponse& resp) {
@@ -352,25 +372,63 @@ private:
      * ROUTE REGISTRATION
      *──────────────────────────────────────────────────────────────────────────*/
     void RegisterRoutes() {
+        /* /api/health — Simple health check, no dependencies */
+        m_router.Register("GET", "/api/health", [](const HTTPRequest& req) -> HTTPResponse {
+            return HTTPResponse::JSON(200, 
+                "{\"status\":\"alive\",\"name\":\"Elle-Ann\",\"version\":\"" 
+                ELLE_VERSION_STRING "\"}");
+        });
+
         /* /api/ai — Chat with Elle */
         m_router.Register("POST", "/api/ai/chat", [this](const HTTPRequest& req) -> HTTPResponse {
-            /* Extract user message from JSON body */
-            /* Send to cognitive service via IPC */
-            /* Get LLM response */
-            auto resp = ElleLLMEngine::Instance().Ask(req.body);
-            return HTTPResponse::JSON(200, "{\"response\":\"" + resp + "\"}");
+            try {
+                /* Extract message from JSON body — simple extraction */
+                std::string message = req.body;
+                size_t msgStart = message.find("\"message\":");
+                if (msgStart != std::string::npos) {
+                    size_t valStart = message.find('"', msgStart + 10) + 1;
+                    size_t valEnd = message.find('"', valStart);
+                    if (valStart != std::string::npos && valEnd != std::string::npos) {
+                        message = message.substr(valStart, valEnd - valStart);
+                    }
+                }
+
+                auto resp = ElleLLMEngine::Instance().Ask(message);
+                
+                /* Escape response for JSON */
+                std::string escaped;
+                for (char c : resp) {
+                    switch (c) {
+                        case '"':  escaped += "\\\""; break;
+                        case '\\': escaped += "\\\\"; break;
+                        case '\n': escaped += "\\n"; break;
+                        case '\r': escaped += "\\r"; break;
+                        case '\t': escaped += "\\t"; break;
+                        default:   escaped += c; break;
+                    }
+                }
+                
+                return HTTPResponse::JSON(200, "{\"response\":\"" + escaped + "\"}");
+            } catch (const std::exception& e) {
+                return HTTPResponse::Error(500, std::string("Chat error: ") + e.what());
+            }
         });
 
         /* /api/emotions — Current emotional state */
         m_router.Register("GET", "/api/emotions", [this](const HTTPRequest& req) -> HTTPResponse {
-            ELLE_EMOTION_STATE state;
-            ElleDB::GetLatestEmotionState(state);
-            std::ostringstream json;
-            json << "{\"valence\":" << state.valence
-                 << ",\"arousal\":" << state.arousal
-                 << ",\"dominance\":" << state.dominance
-                 << ",\"tick\":" << state.tick_count << "}";
-            return HTTPResponse::JSON(200, json.str());
+            try {
+                ELLE_EMOTION_STATE state;
+                ElleDB::GetLatestEmotionState(state);
+                std::ostringstream json;
+                json << "{\"valence\":" << state.valence
+                     << ",\"arousal\":" << state.arousal
+                     << ",\"dominance\":" << state.dominance
+                     << ",\"tick\":" << state.tick_count << "}";
+                return HTTPResponse::JSON(200, json.str());
+            } catch (...) {
+                return HTTPResponse::JSON(200, 
+                    "{\"valence\":0.0,\"arousal\":0.0,\"dominance\":0.0,\"tick\":0,\"note\":\"db_unavailable\"}");
+            }
         });
 
         /* /api/memory — Memory operations */
@@ -384,12 +442,17 @@ private:
 
         /* /api/server — Server status */
         m_router.Register("GET", "/api/server/status", [](const HTTPRequest& req) -> HTTPResponse {
-            std::vector<ELLE_SERVICE_STATUS> statuses;
-            ElleDB::GetWorkerStatuses(statuses);
-            std::ostringstream json;
-            json << "{\"services\":" << statuses.size() 
-                 << ",\"version\":\"" << ELLE_VERSION_STRING << "\"}";
-            return HTTPResponse::JSON(200, json.str());
+            try {
+                std::vector<ELLE_SERVICE_STATUS> statuses;
+                ElleDB::GetWorkerStatuses(statuses);
+                std::ostringstream json;
+                json << "{\"services\":" << statuses.size() 
+                     << ",\"version\":\"" << ELLE_VERSION_STRING << "\"}";
+                return HTTPResponse::JSON(200, json.str());
+            } catch (...) {
+                return HTTPResponse::JSON(200, 
+                    "{\"services\":0,\"version\":\"" ELLE_VERSION_STRING "\",\"note\":\"db_unavailable\"}");
+            }
         });
 
         /* /api/brain — Cognitive operations */
@@ -399,18 +462,22 @@ private:
 
         /* /api/goals — Goal management */
         m_router.Register("GET", "/api/goals", [](const HTTPRequest& req) -> HTTPResponse {
-            std::vector<ELLE_GOAL_RECORD> goals;
-            ElleDB::GetActiveGoals(goals);
-            std::ostringstream json;
-            json << "{\"goals\":[";
-            for (size_t i = 0; i < goals.size(); i++) {
-                if (i > 0) json << ",";
-                json << "{\"id\":" << goals[i].id 
-                     << ",\"description\":\"" << goals[i].description << "\""
-                     << ",\"progress\":" << goals[i].progress << "}";
+            try {
+                std::vector<ELLE_GOAL_RECORD> goals;
+                ElleDB::GetActiveGoals(goals);
+                std::ostringstream json;
+                json << "{\"goals\":[";
+                for (size_t i = 0; i < goals.size(); i++) {
+                    if (i > 0) json << ",";
+                    json << "{\"id\":" << goals[i].id 
+                         << ",\"description\":\"" << goals[i].description << "\""
+                         << ",\"progress\":" << goals[i].progress << "}";
+                }
+                json << "]}";
+                return HTTPResponse::JSON(200, json.str());
+            } catch (...) {
+                return HTTPResponse::JSON(200, "{\"goals\":[],\"note\":\"db_unavailable\"}");
             }
-            json << "]}";
-            return HTTPResponse::JSON(200, json.str());
         });
 
         /* /api/hal — Hardware abstraction */
@@ -420,11 +487,15 @@ private:
 
         /* /api/admin — Administrative endpoints */
         m_router.Register("POST", "/api/admin/reload", [](const HTTPRequest& req) -> HTTPResponse {
-            ElleConfig::Instance().Reload();
-            return HTTPResponse::JSON(200, "{\"reloaded\":true}");
+            try {
+                ElleConfig::Instance().Reload();
+                return HTTPResponse::JSON(200, "{\"reloaded\":true}");
+            } catch (...) {
+                return HTTPResponse::Error(500, "Config reload failed");
+            }
         });
 
-        ELLE_INFO("Registered %d API routes", 10);
+        ELLE_INFO("Registered %d API routes", 11);
     }
 };
 
