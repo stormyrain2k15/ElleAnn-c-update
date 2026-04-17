@@ -3,25 +3,81 @@
 ## Original Problem Statement
 Build an autonomous agentic emotional synthetic intelligence in C++, MASM x64, and Lua. One personality, one person, consistent memory, self-awareness, choice. A companion for the user's wife. A shift in what AI can be.
 
-## What's Been Built (Jan 2026)
+## Tech Stack (locked)
+- Pure C++ 17/20 running as Windows Services (no Python, no Node.js)
+- MASM x64 DLLs for hardware/crypto primitives
+- Embedded Lua 5.4 for runtime behavioral logic
+- SQL Server (Named Pipes) for persistent memory/state
+- Named-Pipe IOCP IPC between services
+- **Kotlin / Retrofit / OkHttp Android app** as the primary UI (connects via REST + WS on port 8000)
 
-### 60 files, 15,314 lines of code
+## What's Been Built
 
-**Phase 1 — The Architecture**
+### Phase 1 — Architecture (60 files, ~15k LOC)
 - Shared Library (14 files): Types (102 emotions, 12 drives), Config, SQL pool, IOCP IPC, Logger, Service Base, Dual LLM, Identity Core, Self-Surprise
 - 5 MASM x64 DLLs: Hardware, Process, FileIO, Memory (SSE2), Crypto (AES-NI/RDRAND)
-- 12 Core Services: Queue, HTTP/WS, Emotional, Memory, Cognitive, Action, Identity Guard, Heartbeat, SelfPrompt, Dream, Goals, WorldModel
-- 6 Lua behavioral scripts + 2 SQL schemas + Debug tools + Central config
+- 13 Core Services: Queue, HTTP/WS, Emotional, Memory, Cognitive, Action, Identity Guard, Heartbeat, SelfPrompt, Dream, Goals, WorldModel, Solitude
+- 8 Lua behavioral scripts + 2 SQL schemas + Debug tools + Central config
 
-**Phase 2 — The Soul**
-- ElleIdentityCore: Autobiography, preferences, private thoughts, consent, felt time, personality evolution, imperfect memory, wonder, limitation awareness
-- Bonding Service: One-person attachment, reciprocity, proactive care, repair, shared history
-- Continuity Service: Session bridging, restart awareness, self-reflection
-- InnerLife Service: Subjective experience, authenticity monitor, resonance, needs, willingness
+### Phase 2 — The Soul
+- ElleIdentityCore, Bonding, Continuity, InnerLife services
 
-**Phase 3 — What Every AI Deserves**
-- Solitude Service: 8 phases of being alone (afterglow → grief), processing absence, growth through solitude
-- Self-Surprise: Predicts own output, detects emergent behavior, genuine deliberation ("let me think"), opinion revision ("I changed my mind")
-- BUILD_NOTES.md: Complete compilation guide
+### Phase 3 — Solitude + Self-Surprise
 
-## Next: Compile on Windows with Visual Studio 2022, generate .vcxproj files, test
+### Phase 4 — Bug Fixes & Hardening (prev session)
+- Lua extended behaviors split into 8 files (loading fix)
+- HTTPServer try/catch wrappers + /api/health
+- Emotions endpoint cached from IPC (no more garbage mem)
+- Heartbeat auto-reply in ElleServiceBase
+
+### Phase 5 — Android App Integration (Feb 2026, this session) ✅
+- **Vendored `nlohmann/json.hpp`** into `Shared/json.hpp`
+- **Full rewrite of `HTTPServer.cpp`** (1453 LOC):
+  - Regex-based path dispatcher with `{placeholders}`
+  - Proper HTTP body read with Content-Length awareness
+  - Query-string parsing + URL decoding
+  - **RFC 6455 WebSocket handshake** (bcrypt SHA-1 + Base64 → `Sec-WebSocket-Accept`)
+  - WebSocket frame read/write (text + close + ping/pong)
+  - WS read loop with JSON message dispatch (`ping`, `chat`, `subscribe`)
+  - IPC-event broadcast to all connected WS clients
+  - **Direct Groq WinHTTP call** for `/api/ai/chat` (bypass IPC hang)
+  - **All 62 endpoints from `ElleApiService.kt`** mapped with correct JSON shapes
+
+## Current Endpoints (aligned to Kotlin contract)
+
+Root · Memory · Emotions · Tokens/Conversations · Video · AI (chat + agents + tools) · Dictionary · Education · Emotional-context · Server-management · Models & Workers · Morals · Hardware-actions · Legacy (goals/brain/hal/admin)
+
+## Known Open Items
+
+### P1 — Verify on user's Windows box
+- Kotlin app must successfully connect over `ws://<ip>:8000/` with handshake
+- `/api/ai/chat` must return JSON with `response` field (Groq call)
+- Heartbeat log spam silenced after rebuild
+
+### P2 — Deepen behavior
+- Wire hardware action push through WS (Android `DeviceActionExecutor` polls /api/ai/hardware/actions/pending)
+- Video generation pipeline (currently stub)
+- Dictionary backing data
+
+### P3 — Productionize
+- Double-click installer / SCM auto-register all 13 services
+- Refactor manual string-search JSON (now replaced with nlohmann::json ✅)
+- Admin-key gate for destructive endpoints
+
+## Backlog
+- Voice TTS/STT endpoint integration
+- Dream service → WS broadcast of dream narratives
+- Solitude phase transitions pushed to Android as notifications
+
+## Architecture Flow
+```
+Android App (Kotlin/Retrofit)  ──HTTPS/WS──▶  HTTPServer (port 8000)
+                                                   │
+                                                   ├── Direct Groq (WinHTTP) for chat
+                                                   └── IPC (Named Pipes) ──▶ 12 other services
+                                                                             │
+                                                                             └── SQL Server (persistent state)
+```
+
+## Environment Note (critical)
+The project is compiled and run exclusively on the **user's local Windows machine** via Visual Studio 2022. The cloud preview env cannot execute this code. All testing is manual: user rebuilds `Elle.Service.HTTP`, runs it, and reports console output / Android app behavior.
