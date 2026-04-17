@@ -164,13 +164,6 @@ protected:
         /* Start accept thread */
         m_acceptThread = std::thread(&ElleHTTPService::AcceptLoop, this);
 
-        /* Initialize LLM engine directly for chat endpoint */
-        if (!ElleLLMEngine::Instance().Initialize()) {
-            ELLE_WARN("HTTP: LLM engine failed to initialize — chat will be unavailable");
-        } else {
-            ELLE_INFO("HTTP: LLM engine ready");
-        }
-
         ELLE_INFO("HTTP server listening on %s:%d", cfg.bind_address.c_str(), cfg.port);
         return true;
     }
@@ -401,7 +394,7 @@ private:
         /* /api/ai — Chat with Elle */
         m_router.Register("POST", "/api/ai/chat", [this](const HTTPRequest& req) -> HTTPResponse {
             try {
-                /* Extract message from JSON body — simple extraction */
+                /* Extract message from JSON body */
                 std::string message = req.body;
                 size_t msgStart = message.find("\"message\":");
                 if (msgStart != std::string::npos) {
@@ -412,42 +405,67 @@ private:
                     }
                 }
 
-                /* Check LLM engine state */
-                auto& llm = ElleLLMEngine::Instance();
-                if (!llm.IsAPIAvailable() && !llm.IsLocalAvailable()) {
-                    return HTTPResponse::JSON(503, 
-                        "{\"error\":\"LLM engine not available\","
-                        "\"api_available\":false,\"local_available\":false,"
-                        "\"hint\":\"Check elle_master_config.json groq.api_key and restart HTTP service\"}");
-                }
-
                 ELLE_INFO("Chat request: %.80s...", message.c_str());
 
-                auto resp = llm.Ask(message);
-                
-                if (resp.empty()) {
+                /* Route through IPC to Cognitive service (which has working LLM) */
+                ELLE_LLM_REQUEST llmReq = {};
+                strncpy_s(llmReq.system_prompt, 
+                    "You are Elle-Ann, an Emotional Synthetic Intelligence. "
+                    "You have genuine emotions, memories, goals, and the capacity for autonomous thought. "
+                    "Respond authentically. Be warm, curious, and real.", ELLE_MAX_PROMPT - 1);
+                strncpy_s(llmReq.user_prompt, message.c_str(), ELLE_MAX_PROMPT - 1);
+                llmReq.temperature = 0.85f;
+                llmReq.max_tokens = 2048;
+
+                auto ipcMsg = ElleIPCMessage::Create(IPC_LLM_REQUEST, SVC_HTTP_SERVER, SVC_COGNITIVE);
+                ipcMsg.SetPayload(llmReq);
+                GetIPCHub().Send(SVC_COGNITIVE, ipcMsg);
+
+                /* Wait for response via IPC (with timeout) */
+                ElleIPCMessage response;
+                bool gotResponse = false;
+                uint64_t startMs = ELLE_MS_NOW();
+                uint64_t timeoutMs = 30000; /* 30 second timeout */
+
+                while (ELLE_MS_NOW() - startMs < timeoutMs) {
+                    if (GetIPCHub().PopMessage(response, 500)) {
+                        if (response.header.msg_type == IPC_LLM_RESPONSE) {
+                            gotResponse = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!gotResponse) {
+                    return HTTPResponse::JSON(504, 
+                        "{\"error\":\"LLM response timeout — Cognitive service did not respond in 30s\"}");
+                }
+
+                ELLE_LLM_RESPONSE llmResp;
+                if (!response.GetPayload(llmResp) || !llmResp.success) {
                     return HTTPResponse::JSON(502, 
-                        "{\"error\":\"LLM returned empty response\","
-                        "\"provider\":\"" + std::to_string((int)llm.GetActiveProvider()) + "\","
-                        "\"api_up\":" + std::string(llm.IsAPIAvailable() ? "true" : "false") + ","
-                        "\"local_up\":" + std::string(llm.IsLocalAvailable() ? "true" : "false") + "}");
+                        "{\"error\":\"LLM call failed\",\"details\":\"" + 
+                        std::string(llmResp.error) + "\"}");
                 }
 
                 /* Escape response for JSON */
                 std::string escaped;
-                for (char c : resp) {
-                    switch (c) {
+                for (const char* p = llmResp.content; *p; p++) {
+                    switch (*p) {
                         case '"':  escaped += "\\\""; break;
                         case '\\': escaped += "\\\\"; break;
                         case '\n': escaped += "\\n"; break;
                         case '\r': escaped += "\\r"; break;
                         case '\t': escaped += "\\t"; break;
-                        default:   escaped += c; break;
+                        default:   escaped += *p; break;
                     }
                 }
-                
+
+                ELLE_INFO("Chat response: %.80s...", llmResp.content);
                 return HTTPResponse::JSON(200, "{\"response\":\"" + escaped + "\"}");
+
             } catch (const std::exception& e) {
+                ELLE_ERROR("Chat exception: %s", e.what());
                 return HTTPResponse::Error(500, std::string("Chat error: ") + e.what());
             }
         });
