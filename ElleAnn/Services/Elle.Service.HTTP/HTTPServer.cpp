@@ -22,6 +22,7 @@
 #include <functional>
 #include <mutex>
 #include <sstream>
+#include <iomanip>
 #include <algorithm>
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -178,6 +179,14 @@ protected:
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
+        /* Cache emotion state from broadcasts */
+        if (msg.header.msg_type == IPC_EMOTION_UPDATE) {
+            ELLE_EMOTION_STATE state;
+            if (msg.GetPayload(state)) {
+                m_cachedEmotions = state;
+            }
+        }
+
         /* Broadcast to WebSocket clients when relevant */
         if (msg.header.msg_type == IPC_EMOTION_UPDATE ||
             msg.header.msg_type == IPC_LOG_ENTRY ||
@@ -197,6 +206,9 @@ private:
 
     std::vector<std::shared_ptr<WSClient>> m_wsClients;
     std::mutex m_wsMutex;
+
+    /* Cached state from IPC — no SQL needed for live queries */
+    ELLE_EMOTION_STATE m_cachedEmotions = {};
 
     void AcceptLoop() {
         while (Running()) {
@@ -417,17 +429,18 @@ private:
         /* /api/emotions — Current emotional state */
         m_router.Register("GET", "/api/emotions", [this](const HTTPRequest& req) -> HTTPResponse {
             try {
-                ELLE_EMOTION_STATE state;
-                ElleDB::GetLatestEmotionState(state);
+                /* Use cached emotion state from IPC broadcasts (in-memory, not SQL) */
                 std::ostringstream json;
-                json << "{\"valence\":" << state.valence
-                     << ",\"arousal\":" << state.arousal
-                     << ",\"dominance\":" << state.dominance
-                     << ",\"tick\":" << state.tick_count << "}";
+                json << std::fixed << std::setprecision(4)
+                     << "{\"valence\":" << m_cachedEmotions.valence
+                     << ",\"arousal\":" << m_cachedEmotions.arousal
+                     << ",\"dominance\":" << m_cachedEmotions.dominance
+                     << ",\"tick\":" << m_cachedEmotions.tick_count 
+                     << ",\"source\":\"live\"}";
                 return HTTPResponse::JSON(200, json.str());
             } catch (...) {
                 return HTTPResponse::JSON(200, 
-                    "{\"valence\":0.0,\"arousal\":0.0,\"dominance\":0.0,\"tick\":0,\"note\":\"db_unavailable\"}");
+                    "{\"valence\":0.0,\"arousal\":0.0,\"dominance\":0.0,\"tick\":0,\"note\":\"error\"}");
             }
         });
 
