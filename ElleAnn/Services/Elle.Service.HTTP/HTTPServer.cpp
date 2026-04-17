@@ -405,8 +405,27 @@ private:
                     }
                 }
 
-                auto resp = ElleLLMEngine::Instance().Ask(message);
+                /* Check LLM engine state */
+                auto& llm = ElleLLMEngine::Instance();
+                if (!llm.IsAPIAvailable() && !llm.IsLocalAvailable()) {
+                    return HTTPResponse::JSON(503, 
+                        "{\"error\":\"LLM engine not available\","
+                        "\"api_available\":false,\"local_available\":false,"
+                        "\"hint\":\"Check elle_master_config.json groq.api_key and restart HTTP service\"}");
+                }
+
+                ELLE_INFO("Chat request: %.80s...", message.c_str());
+
+                auto resp = llm.Ask(message);
                 
+                if (resp.empty()) {
+                    return HTTPResponse::JSON(502, 
+                        "{\"error\":\"LLM returned empty response\","
+                        "\"provider\":\"" + std::to_string((int)llm.GetActiveProvider()) + "\","
+                        "\"api_up\":" + std::string(llm.IsAPIAvailable() ? "true" : "false") + ","
+                        "\"local_up\":" + std::string(llm.IsLocalAvailable() ? "true" : "false") + "}");
+                }
+
                 /* Escape response for JSON */
                 std::string escaped;
                 for (char c : resp) {
