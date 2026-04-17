@@ -164,6 +164,13 @@ protected:
         /* Start accept thread */
         m_acceptThread = std::thread(&ElleHTTPService::AcceptLoop, this);
 
+        /* Initialize LLM engine directly for chat endpoint */
+        if (!ElleLLMEngine::Instance().Initialize()) {
+            ELLE_WARN("HTTP: LLM engine failed to initialize — chat will be unavailable");
+        } else {
+            ELLE_INFO("HTTP: LLM engine ready");
+        }
+
         ELLE_INFO("HTTP server listening on %s:%d", cfg.bind_address.c_str(), cfg.port);
         return true;
     }
