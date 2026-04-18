@@ -407,7 +407,14 @@ typedef enum ELLE_IPC_MSG_TYPE {
     IPC_SELF_PROMPT,
     IPC_CREATIVE_REQUEST,
     IPC_ETHICAL_QUERY,
-    IPC_LUA_EVAL
+    IPC_LUA_EVAL,
+    /* Full-brain conversational orchestration:
+     * Sent HTTPServer → Cognitive, with a JSON string payload:
+     *   {"request_id":"...","user_text":"...","conv_id":N,"user_id":"..."}
+     * Cognitive handles memory cross-reference, emotion analysis,
+     * LLM surface rendering, then replies with IPC_CHAT_RESPONSE (JSON).  */
+    IPC_CHAT_REQUEST,
+    IPC_CHAT_RESPONSE
 } ELLE_IPC_MSG_TYPE;
 
 #define ELLE_IPC_FLAG_URGENT      0x0001

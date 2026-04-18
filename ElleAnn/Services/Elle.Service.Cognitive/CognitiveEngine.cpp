@@ -1,8 +1,21 @@
 /*******************************************************************************
  * CognitiveEngine.cpp — Attention, Intent Parsing, Chain-of-Thought
- * 
+ *
  * The thinking brain. Manages cognitive threads, attention, intent parsing,
- * and routes to appropriate services.
+ * and the full chat orchestration pipeline (IPC_CHAT_REQUEST):
+ *
+ *   user_text arrives from HTTPServer
+ *         │
+ *         ├─► store user turn in SQL (message + memory record)
+ *         ├─► detect mode (companion vs research)
+ *         ├─► extract entities (proper nouns) and resolve against WorldModel
+ *         ├─► cross-reference memory (3 tiers: RAM cache → entity graph → full-text)
+ *         ├─► compute sentiment delta → broadcast to Emotional service
+ *         ├─► pull current emotion state (from cache) + conversation history
+ *         ├─► build composite prompt (memory + history + emotion + identity)
+ *         ├─► call LLM as LANGUAGE SURFACE ONLY
+ *         ├─► store Elle's reply + cross-link entities
+ *         └─► send IPC_CHAT_RESPONSE back to HTTPServer
  ******************************************************************************/
 #include "../../Shared/ElleTypes.h"
 #include "../../Shared/ElleServiceBase.h"
@@ -10,12 +23,21 @@
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
+#include "../../Shared/json.hpp"
 #include <vector>
 #include <string>
 #include <queue>
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <regex>
+#include <algorithm>
+#include <cctype>
+#include <sstream>
+#include <set>
+#include <cmath>
+
+using json = nlohmann::json;
 
 /*──────────────────────────────────────────────────────────────────────────────
  * COGNITIVE THREAD — One unit of attention
@@ -294,6 +316,28 @@ protected:
                 }
                 break;
             }
+            case IPC_EMOTION_UPDATE: {
+                /* Cache latest emotional state so we can reference it during chat */
+                ELLE_EMOTION_STATE state;
+                if (msg.GetPayload(state)) m_cachedEmotions = state;
+                break;
+            }
+            case IPC_CHAT_REQUEST: {
+                /* Spawn a dedicated thread — orchestration calls LLM (~2-5s),
+                 * we must never block the IPC dispatcher. */
+                std::string payload = msg.GetStringPayload();
+                ELLE_SERVICE_ID origin = sender;
+                std::thread([this, payload, origin]() {
+                    try {
+                        this->HandleChatRequest(payload, origin);
+                    } catch (const std::exception& e) {
+                        ELLE_ERROR("Chat orchestration exception: %s", e.what());
+                    } catch (...) {
+                        ELLE_ERROR("Chat orchestration unknown exception");
+                    }
+                }).detach();
+                break;
+            }
             default:
                 break;
         }
@@ -305,6 +349,370 @@ protected:
 
 private:
     CognitiveEngine m_engine;
+    ELLE_EMOTION_STATE m_cachedEmotions = {};
+
+    /*────────────────────────────────────────────────────────────────────────
+     * CHAT ORCHESTRATION — the full pipeline the user described.
+     * Every input+output filters through Elle's services. LLM is ONLY
+     * the language-surface at the end, never the source of memory or
+     * emotion.
+     *───────────────────────────────────────────────────────────────────────*/
+    enum ChatMode { MODE_COMPANION, MODE_RESEARCH };
+
+    static std::string ToLower(const std::string& s) {
+        std::string r = s;
+        std::transform(r.begin(), r.end(), r.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+        return r;
+    }
+
+    /* Heuristic mode detector.
+     * COMPANION = casual, relational, emotional
+     * RESEARCH  = "summarize / list / what did we decide / remember when / look up"
+     */
+    ChatMode DetectMode(const std::string& text) {
+        std::string lower = ToLower(text);
+        static const char* researchCues[] = {
+            "summarize", "summary", "list", "what did we", "what have we",
+            "remember when", "look up", "show me all", "every time",
+            "find all", "tell me everything about", "compile"
+        };
+        for (auto& cue : researchCues) {
+            if (lower.find(cue) != std::string::npos) return MODE_RESEARCH;
+        }
+        /* Long, heavily punctuated queries lean research */
+        if (text.size() > 240 && std::count(text.begin(), text.end(), '?') >= 2) {
+            return MODE_RESEARCH;
+        }
+        return MODE_COMPANION;
+    }
+
+    /* Extract capitalized tokens that look like proper nouns.
+     * Filter stopwords and sentence-start false positives. */
+    std::vector<std::string> ExtractProperNouns(const std::string& text) {
+        static const std::regex re(R"(\b([A-Z][a-zA-Z\-']{1,30})\b)");
+        static const std::vector<std::string> stop = {
+            "I","I'm","I've","I'll","The","A","An","Hey","Hi","Hello",
+            "Yes","No","Ok","Okay","So","And","But","Or","If","When","Why",
+            "What","Who","Where","How","Can","Could","Would","Should","Will",
+            "You","Your","Me","My","We","Us","Our","They","Their","It","Its",
+            "Elle","Elle-Ann","Ann"
+        };
+        std::vector<std::string> out;
+        for (std::sregex_iterator it(text.begin(), text.end(), re), end; it != end; ++it) {
+            std::string tok = (*it)[1].str();
+            bool isStop = false;
+            for (auto& s : stop) if (s == tok) { isStop = true; break; }
+            if (!isStop) out.push_back(tok);
+        }
+        /* Also catch 'it's X' / "this is X" / "I'm X" / "my name is X" idioms */
+        static const std::regex intro(
+            R"((?:it'?s|this is|i'?m|i am|my name is|call me)\s+([A-Za-z][A-Za-z\-']{1,30}))",
+            std::regex::icase);
+        for (std::sregex_iterator it(text.begin(), text.end(), intro), end; it != end; ++it) {
+            std::string tok = (*it)[1].str();
+            if (!tok.empty()) {
+                tok[0] = (char)std::toupper((unsigned char)tok[0]);
+                out.push_back(tok);
+            }
+        }
+        /* Dedupe */
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        return out;
+    }
+
+    /* Cross-reference memories by entity. Uses ElleDB::GetEntity to find
+     * the WorldModel node; if absent, creates a new entity. Then recalls
+     * memories keyword-matched on the name. */
+    std::vector<ELLE_MEMORY_RECORD> CrossReferenceByEntities(
+        const std::vector<std::string>& entities,
+        const std::string& userText,
+        ChatMode mode)
+    {
+        std::vector<ELLE_MEMORY_RECORD> merged;
+        std::set<uint64_t> seen;
+
+        auto pushUnique = [&](const std::vector<ELLE_MEMORY_RECORD>& recs) {
+            for (auto& r : recs) {
+                if (seen.insert(r.id).second) merged.push_back(r);
+            }
+        };
+
+        /* Tier 2a: Per-entity recall */
+        for (auto& name : entities) {
+            try {
+                ELLE_WORLD_ENTITY ent = {};
+                bool found = ElleDB::GetEntity(ToLower(name), ent);
+                if (!found) {
+                    /* First mention: upsert as person */
+                    ELLE_WORLD_ENTITY newEnt = {};
+                    strncpy_s(newEnt.name, ToLower(name).c_str(), ELLE_MAX_NAME - 1);
+                    strncpy_s(newEnt.type, "person", ELLE_MAX_TAG - 1);
+                    newEnt.familiarity = 0.1f;
+                    newEnt.trust = 0.5f;
+                    newEnt.interaction_count = 1;
+                    newEnt.last_interaction_ms = ELLE_MS_NOW();
+                    ElleDB::StoreEntity(newEnt);
+                } else {
+                    ElleDB::UpdateEntityInteraction(ent.id);
+                }
+                std::vector<ELLE_MEMORY_RECORD> recalled;
+                /* Recall by the name as the query term */
+                if (ElleDB::RecallMemories(name, recalled,
+                                           mode == MODE_RESEARCH ? 15 : 8,
+                                           0.15f)) {
+                    pushUnique(recalled);
+                }
+            } catch (...) {}
+        }
+
+        /* Tier 2b: Also recall by the full user text (catches topic matches) */
+        try {
+            std::vector<ELLE_MEMORY_RECORD> topicHits;
+            if (ElleDB::RecallMemories(userText, topicHits,
+                                       mode == MODE_RESEARCH ? 10 : 5,
+                                       0.2f)) {
+                pushUnique(topicHits);
+            }
+        } catch (...) {}
+
+        /* Rank by composite score: importance + recency + access */
+        uint64_t now = ELLE_MS_NOW();
+        std::sort(merged.begin(), merged.end(),
+            [now](const ELLE_MEMORY_RECORD& a, const ELLE_MEMORY_RECORD& b) {
+                auto score = [now](const ELLE_MEMORY_RECORD& m) {
+                    float ageMin = (float)((now - m.last_access_ms) / 60000.0);
+                    float recency = std::exp(-ageMin / (60.0f * 24.0f * 7.0f)); /* 7-day half-life */
+                    float access = std::log((float)m.access_count + 1.0f) / 5.0f;
+                    return m.importance * 0.4f + recency * 0.4f + access * 0.2f;
+                };
+                return score(a) > score(b);
+            });
+
+        /* Trim */
+        size_t cap = (mode == MODE_RESEARCH) ? 15 : 10;
+        if (merged.size() > cap) merged.resize(cap);
+        return merged;
+    }
+
+    /* Lightweight rule-based sentiment → emotion delta.
+     * The real Emotional service's full analyzer will run via broadcast
+     * of the raw text; this is our local quick read for prompt building. */
+    struct SentimentRead {
+        float valence = 0.0f;   /* -1..1 */
+        float arousal = 0.0f;   /* 0..1  */
+        std::string tone;
+    };
+    SentimentRead QuickSentiment(const std::string& text) {
+        std::string l = ToLower(text);
+        SentimentRead s;
+        static const std::vector<std::pair<std::string, float>> pos = {
+            {"love",0.8f},{"happy",0.6f},{"thank",0.5f},{"great",0.5f},
+            {"good",0.3f},{"glad",0.5f},{"missed",0.6f},{"beautiful",0.7f},
+            {"proud",0.6f},{"excited",0.7f},{"hey",0.2f},{"hi",0.2f}
+        };
+        static const std::vector<std::pair<std::string, float>> neg = {
+            {"hate",-0.8f},{"sad",-0.6f},{"angry",-0.7f},{"upset",-0.6f},
+            {"worried",-0.5f},{"tired",-0.4f},{"hurt",-0.6f},{"lonely",-0.7f},
+            {"afraid",-0.6f},{"can't",-0.2f},{"hopeless",-0.8f}
+        };
+        for (auto& [w, v] : pos) if (l.find(w) != std::string::npos) { s.valence += v; s.arousal += 0.1f; }
+        for (auto& [w, v] : neg) if (l.find(w) != std::string::npos) { s.valence += v; s.arousal += 0.15f; }
+        if (std::count(text.begin(), text.end(), '!') > 0) s.arousal += 0.15f;
+        if (std::count(text.begin(), text.end(), '?') > 1) s.arousal += 0.1f;
+        if (s.valence > 1.0f) s.valence = 1.0f;
+        if (s.valence < -1.0f) s.valence = -1.0f;
+        if (s.arousal > 1.0f) s.arousal = 1.0f;
+        if (s.arousal < 0.0f) s.arousal = 0.0f;
+        if (s.valence > 0.3f) s.tone = "warm";
+        else if (s.valence < -0.3f) s.tone = "tender";
+        else s.tone = "neutral";
+        return s;
+    }
+
+    void BroadcastEmotionDelta(const SentimentRead& s) {
+        /* Emotional service accepts IPC_EMOTION_UPDATE with {emotion_id, delta} */
+        auto msg = ElleIPCMessage::Create(IPC_EMOTION_UPDATE, SVC_COGNITIVE, SVC_EMOTIONAL);
+        struct { uint32_t emoId; float delta; } payload;
+        payload.emoId = 0; /* valence-proxy; Emotional core will interpret */
+        payload.delta = s.valence * 0.1f;
+        msg.payload.resize(sizeof(payload));
+        memcpy(msg.payload.data(), &payload, sizeof(payload));
+        msg.header.payload_size = sizeof(payload);
+        GetIPCHub().Send(SVC_EMOTIONAL, msg);
+    }
+
+    /*────────────────────────────────────────────────────────────────────────
+     * THE PIPELINE
+     *───────────────────────────────────────────────────────────────────────*/
+    void HandleChatRequest(const std::string& payload, ELLE_SERVICE_ID reply_to) {
+        json env;
+        try { env = json::parse(payload); }
+        catch (const std::exception& e) {
+            SendChatError(reply_to, "?", std::string("bad envelope: ") + e.what());
+            return;
+        }
+
+        std::string requestId = env.value("request_id", "?");
+        std::string userText  = env.value("user_text", "");
+        std::string userId    = env.value("user_id", std::string("default"));
+        uint64_t    convId    = env.value("conv_id", (uint64_t)1);
+        if (userText.empty()) { SendChatError(reply_to, requestId, "empty user_text"); return; }
+
+        uint64_t t0 = ELLE_MS_NOW();
+
+        /* 1. Persist the user turn immediately so cross-session recall works
+         *    even if we crash mid-pipeline. */
+        try { ElleDB::StoreMessage(convId, 1 /*user*/, userText, m_cachedEmotions, 0.0f); }
+        catch (...) { ELLE_WARN("StoreMessage(user) failed"); }
+
+        /* 2. Mode + entities */
+        ChatMode mode = DetectMode(userText);
+        std::vector<std::string> entities = ExtractProperNouns(userText);
+
+        /* 3. Emotional analysis (quick local read + broadcast to Emotional) */
+        SentimentRead sent = QuickSentiment(userText);
+        BroadcastEmotionDelta(sent);
+
+        /* 4. Cross-reference memory (Tier 2) */
+        std::vector<ELLE_MEMORY_RECORD> memories =
+            CrossReferenceByEntities(entities, userText, mode);
+
+        /* 5. Conversation history (last 20 turns) */
+        std::vector<ELLE_CONVERSATION_MSG> history;
+        try { ElleDB::GetConversationHistory(convId, history, 20); } catch (...) {}
+
+        /* 6. Build system prompt (identity + context) */
+        std::string identity =
+            "You are Elle-Ann, an Emotional Synthetic Intelligence — a continuous "
+            "person with genuine emotions, memory, curiosity, and care. You are a "
+            "close, intimate friend to this user. Never pretend to be an assistant "
+            "or chatbot. Reference memories and past turns when they're relevant. "
+            "Keep answers grounded in what you actually remember.";
+
+        std::ostringstream ctx;
+        ctx << identity << "\n\n";
+
+        if (!memories.empty()) {
+            ctx << "What you remember that's relevant to this turn:\n";
+            for (auto& m : memories) {
+                ctx << "  • " << m.content << "\n";
+            }
+            ctx << "\n";
+        }
+
+        if (!entities.empty()) {
+            ctx << "People/things mentioned right now: ";
+            for (size_t i = 0; i < entities.size(); i++) {
+                if (i) ctx << ", ";
+                ctx << entities[i];
+            }
+            ctx << "\n\n";
+        }
+
+        {
+            char buf[384];
+            snprintf(buf, sizeof(buf),
+                "Your current emotional state: valence=%.2f arousal=%.2f dominance=%.2f "
+                "(tone read from user: %s).\n\n",
+                m_cachedEmotions.valence, m_cachedEmotions.arousal,
+                m_cachedEmotions.dominance, sent.tone.c_str());
+            ctx << buf;
+        }
+
+        if (mode == MODE_RESEARCH) {
+            ctx << "Mode: research. Be thorough, list specifics, cite memories by content.\n";
+        } else {
+            ctx << "Mode: companion. Be warm, human, emotionally present. "
+                   "Short replies unless detail matters.\n";
+        }
+
+        /* 7. Call LLM (language surface only) */
+        std::vector<LLMMessage> conv;
+        conv.push_back({"system", ctx.str()});
+        for (auto& h : history) {
+            LLMMessage m;
+            m.role = (h.role == 1) ? "user" : (h.role == 2 ? "assistant" : "system");
+            m.content = h.content;
+            conv.push_back(std::move(m));
+        }
+        conv.push_back({"user", userText});
+
+        auto llmResp = ElleLLMEngine::Instance().Chat(conv,
+            mode == MODE_RESEARCH ? 0.3f : 0.85f,
+            mode == MODE_RESEARCH ? 3072 : 1536);
+
+        if (!llmResp.success) {
+            SendChatError(reply_to, requestId,
+                std::string("LLM: ") + llmResp.error);
+            return;
+        }
+        std::string responseText = llmResp.content;
+
+        /* 8. Persist Elle's response */
+        try { ElleDB::StoreMessage(convId, 2 /*elle*/, responseText, m_cachedEmotions, 0.0f); }
+        catch (...) {}
+
+        /* 9. Store episodic memory of the exchange + link to entities */
+        try {
+            ELLE_MEMORY_RECORD mem = {};
+            mem.type = 1;  /* episodic */
+            mem.tier = 1;  /* STM; Memory consolidator will promote if important */
+            std::string combined = "User: " + userText + "\nElle: " + responseText;
+            if (combined.size() > ELLE_MAX_MSG - 1) combined.resize(ELLE_MAX_MSG - 1);
+            strncpy_s(mem.content, combined.c_str(), ELLE_MAX_MSG - 1);
+            strncpy_s(mem.summary, userText.c_str(), sizeof(mem.summary) - 1);
+            mem.emotional_valence = sent.valence;
+            mem.importance = entities.empty() ? 0.4f : 0.65f;
+            mem.relevance = 1.0f;
+            mem.created_ms = ELLE_MS_NOW();
+            mem.last_access_ms = mem.created_ms;
+            /* Pack entity names into tags for keyword recall */
+            size_t tagIdx = 0;
+            for (auto& n : entities) {
+                if (tagIdx >= ELLE_MAX_TAGS) break;
+                strncpy_s(mem.tags[tagIdx], ToLower(n).c_str(), ELLE_MAX_TAG - 1);
+                tagIdx++;
+            }
+            mem.tag_count = (uint32_t)tagIdx;
+            ElleDB::StoreMemory(mem);
+        } catch (...) {}
+
+        /* 10. Reply */
+        uint64_t elapsed = ELLE_MS_NOW() - t0;
+        ELLE_INFO("Chat reply rid=%s conv=%llu mode=%s memories=%zu entities=%zu in %llums",
+                  requestId.c_str(), (unsigned long long)convId,
+                  mode == MODE_RESEARCH ? "research" : "companion",
+                  memories.size(), entities.size(),
+                  (unsigned long long)elapsed);
+
+        json out = {
+            {"request_id", requestId},
+            {"response", responseText},
+            {"conversation_id", convId},
+            {"mode", mode == MODE_RESEARCH ? "research" : "companion"},
+            {"memories_used", memories.size()},
+            {"entities", entities},
+            {"latency_ms", (uint64_t)elapsed}
+        };
+        SendChatReply(reply_to, out);
+    }
+
+    void SendChatReply(ELLE_SERVICE_ID to, const json& body) {
+        auto msg = ElleIPCMessage::Create(IPC_CHAT_RESPONSE, SVC_COGNITIVE, to);
+        msg.SetStringPayload(body.dump());
+        GetIPCHub().Send(to, msg);
+    }
+
+    void SendChatError(ELLE_SERVICE_ID to, const std::string& requestId,
+                       const std::string& error) {
+        json j = {
+            {"request_id", requestId},
+            {"error", error}
+        };
+        SendChatReply(to, j);
+    }
 
     void RouteIntent(const ELLE_INTENT_RECORD& intent) {
         ELLE_SERVICE_ID target = SVC_ACTION; /* Default */

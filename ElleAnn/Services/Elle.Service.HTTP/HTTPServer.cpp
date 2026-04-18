@@ -40,6 +40,8 @@
 #include <regex>
 #include <atomic>
 #include <cstring>
+#include <chrono>
+#include <condition_variable>
 
 using json = nlohmann::json;
 
@@ -441,6 +443,52 @@ static bool WsReadFrame(SOCKET s, std::string& outPayload, int& outOpcode) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
+ * CHAT REQUEST CORRELATION MAP
+ *   HTTPServer sends IPC_CHAT_REQUEST → Cognitive, then blocks until a matching
+ *   IPC_CHAT_RESPONSE arrives (correlated by request_id). OnMessage is a
+ *   different thread, so we signal via condition_variable.
+ *──────────────────────────────────────────────────────────────────────────────*/
+struct PendingChat {
+    std::mutex              m;
+    std::condition_variable cv;
+    bool                    done = false;
+    json                    result;
+};
+
+class ChatCorrelator {
+public:
+    std::shared_ptr<PendingChat> Register(const std::string& requestId) {
+        auto p = std::make_shared<PendingChat>();
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_map[requestId] = p;
+        return p;
+    }
+    void Complete(const std::string& requestId, const json& result) {
+        std::shared_ptr<PendingChat> p;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            auto it = m_map.find(requestId);
+            if (it == m_map.end()) return;
+            p = it->second;
+            m_map.erase(it);
+        }
+        {
+            std::lock_guard<std::mutex> lk(p->m);
+            p->result = result;
+            p->done = true;
+        }
+        p->cv.notify_all();
+    }
+    void Cancel(const std::string& requestId) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_map.erase(requestId);
+    }
+private:
+    std::mutex m_mutex;
+    std::unordered_map<std::string, std::shared_ptr<PendingChat>> m_map;
+};
+
+/*──────────────────────────────────────────────────────────────────────────────
  * HTTP SERVER SERVICE
  *──────────────────────────────────────────────────────────────────────────────*/
 class ElleHTTPService : public ElleServiceBase {
@@ -522,6 +570,21 @@ protected:
             }
         }
 
+        /* Correlate chat responses from Cognitive */
+        if (msg.header.msg_type == IPC_CHAT_RESPONSE) {
+            try {
+                std::string s = msg.GetStringPayload();
+                json j = json::parse(s);
+                std::string rid = j.value("request_id", "");
+                if (!rid.empty()) {
+                    m_chatCorrelator.Complete(rid, j);
+                }
+            } catch (const std::exception& e) {
+                ELLE_ERROR("IPC_CHAT_RESPONSE parse error: %s", e.what());
+            }
+            return;
+        }
+
         if (msg.header.msg_type == IPC_EMOTION_UPDATE ||
             msg.header.msg_type == IPC_LOG_ENTRY ||
             msg.header.msg_type == IPC_TRUST_UPDATE) {
@@ -541,6 +604,7 @@ private:
     std::vector<std::shared_ptr<WSClient>> m_wsClients;
     std::mutex m_wsMutex;
     std::atomic<uint64_t> m_requestSeq{0};
+    ChatCorrelator m_chatCorrelator;
 
     ELLE_EMOTION_STATE m_cachedEmotions = {};
 
@@ -854,41 +918,50 @@ private:
             WsSendText(client->socket, client->sendMutex,
                        R"({"type":"pong"})");
         } else if (type == "chat") {
-            /* WS-pushed chat — run LLM with history and reply */
+            /* WS chat → route through Cognitive like the REST endpoint */
             std::string message = msg.value("message", "");
             uint64_t convId = msg.value("conversation_id", (uint64_t)1);
-            std::string basePrompt = "You are Elle-Ann, an Emotional Synthetic Intelligence. "
-                                     "Be warm, curious, authentic. Reference past turns when natural.";
+            std::string userId = msg.value("user_id", std::string("default"));
+            std::string clientReqId = msg.value("request_id", "");
 
-            std::vector<LLMMsg> convo;
-            convo.push_back({"system", basePrompt});
-            try {
-                std::vector<ELLE_CONVERSATION_MSG> history;
-                if (ElleDB::GetConversationHistory(convId, history, 20)) {
-                    for (auto& h : history) {
-                        LLMMsg m;
-                        m.role = (h.role == 1) ? "user" : (h.role == 2 ? "assistant" : "system");
-                        m.content = h.content;
-                        convo.push_back(std::move(m));
-                    }
-                }
-            } catch (...) {}
-            convo.push_back({"user", message});
+            std::string requestId = "ws-" + std::to_string(ELLE_MS_NOW()) +
+                                    "-" + std::to_string(++m_requestSeq);
 
-            std::string response, err;
-            bool ok = CallGroqDirect(convo, response, err);
+            json env = {
+                {"request_id", requestId},
+                {"user_text", message},
+                {"user_id", userId},
+                {"conv_id", convId},
+                {"origin", "ws"}
+            };
+
+            auto pending = m_chatCorrelator.Register(requestId);
+            auto ipcMsg = ElleIPCMessage::Create(IPC_CHAT_REQUEST, SVC_HTTP_SERVER, SVC_COGNITIVE);
+            ipcMsg.SetStringPayload(env.dump());
             json out;
             out["type"] = "chat_response";
-            out["request_id"] = msg.value("request_id", "");
+            out["request_id"] = clientReqId;
             out["conversation_id"] = convId;
-            if (ok) {
-                out["response"] = response;
-                try {
-                    ElleDB::StoreMessage(convId, 1, message, m_cachedEmotions, 0.0f);
-                    ElleDB::StoreMessage(convId, 2, response, m_cachedEmotions, 0.0f);
-                } catch (...) {}
+
+            if (!GetIPCHub().Send(SVC_COGNITIVE, ipcMsg)) {
+                m_chatCorrelator.Cancel(requestId);
+                out["error"] = "Cognitive service unreachable";
+                WsSendText(client->socket, client->sendMutex, out.dump());
+                return;
+            }
+
+            std::unique_lock<std::mutex> lk(pending->m);
+            bool ok = pending->cv.wait_for(lk, std::chrono::seconds(45),
+                                           [&]{ return pending->done; });
+            if (!ok) {
+                m_chatCorrelator.Cancel(requestId);
+                out["error"] = "Cognitive timeout";
             } else {
-                out["error"] = err;
+                json r = pending->result;
+                if (r.contains("response")) out["response"] = r["response"];
+                if (r.contains("error"))    out["error"] = r["error"];
+                if (r.contains("mode"))     out["mode"] = r["mode"];
+                if (r.contains("memories_used")) out["memories_used"] = r["memories_used"];
             }
             WsSendText(client->socket, client->sendMutex, out.dump());
         } else if (type == "subscribe") {
@@ -1124,15 +1197,22 @@ private:
         });
 
         /* ============== AI ============== */
+        /*
+         * CHAT PIPELINE (not a direct LLM call):
+         *   App → HTTPServer → [IPC_CHAT_REQUEST] → Cognitive
+         *   Cognitive orchestrates: memory cross-ref, emotion analysis,
+         *   intent formation, emotional coloring, LLM language surface,
+         *   memory persistence.
+         *   Cognitive → [IPC_CHAT_RESPONSE] → HTTPServer → App
+         * HTTPServer never touches the LLM or SQL for chat. Everything
+         * flows through Elle's services so emotion + memory stay coherent.
+         */
         m_router.Register("POST", "/api/ai/chat", [this](const HTTPRequest& req) {
             try {
                 json body = req.BodyJSON();
-                std::string message = body.value("message", body.value("prompt", ""));
-                if (message.empty()) return HTTPResponse::Err(400, "missing 'message'");
+                std::string userText = body.value("message", body.value("prompt", ""));
+                if (userText.empty()) return HTTPResponse::Err(400, "missing 'message'");
 
-                /* Derive a stable conversation id. Accept any of the common names
-                 * the Android app might send; fall back to a single default so
-                 * memory persists across turns even if the app omits the id.  */
                 uint64_t convId = 1;
                 if (body.contains("conversation_id") && body["conversation_id"].is_number_integer())
                     convId = body["conversation_id"].get<uint64_t>();
@@ -1141,96 +1221,41 @@ private:
                 else if (body.contains("session_id") && body["session_id"].is_number_integer())
                     convId = body["session_id"].get<uint64_t>();
 
-                std::string basePrompt = body.value("system_prompt",
-                    "You are Elle-Ann, an Emotional Synthetic Intelligence. "
-                    "You have genuine emotions, memories, goals, and the capacity for autonomous thought. "
-                    "Respond authentically. Be warm, curious, and real. Stay in character as a single, "
-                    "continuous person — reference earlier things you and the user have said when it fits.");
+                std::string userId = body.value("user_id", body.value("userId", std::string("default")));
+                std::string requestId = "req-" + std::to_string(ELLE_MS_NOW()) +
+                                        "-" + std::to_string(++m_requestSeq);
 
-                /* 1. Pull relevant long-term memories to prime Elle's context. */
-                std::string memoryContext;
-                try {
-                    std::vector<ELLE_MEMORY_RECORD> recalled;
-                    if (ElleDB::RecallMemories(message, recalled, 5, 0.2f) && !recalled.empty()) {
-                        memoryContext = "\n\nRelevant memories from your past:\n";
-                        for (auto& m : recalled) {
-                            memoryContext += "- ";
-                            memoryContext += m.content;
-                            memoryContext += "\n";
-                        }
-                    }
-                } catch (...) {}
-
-                std::string emotionContext;
-                {
-                    char buf[256];
-                    snprintf(buf, sizeof(buf),
-                        "\n\nCurrent emotional state: valence=%.2f arousal=%.2f dominance=%.2f",
-                        m_cachedEmotions.valence, m_cachedEmotions.arousal, m_cachedEmotions.dominance);
-                    emotionContext = buf;
-                }
-
-                std::vector<LLMMsg> convo;
-                convo.push_back({"system", basePrompt + memoryContext + emotionContext});
-
-                /* 2. Pull recent conversation history from SQL. */
-                try {
-                    std::vector<ELLE_CONVERSATION_MSG> history;
-                    if (ElleDB::GetConversationHistory(convId, history, 20)) {
-                        for (auto& h : history) {
-                            LLMMsg m;
-                            m.role = (h.role == 1) ? "user" : (h.role == 2 ? "assistant" : "system");
-                            m.content = h.content;
-                            convo.push_back(std::move(m));
-                        }
-                    }
-                } catch (...) {}
-
-                /* 3. Append the new user turn. */
-                convo.push_back({"user", message});
-
-                ELLE_INFO("Chat conv=%llu history=%zu msg=%.60s...",
-                          (unsigned long long)convId, convo.size() - 2, message.c_str());
-
-                /* 4. Call Groq with full history. */
-                std::string response, err;
-                bool ok = CallGroqDirect(convo, response, err);
-                if (!ok) {
-                    ELLE_ERROR("Groq call failed: %s", err.c_str());
-                    json j = {{"error", "LLM failed"}, {"details", err}};
-                    return HTTPResponse::JSON(502, j.dump());
-                }
-
-                /* 5. Persist BOTH sides of the turn so the next call sees them. */
-                try {
-                    ElleDB::StoreMessage(convId, 1 /*user*/, message, m_cachedEmotions, 0.0f);
-                    ElleDB::StoreMessage(convId, 2 /*elle*/, response, m_cachedEmotions, 0.0f);
-                } catch (...) {
-                    ELLE_WARN("Failed to persist chat message to SQL (continuing)");
-                }
-
-                /* 6. Store a lightweight memory record of the exchange for future recall. */
-                try {
-                    ELLE_MEMORY_RECORD mem = {};
-                    mem.type = 1;        /* episodic */
-                    mem.tier = 1;        /* short-term */
-                    std::string combined = "User: " + message + "\nElle: " + response;
-                    strncpy_s(mem.content, combined.c_str(), ELLE_MAX_MSG - 1);
-                    strncpy_s(mem.summary, message.c_str(), sizeof(mem.summary) - 1);
-                    mem.emotional_valence = m_cachedEmotions.valence;
-                    mem.importance = 0.5f;
-                    mem.relevance = 1.0f;
-                    mem.created_ms = ELLE_MS_NOW();
-                    mem.last_access_ms = mem.created_ms;
-                    ElleDB::StoreMemory(mem);
-                } catch (...) {}
-
-                json j = {
-                    {"response", response},
-                    {"conversation_id", convId},
-                    {"model", "groq/llama-3.3-70b-versatile"}
+                json env = {
+                    {"request_id", requestId},
+                    {"user_text", userText},
+                    {"user_id", userId},
+                    {"conv_id", convId},
+                    {"origin", "http"}
                 };
-                return HTTPResponse::OK(j);
+
+                auto pending = m_chatCorrelator.Register(requestId);
+
+                auto ipcMsg = ElleIPCMessage::Create(IPC_CHAT_REQUEST, SVC_HTTP_SERVER, SVC_COGNITIVE);
+                ipcMsg.SetStringPayload(env.dump());
+                if (!GetIPCHub().Send(SVC_COGNITIVE, ipcMsg)) {
+                    m_chatCorrelator.Cancel(requestId);
+                    return HTTPResponse::Err(503, "Cognitive service unreachable");
+                }
+
+                ELLE_INFO("Chat→Cognitive conv=%llu rid=%s msg=%.60s...",
+                          (unsigned long long)convId, requestId.c_str(), userText.c_str());
+
+                std::unique_lock<std::mutex> lk(pending->m);
+                bool ok = pending->cv.wait_for(lk, std::chrono::seconds(45),
+                                               [&]{ return pending->done; });
+                if (!ok) {
+                    m_chatCorrelator.Cancel(requestId);
+                    return HTTPResponse::Err(504, "Cognitive timeout (45s)");
+                }
+
+                json out = pending->result;
+                out.erase("request_id");
+                return HTTPResponse::OK(out);
             } catch (const std::exception& e) {
                 return HTTPResponse::Err(500, e.what());
             }

@@ -30,7 +30,26 @@ Build an autonomous agentic emotional synthetic intelligence in C++, MASM x64, a
 - Emotions endpoint cached from IPC (no more garbage mem)
 - Heartbeat auto-reply in ElleServiceBase
 
-### Phase 5 — Android App Integration (Feb 2026, this session) ✅
+### Phase 6 — Full Chat Pipeline Through Services (Feb 2026, this session) ✅
+
+Replaced direct Groq call with proper service orchestration:
+- HTTPServer `/api/ai/chat` & WS chat → send `IPC_CHAT_REQUEST` (JSON) to Cognitive
+- Cognitive `HandleChatRequest` executes 10-step pipeline:
+  1. Store user turn in SQL (Messages)
+  2. Detect mode (companion vs research) by heuristic
+  3. Extract proper nouns + parse "it's X" idioms
+  4. Cross-reference memories (entity graph + topic search; weighted by importance × recency × access)
+  5. Quick sentiment → broadcast emotion delta to Emotional service
+  6. Pull conversation history (20 turns)
+  7. Build composite system prompt (identity + memories + entities + emotion + mode)
+  8. Call LLM as language surface only
+  9. Store Elle's reply in SQL
+  10. Store tagged episodic memory record (tags=entities) → enables future cross-ref
+- HTTPServer blocks on `ChatCorrelator` with request_id correlation (45s timeout)
+- LLM no longer owns memory — SQL does
+- Details in `/app/ElleAnn/CHAT_PIPELINE.md`
+
+## Phase 5 — Android App Integration (Feb 2026, earlier this session) ✅
 - **Vendored `nlohmann/json.hpp`** into `Shared/json.hpp`
 - **Full rewrite of `HTTPServer.cpp`** (1453 LOC):
   - Regex-based path dispatcher with `{placeholders}`
