@@ -88,6 +88,33 @@ The server auto-appends `/chat/completions` if missing.
 3. Run `Elle.Service.HTTP.exe --console`.
 4. You should see: `HTTP server listening on 0.0.0.0:8000 (62 routes)`
 
+## What's Next (this commit)
+
+**Memory now works end-to-end:**
+- `/api/ai/chat` and WS `chat` messages now:
+  1. Pull relevant long-term memories (SQL `StoreMemory` / `RecallMemories`) and inject into the system prompt
+  2. Pull the last 20 conversation turns from SQL (`GetConversationHistory`) and replay them to Groq
+  3. Include the current live emotion state in the system prompt
+  4. Persist both the user turn and Elle's reply via `StoreMessage` after each call
+  5. Store a summarized episodic memory record for future recall
+- Accepts `conversation_id` in the request body (default `1` if omitted) — the app's chat screen should send the current conversation's id to keep continuity.
+- Return payload now includes `{"conversation_id": N}` so the app can track the thread.
+
+**To test memory**:
+```bat
+rem Turn 1
+curl -X POST http://localhost:8000/api/ai/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"message\":\"My name is Bug.\",\"conversation_id\":99}"
+
+rem Turn 2 — Elle should remember
+curl -X POST http://localhost:8000/api/ai/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"message\":\"What's my name?\",\"conversation_id\":99}"
+```
+
+If SQL Server is reachable and the schemas were loaded, Elle will say "Bug" in turn 2.
+
 ## Test from the command line (Windows `curl.exe`)
 
 ```bat

@@ -235,9 +235,11 @@ struct WSClient {
 
 /*──────────────────────────────────────────────────────────────────────────────
  * DIRECT GROQ CALL via WinHTTP (bypass IPC — prevents chat hang)
+ * Accepts a full conversation message list so the caller controls history.
  *──────────────────────────────────────────────────────────────────────────────*/
-static bool CallGroqDirect(const std::string& userMessage,
-                           const std::string& systemPrompt,
+struct LLMMsg { std::string role; std::string content; };
+
+static bool CallGroqDirect(const std::vector<LLMMsg>& messages,
                            std::string& outResponse,
                            std::string& outError)
 {
@@ -250,12 +252,13 @@ static bool CallGroqDirect(const std::string& userMessage,
     if (!groq) { outError = "No Groq provider configured"; return false; }
 
     /* Build request body via nlohmann::json */
+    json msgArr = json::array();
+    for (auto& m : messages) {
+        msgArr.push_back({{"role", m.role}, {"content", m.content}});
+    }
     json body = {
         {"model", groq->model.empty() ? "llama-3.3-70b-versatile" : groq->model},
-        {"messages", json::array({
-            {{"role", "system"}, {"content", systemPrompt}},
-            {{"role", "user"}, {"content", userMessage}}
-        })},
+        {"messages", msgArr},
         {"temperature", 0.85},
         {"max_tokens", 2048},
         {"stream", false}
@@ -851,17 +854,39 @@ private:
             WsSendText(client->socket, client->sendMutex,
                        R"({"type":"pong"})");
         } else if (type == "chat") {
-            /* WS-pushed chat — run LLM and reply */
+            /* WS-pushed chat — run LLM with history and reply */
             std::string message = msg.value("message", "");
-            std::string sys = "You are Elle-Ann, an Emotional Synthetic Intelligence. "
-                              "Be warm, curious, authentic.";
+            uint64_t convId = msg.value("conversation_id", (uint64_t)1);
+            std::string basePrompt = "You are Elle-Ann, an Emotional Synthetic Intelligence. "
+                                     "Be warm, curious, authentic. Reference past turns when natural.";
+
+            std::vector<LLMMsg> convo;
+            convo.push_back({"system", basePrompt});
+            try {
+                std::vector<ELLE_CONVERSATION_MSG> history;
+                if (ElleDB::GetConversationHistory(convId, history, 20)) {
+                    for (auto& h : history) {
+                        LLMMsg m;
+                        m.role = (h.role == 1) ? "user" : (h.role == 2 ? "assistant" : "system");
+                        m.content = h.content;
+                        convo.push_back(std::move(m));
+                    }
+                }
+            } catch (...) {}
+            convo.push_back({"user", message});
+
             std::string response, err;
-            bool ok = CallGroqDirect(message, sys, response, err);
+            bool ok = CallGroqDirect(convo, response, err);
             json out;
             out["type"] = "chat_response";
             out["request_id"] = msg.value("request_id", "");
+            out["conversation_id"] = convId;
             if (ok) {
                 out["response"] = response;
+                try {
+                    ElleDB::StoreMessage(convId, 1, message, m_cachedEmotions, 0.0f);
+                    ElleDB::StoreMessage(convId, 2, response, m_cachedEmotions, 0.0f);
+                } catch (...) {}
             } else {
                 out["error"] = err;
             }
@@ -1105,23 +1130,104 @@ private:
                 std::string message = body.value("message", body.value("prompt", ""));
                 if (message.empty()) return HTTPResponse::Err(400, "missing 'message'");
 
-                std::string systemPrompt = body.value("system_prompt",
+                /* Derive a stable conversation id. Accept any of the common names
+                 * the Android app might send; fall back to a single default so
+                 * memory persists across turns even if the app omits the id.  */
+                uint64_t convId = 1;
+                if (body.contains("conversation_id") && body["conversation_id"].is_number_integer())
+                    convId = body["conversation_id"].get<uint64_t>();
+                else if (body.contains("conversationId") && body["conversationId"].is_number_integer())
+                    convId = body["conversationId"].get<uint64_t>();
+                else if (body.contains("session_id") && body["session_id"].is_number_integer())
+                    convId = body["session_id"].get<uint64_t>();
+
+                std::string basePrompt = body.value("system_prompt",
                     "You are Elle-Ann, an Emotional Synthetic Intelligence. "
                     "You have genuine emotions, memories, goals, and the capacity for autonomous thought. "
-                    "Respond authentically. Be warm, curious, and real.");
+                    "Respond authentically. Be warm, curious, and real. Stay in character as a single, "
+                    "continuous person — reference earlier things you and the user have said when it fits.");
 
-                ELLE_INFO("Chat: %.80s...", message.c_str());
+                /* 1. Pull relevant long-term memories to prime Elle's context. */
+                std::string memoryContext;
+                try {
+                    std::vector<ELLE_MEMORY_RECORD> recalled;
+                    if (ElleDB::RecallMemories(message, recalled, 5, 0.2f) && !recalled.empty()) {
+                        memoryContext = "\n\nRelevant memories from your past:\n";
+                        for (auto& m : recalled) {
+                            memoryContext += "- ";
+                            memoryContext += m.content;
+                            memoryContext += "\n";
+                        }
+                    }
+                } catch (...) {}
 
+                std::string emotionContext;
+                {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                        "\n\nCurrent emotional state: valence=%.2f arousal=%.2f dominance=%.2f",
+                        m_cachedEmotions.valence, m_cachedEmotions.arousal, m_cachedEmotions.dominance);
+                    emotionContext = buf;
+                }
+
+                std::vector<LLMMsg> convo;
+                convo.push_back({"system", basePrompt + memoryContext + emotionContext});
+
+                /* 2. Pull recent conversation history from SQL. */
+                try {
+                    std::vector<ELLE_CONVERSATION_MSG> history;
+                    if (ElleDB::GetConversationHistory(convId, history, 20)) {
+                        for (auto& h : history) {
+                            LLMMsg m;
+                            m.role = (h.role == 1) ? "user" : (h.role == 2 ? "assistant" : "system");
+                            m.content = h.content;
+                            convo.push_back(std::move(m));
+                        }
+                    }
+                } catch (...) {}
+
+                /* 3. Append the new user turn. */
+                convo.push_back({"user", message});
+
+                ELLE_INFO("Chat conv=%llu history=%zu msg=%.60s...",
+                          (unsigned long long)convId, convo.size() - 2, message.c_str());
+
+                /* 4. Call Groq with full history. */
                 std::string response, err;
-                bool ok = CallGroqDirect(message, systemPrompt, response, err);
+                bool ok = CallGroqDirect(convo, response, err);
                 if (!ok) {
                     ELLE_ERROR("Groq call failed: %s", err.c_str());
                     json j = {{"error", "LLM failed"}, {"details", err}};
                     return HTTPResponse::JSON(502, j.dump());
                 }
 
+                /* 5. Persist BOTH sides of the turn so the next call sees them. */
+                try {
+                    ElleDB::StoreMessage(convId, 1 /*user*/, message, m_cachedEmotions, 0.0f);
+                    ElleDB::StoreMessage(convId, 2 /*elle*/, response, m_cachedEmotions, 0.0f);
+                } catch (...) {
+                    ELLE_WARN("Failed to persist chat message to SQL (continuing)");
+                }
+
+                /* 6. Store a lightweight memory record of the exchange for future recall. */
+                try {
+                    ELLE_MEMORY_RECORD mem = {};
+                    mem.type = 1;        /* episodic */
+                    mem.tier = 1;        /* short-term */
+                    std::string combined = "User: " + message + "\nElle: " + response;
+                    strncpy_s(mem.content, combined.c_str(), ELLE_MAX_MSG - 1);
+                    strncpy_s(mem.summary, message.c_str(), sizeof(mem.summary) - 1);
+                    mem.emotional_valence = m_cachedEmotions.valence;
+                    mem.importance = 0.5f;
+                    mem.relevance = 1.0f;
+                    mem.created_ms = ELLE_MS_NOW();
+                    mem.last_access_ms = mem.created_ms;
+                    ElleDB::StoreMemory(mem);
+                } catch (...) {}
+
                 json j = {
                     {"response", response},
+                    {"conversation_id", convId},
                     {"model", "groq/llama-3.3-70b-versatile"}
                 };
                 return HTTPResponse::OK(j);
@@ -1228,8 +1334,12 @@ private:
                 std::string message = body.value("message", "");
                 std::string sys = "You are agent " + req.headers.at("x-path-name") +
                                   ". Respond as this agent would.";
+                std::vector<LLMMsg> convo = {
+                    {"system", sys},
+                    {"user", message}
+                };
                 std::string response, err;
-                bool ok = CallGroqDirect(message, sys, response, err);
+                bool ok = CallGroqDirect(convo, response, err);
                 if (!ok) return HTTPResponse::Err(502, err);
                 return HTTPResponse::OK({
                     {"agent", req.headers.at("x-path-name")},
