@@ -487,7 +487,7 @@ bool ElleIPCHub::ConnectTo(ELLE_SERVICE_ID target, uint32_t timeoutMs) {
 bool ElleIPCHub::Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg) {
     m_sent++;
 
-    /* Try client connection first */
+    /* Try existing client connection first */
     {
         std::lock_guard<std::mutex> lock(m_clientMutex);
         auto it = m_clients.find(target);
@@ -497,7 +497,21 @@ bool ElleIPCHub::Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg) {
     }
 
     /* Fall back to server (if target connected as client to us) */
-    return m_server.Send(target, msg);
+    if (m_server.Send(target, msg)) return true;
+
+    /* Last resort — lazy reconnect. We may have missed the startup window,
+     * the peer may have restarted, or this target wasn't declared as a
+     * dependency. Try to open a client pipe now with a short timeout and
+     * send over it. This is what lets chat recover after Cognitive comes
+     * up late or gets restarted. */
+    if (ConnectTo(target, 1500)) {
+        std::lock_guard<std::mutex> lock(m_clientMutex);
+        auto it = m_clients.find(target);
+        if (it != m_clients.end() && it->second->IsConnected()) {
+            return it->second->Send(msg);
+        }
+    }
+    return false;
 }
 
 void ElleIPCHub::Broadcast(const ElleIPCMessage& msg) {
