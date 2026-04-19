@@ -593,7 +593,10 @@ protected:
     }
 
     std::vector<ELLE_SERVICE_ID> GetDependencies() override {
-        return { SVC_HEARTBEAT };
+        /* Cognitive handles the full chat pipeline; Emotional + Memory are
+         * kept here because HTTPServer also broadcasts their events to
+         * WebSocket clients. */
+        return { SVC_HEARTBEAT, SVC_COGNITIVE, SVC_EMOTIONAL, SVC_MEMORY };
     }
 
 private:
