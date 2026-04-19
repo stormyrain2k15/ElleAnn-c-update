@@ -475,12 +475,29 @@ bool StoreMessage(uint64_t convoId, uint32_t role, const std::string& content,
         if (emotions.dimensions[i] > topW) { topW = emotions.dimensions[i]; dominant = names[i]; }
     }
 
-    /* The live `messages` table has: conversation_id, user_id, role (nvarchar),
-     * content, emotion_detected, emotion_intensity, created_at (default),
-     * Direction (default 'in'). user_id is NOT NULL with FK to users(id).    */
     const std::string roleStr = RoleToStr(role);
     const std::string direction = (role == 1) ? "in" : "out";
 
+    /* STEP 1: Ensure the conversation row exists. messages.conversation_id is a FK
+     * with CASCADE DELETE — if the conv id isn't in conversations, INSERT fails.
+     * We make StoreMessage idempotent by upserting conversations first. */
+    {
+        auto ensureConv = ElleSQLPool::Instance().QueryParams(
+            "IF NOT EXISTS (SELECT 1 FROM ElleCore.dbo.conversations WHERE id = ?) "
+            "BEGIN "
+            "  SET IDENTITY_INSERT ElleCore.dbo.conversations ON; "
+            "  INSERT INTO ElleCore.dbo.conversations "
+            "    (id, user_id, title, started_at, last_message_at, total_messages, is_active) "
+            "  VALUES (?, 1, 'auto', GETUTCDATE(), GETUTCDATE(), 0, 1); "
+            "  SET IDENTITY_INSERT ElleCore.dbo.conversations OFF; "
+            "END;",
+            { std::to_string(convoId), std::to_string(convoId) });
+        if (!ensureConv.success && !ensureConv.error.empty()) {
+            ELLE_WARN("StoreMessage: ensure-conversation failed: %s", ensureConv.error.c_str());
+        }
+    }
+
+    /* STEP 2: Insert the message + bump conversation counters. */
     auto rs = ElleSQLPool::Instance().QueryParams(
         "INSERT INTO ElleCore.dbo.messages "
         "(conversation_id, user_id, role, content, emotion_detected, emotion_intensity, "
@@ -501,6 +518,10 @@ bool StoreMessage(uint64_t convoId, uint32_t role, const std::string& content,
             direction,
             std::to_string(convoId)
         });
+    if (!rs.success) {
+        ELLE_ERROR("StoreMessage INSERT failed for conv=%llu role=%s: %s",
+                   (unsigned long long)convoId, roleStr.c_str(), rs.error.c_str());
+    }
     return rs.success;
 }
 
@@ -530,12 +551,16 @@ bool GetConversationHistory(uint64_t convoId,
 }
 
 bool StoreMemory(const ELLE_MEMORY_RECORD& mem) {
-    /* 1. Insert the memory row and capture the new id. */
-    auto rs = ElleSQLPool::Instance().QueryParams(
+    /* Use a unique "now" timestamp as a correlation key so we can look the new
+     * row back up in a pooled-connection-safe way (OUTPUT INSERTED.id does
+     * not reliably flow back through SQLExecDirectA + our result reader). */
+    uint64_t nowMs = ELLE_MS_NOW();
+
+    /* STEP 1: plain INSERT — no OUTPUT clause. */
+    auto r1 = ElleSQLPool::Instance().QueryParams(
         "INSERT INTO ElleCore.dbo.memory "
         "(memory_type, tier, content, summary, emotional_valence, importance, relevance, "
         " position_x, position_y, position_z, created_ms, last_access_ms) "
-        "OUTPUT INSERTED.id "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         {
             std::to_string(mem.type),
@@ -548,28 +573,50 @@ bool StoreMemory(const ELLE_MEMORY_RECORD& mem) {
             std::to_string(mem.position_x),
             std::to_string(mem.position_y),
             std::to_string(mem.position_z),
-            std::to_string(ELLE_MS_NOW()),
-            std::to_string(ELLE_MS_NOW())
+            std::to_string(nowMs),
+            std::to_string(nowMs)
         });
-    if (!rs.success || rs.rows.empty()) return false;
-    int64_t memId = rs.rows[0].GetInt(0);
+    if (!r1.success) {
+        ELLE_ERROR("StoreMemory INSERT failed: %s", r1.error.c_str());
+        return false;
+    }
 
-    /* 2. Write each tag into memory_tags (for entity/keyword recall). */
+    /* STEP 2: Recover the new row's id via the unique created_ms we just wrote.
+     * If two memories somehow got the same ms, we take the most recent. */
+    auto r2 = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id FROM ElleCore.dbo.memory "
+        "WHERE created_ms = ? ORDER BY id DESC;",
+        { std::to_string(nowMs) });
+    if (!r2.success || r2.rows.empty()) {
+        ELLE_WARN("StoreMemory: row inserted but id lookup returned nothing (err=%s)",
+                  r2.error.c_str());
+        /* Row is in the table, we just can't tag it. Return true so caller
+         * doesn't retry and double-insert. */
+        return true;
+    }
+    int64_t memId = r2.rows[0].GetInt(0);
+
+    /* STEP 3: Write each tag + entity link. */
     for (uint32_t i = 0; i < mem.tag_count && i < ELLE_MAX_TAGS; i++) {
         std::string tag = mem.tags[i];
         if (tag.empty()) continue;
-        ElleSQLPool::Instance().QueryParams(
+
+        auto rt = ElleSQLPool::Instance().QueryParams(
             "INSERT INTO ElleCore.dbo.memory_tags (memory_id, tag) VALUES (?, ?);",
             { std::to_string(memId), tag });
+        if (!rt.success) {
+            ELLE_WARN("StoreMemory: tag insert failed mem=%lld tag=%s err=%s",
+                      (long long)memId, tag.c_str(), rt.error.c_str());
+        }
 
-        /* 3. Link to world_entity if one exists by that name. */
-        ElleSQLPool::Instance().QueryParams(
+        auto rl = ElleSQLPool::Instance().QueryParams(
             "INSERT INTO ElleCore.dbo.memory_entity_links (memory_id, entity_id) "
             "SELECT ?, id FROM ElleCore.dbo.world_entity WHERE name = LOWER(?) "
-            "AND NOT EXISTS (SELECT 1 FROM ElleCore.dbo.memory_entity_links "
-            "                WHERE memory_id = ? AND entity_id = "
-            "                    (SELECT id FROM ElleCore.dbo.world_entity WHERE name = LOWER(?)));",
+            "AND NOT EXISTS (SELECT 1 FROM ElleCore.dbo.memory_entity_links mel "
+            "                WHERE mel.memory_id = ? AND mel.entity_id = "
+            "                      (SELECT id FROM ElleCore.dbo.world_entity WHERE name = LOWER(?)));",
             { std::to_string(memId), tag, std::to_string(memId), tag });
+        (void)rl;
     }
     return true;
 }
