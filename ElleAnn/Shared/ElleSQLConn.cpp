@@ -1106,4 +1106,478 @@ bool UpdateUserPresenceOnInteraction(int32_t user_id) {
         { std::to_string(user_id), std::to_string(user_id), std::to_string(user_id) }).success;
 }
 
+/*══════════════════════════════════════════════════════════════════════════════
+ * EDUCATION — ported from app/routers/education.py
+ *═════════════════════════════════════════════════════════════════════════════*/
+static void RowToSubject(const SQLRow& r, LearnedSubject& s) {
+    /* Column order used everywhere below — single source of truth. */
+    /* id, subject, category, proficiency_level, who_taught, where_learned,
+       time_to_learn_hours, notes, date_started, date_completed */
+    s.id                  = (int32_t)r.GetInt(0);
+    s.subject             = r.values.size() > 1 ? r.values[1] : "";
+    s.category            = r.values.size() > 2 ? r.values[2] : "";
+    s.proficiency_level   = (int32_t)r.GetInt(3);
+    s.who_taught          = r.values.size() > 4 ? r.values[4] : "";
+    s.where_learned       = r.values.size() > 5 ? r.values[5] : "";
+    s.time_to_learn_hours = (float)r.GetFloat(6);
+    s.notes               = r.values.size() > 7 ? r.values[7] : "";
+    s.date_started        = r.values.size() > 8 ? r.values[8] : "";
+    s.date_completed      = r.values.size() > 9 ? r.values[9] : "";
+}
+static const char* kSubjectSelect =
+    "SELECT id, subject, ISNULL(category,''), proficiency_level, "
+    "       ISNULL(who_taught,''), ISNULL(where_learned,''), "
+    "       ISNULL(time_to_learn_hours, 0), ISNULL(notes,''), "
+    "       CONVERT(NVARCHAR(33), date_started, 127), "
+    "       ISNULL(CONVERT(NVARCHAR(33), date_completed, 127), '') "
+    "FROM ElleCore.dbo.learned_subjects ";
+
+bool ListSubjects(std::vector<LearnedSubject>& out,
+                  const std::string& category, uint32_t limit) {
+    std::string lim = std::to_string(limit > 0 ? limit : 50);
+    SQLResultSet rs;
+    if (category.empty()) {
+        rs = ElleSQLPool::Instance().Query(
+            std::string(kSubjectSelect) + "ORDER BY date_started DESC "
+            "OFFSET 0 ROWS FETCH NEXT " + lim + " ROWS ONLY;");
+    } else {
+        rs = ElleSQLPool::Instance().QueryParams(
+            std::string(kSubjectSelect) + "WHERE category = ? "
+            "ORDER BY date_started DESC "
+            "OFFSET 0 ROWS FETCH NEXT " + lim + " ROWS ONLY;",
+            { category });
+    }
+    if (!rs.success) return false;
+    for (auto& r : rs.rows) { LearnedSubject s; RowToSubject(r, s); out.push_back(s); }
+    return true;
+}
+
+bool GetSubject(int32_t subject_id, LearnedSubject& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        std::string(kSubjectSelect) + "WHERE id = ?;",
+        { std::to_string(subject_id) });
+    if (!rs.success || rs.rows.empty()) return false;
+    RowToSubject(rs.rows[0], out);
+    return true;
+}
+
+bool CreateSubject(const LearnedSubject& in, int32_t& newId) {
+    newId = 0;
+    uint64_t mark = ELLE_MS_NOW();
+    /* We piggy-back id recovery on the date_started timestamp — add the ms
+     * marker to notes so we can find the row back in a pool-safe way. */
+    std::string markedNotes = in.notes + "\n[[ins_mark=" + std::to_string(mark) + "]]";
+    auto r1 = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.learned_subjects "
+        "(subject, category, proficiency_level, who_taught, where_learned, "
+        " time_to_learn_hours, notes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?);",
+        { in.subject, in.category,
+          std::to_string(in.proficiency_level),
+          in.who_taught, in.where_learned,
+          std::to_string(in.time_to_learn_hours),
+          markedNotes });
+    if (!r1.success) { ELLE_ERROR("CreateSubject failed: %s", r1.error.c_str()); return false; }
+
+    auto r2 = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id FROM ElleCore.dbo.learned_subjects "
+        "WHERE notes LIKE ? ORDER BY id DESC;",
+        { std::string("%[[ins_mark=") + std::to_string(mark) + "]]%" });
+    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetInt(0);
+
+    /* Strip the marker from notes now that we've recovered the id. */
+    if (newId > 0) {
+        ElleSQLPool::Instance().QueryParams(
+            "UPDATE ElleCore.dbo.learned_subjects SET notes = ? WHERE id = ?;",
+            { in.notes, std::to_string(newId) });
+    }
+    return newId > 0;
+}
+
+bool UpdateSubject(int32_t subject_id, const LearnedSubject& patch,
+                   const std::vector<std::string>& fields) {
+    if (fields.empty()) return true;
+    std::string sets;
+    std::vector<std::string> params;
+    for (const auto& f : fields) {
+        if (!sets.empty()) sets += ", ";
+        sets += f + " = ?";
+        if      (f == "subject")             params.push_back(patch.subject);
+        else if (f == "category")            params.push_back(patch.category);
+        else if (f == "proficiency_level")   params.push_back(std::to_string(patch.proficiency_level));
+        else if (f == "who_taught")          params.push_back(patch.who_taught);
+        else if (f == "where_learned")       params.push_back(patch.where_learned);
+        else if (f == "time_to_learn_hours") params.push_back(std::to_string(patch.time_to_learn_hours));
+        else if (f == "notes")               params.push_back(patch.notes);
+        else if (f == "date_completed")      params.push_back(patch.date_completed);
+        else return false; /* reject unknown columns — SQL injection guard */
+    }
+    params.push_back(std::to_string(subject_id));
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.learned_subjects SET " + sets + " WHERE id = ?;",
+        params).success;
+}
+
+bool ListSubjectReferences(int32_t subject_id, std::vector<EducationReference>& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT id, subject_id, ISNULL(reference_type,''), ISNULL(reference_title,''), "
+        "       ISNULL(reference_content,''), ISNULL(file_path,''), "
+        "       ISNULL(relevance_score, 0.5), ISNULL(notes,'') "
+        "FROM ElleCore.dbo.education_references WHERE subject_id = ? ORDER BY id DESC;",
+        { std::to_string(subject_id) });
+    if (!rs.success) return false;
+    for (auto& r : rs.rows) {
+        EducationReference e;
+        e.id                = (int32_t)r.GetInt(0);
+        e.subject_id        = (int32_t)r.GetInt(1);
+        e.reference_type    = r.values.size() > 2 ? r.values[2] : "";
+        e.reference_title   = r.values.size() > 3 ? r.values[3] : "";
+        e.reference_content = r.values.size() > 4 ? r.values[4] : "";
+        e.file_path         = r.values.size() > 5 ? r.values[5] : "";
+        e.relevance_score   = (float)r.GetFloat(6);
+        e.notes             = r.values.size() > 7 ? r.values[7] : "";
+        out.push_back(e);
+    }
+    return true;
+}
+
+bool AddSubjectReference(const EducationReference& in) {
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.education_references "
+        "(subject_id, reference_type, reference_title, reference_content, "
+        " file_path, relevance_score, notes) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        { std::to_string(in.subject_id), in.reference_type, in.reference_title,
+          in.reference_content, in.file_path,
+          std::to_string(in.relevance_score), in.notes }).success;
+}
+
+bool ListSubjectMilestones(int32_t subject_id, std::vector<LearningMilestone>& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT id, subject_id, milestone, ISNULL(description,''), "
+        "       CONVERT(NVARCHAR(33), achieved_at, 127) "
+        "FROM ElleCore.dbo.learning_milestones WHERE subject_id = ? "
+        "ORDER BY achieved_at DESC;",
+        { std::to_string(subject_id) });
+    if (!rs.success) return false;
+    for (auto& r : rs.rows) {
+        LearningMilestone m;
+        m.id          = (int32_t)r.GetInt(0);
+        m.subject_id  = (int32_t)r.GetInt(1);
+        m.milestone   = r.values.size() > 2 ? r.values[2] : "";
+        m.description = r.values.size() > 3 ? r.values[3] : "";
+        m.achieved_at = r.values.size() > 4 ? r.values[4] : "";
+        out.push_back(m);
+    }
+    return true;
+}
+
+bool AddSubjectMilestone(const LearningMilestone& in) {
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.learning_milestones (subject_id, milestone, description) "
+        "VALUES (?, ?, ?);",
+        { std::to_string(in.subject_id), in.milestone, in.description }).success;
+}
+
+bool ListSkills(std::vector<Skill>& out, const std::string& category) {
+    SQLResultSet rs;
+    const char* base =
+        "SELECT id, skill_name, ISNULL(category,''), proficiency, "
+        "       ISNULL(learned_from_subject_id, 0), times_used, "
+        "       ISNULL(CONVERT(NVARCHAR(33), last_used, 127), ''), ISNULL(notes,'') "
+        "FROM ElleCore.dbo.skills ";
+    if (category.empty()) {
+        rs = ElleSQLPool::Instance().Query(std::string(base) + "ORDER BY skill_name;");
+    } else {
+        rs = ElleSQLPool::Instance().QueryParams(
+            std::string(base) + "WHERE category = ? ORDER BY skill_name;", { category });
+    }
+    if (!rs.success) return false;
+    for (auto& r : rs.rows) {
+        Skill s;
+        s.id                      = (int32_t)r.GetInt(0);
+        s.skill_name              = r.values.size() > 1 ? r.values[1] : "";
+        s.category                = r.values.size() > 2 ? r.values[2] : "";
+        s.proficiency             = (int32_t)r.GetInt(3);
+        s.learned_from_subject_id = (int32_t)r.GetInt(4);
+        s.times_used              = (int32_t)r.GetInt(5);
+        s.last_used               = r.values.size() > 6 ? r.values[6] : "";
+        s.notes                   = r.values.size() > 7 ? r.values[7] : "";
+        out.push_back(s);
+    }
+    return true;
+}
+
+bool CreateSkill(const Skill& in, int32_t& newId) {
+    newId = 0;
+    std::vector<std::string> params = {
+        in.skill_name, in.category, std::to_string(in.proficiency),
+        in.learned_from_subject_id > 0 ? std::to_string(in.learned_from_subject_id) : std::string(),
+        in.notes
+    };
+    auto r1 = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.skills "
+        "(skill_name, category, proficiency, learned_from_subject_id, notes) "
+        "VALUES (?, ?, ?, NULLIF(?, ''), ?);",
+        params);
+    if (!r1.success) {
+        /* Duplicate skill_name triggers unique-constraint — legacy behaviour returns 409. */
+        ELLE_WARN("CreateSkill failed: %s", r1.error.c_str());
+        return false;
+    }
+    auto r2 = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id FROM ElleCore.dbo.skills WHERE skill_name = ?;",
+        { in.skill_name });
+    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetInt(0);
+    return newId > 0;
+}
+
+bool RecordSkillUse(const std::string& skill_name) {
+    auto exists = ElleSQLPool::Instance().QueryParams(
+        "SELECT id FROM ElleCore.dbo.skills WHERE skill_name = ?;", { skill_name });
+    if (!exists.success || exists.rows.empty()) return false;
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.skills "
+        "SET times_used = times_used + 1, last_used = GETUTCDATE() WHERE skill_name = ?;",
+        { skill_name }).success;
+}
+
+/*══════════════════════════════════════════════════════════════════════════════
+ * VIDEO JOBS — ported from app/services/video_generator.py
+ *═════════════════════════════════════════════════════════════════════════════*/
+static std::string MakeUuid16() {
+    static const char* hex = "0123456789abcdef";
+    std::string s; s.reserve(16);
+    uint64_t t = ELLE_MS_NOW();
+    for (int i = 0; i < 16; i++) {
+        uint64_t v = (t ^ ((uint64_t)rand() << i)) >> (i * 4);
+        s += hex[v & 0xF];
+    }
+    return s;
+}
+static void RowToVideoJob(const SQLRow& r, VideoJob& j) {
+    /* id, job_uuid, text, avatar_path, call_id, status, progress,
+       output_path, error, created_ms, started_ms, finished_ms */
+    j.id          = r.GetInt(0);
+    j.job_uuid    = r.values.size() > 1 ? r.values[1] : "";
+    j.text        = r.values.size() > 2 ? r.values[2] : "";
+    j.avatar_path = r.values.size() > 3 ? r.values[3] : "";
+    j.call_id     = r.GetInt(4);
+    j.status      = r.values.size() > 5 ? r.values[5] : "";
+    j.progress    = (int32_t)r.GetInt(6);
+    j.output_path = r.values.size() > 7 ? r.values[7] : "";
+    j.error       = r.values.size() > 8 ? r.values[8] : "";
+    j.created_ms  = r.GetInt(9);
+    j.started_ms  = r.GetInt(10);
+    j.finished_ms = r.GetInt(11);
+}
+static const char* kVideoJobSelect =
+    "SELECT id, job_uuid, text, ISNULL(avatar_path,''), ISNULL(call_id, 0), status, "
+    "       progress, ISNULL(output_path,''), ISNULL(error,''), created_ms, "
+    "       ISNULL(started_ms, 0), ISNULL(finished_ms, 0) "
+    "FROM ElleCore.dbo.video_jobs ";
+
+bool CreateVideoJob(const std::string& text, const std::string& avatar_path,
+                    int64_t call_id, VideoJob& out) {
+    out = {};
+    out.job_uuid   = MakeUuid16();
+    out.text       = text;
+    out.avatar_path= avatar_path;
+    out.call_id    = call_id;
+    out.status     = "queued";
+    out.created_ms = (int64_t)ELLE_MS_NOW();
+
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.video_jobs "
+        "(job_uuid, text, avatar_path, call_id, status, progress, created_ms) "
+        "VALUES (?, ?, ?, NULLIF(?, '0'), 'queued', 0, ?);",
+        { out.job_uuid, text, avatar_path, std::to_string(call_id),
+          std::to_string(out.created_ms) });
+    if (!rs.success) { ELLE_ERROR("CreateVideoJob failed: %s", rs.error.c_str()); return false; }
+
+    auto r2 = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id FROM ElleCore.dbo.video_jobs WHERE job_uuid = ?;",
+        { out.job_uuid });
+    if (r2.success && !r2.rows.empty()) out.id = r2.rows[0].GetInt(0);
+    return true;
+}
+
+bool GetVideoJob(const std::string& job_uuid, VideoJob& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        std::string(kVideoJobSelect) + "WHERE job_uuid = ?;",
+        { job_uuid });
+    if (!rs.success || rs.rows.empty()) return false;
+    RowToVideoJob(rs.rows[0], out);
+    return true;
+}
+
+bool ClaimNextVideoJob(VideoJob& out) {
+    /* Two-step atomic claim:
+     *   1) UPDATE TOP(1) a queued row → running, output the job_uuid.
+     *   2) SELECT the full row back by uuid.
+     * Splitting keeps the OUTPUT clause simple (no function wrappers) and
+     * reuses the same column order as kVideoJobSelect.                     */
+    auto claim = ElleSQLPool::Instance().QueryParams(
+        "UPDATE TOP (1) ElleCore.dbo.video_jobs "
+        "SET status = 'running', started_ms = ? "
+        "OUTPUT inserted.job_uuid "
+        "WHERE status = 'queued';",
+        { std::to_string((int64_t)ELLE_MS_NOW()) });
+    if (!claim.success || claim.rows.empty()) return false;
+    std::string uuid = claim.rows[0].values.size() > 0 ? claim.rows[0].values[0] : "";
+    if (uuid.empty()) return false;
+    return GetVideoJob(uuid, out);
+}
+
+bool UpdateVideoJobProgress(const std::string& job_uuid, int32_t progress) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.video_jobs SET progress = ? WHERE job_uuid = ?;",
+        { std::to_string(progress), job_uuid }).success;
+}
+
+bool CompleteVideoJob(const std::string& job_uuid, const std::string& output_path) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.video_jobs SET status = 'done', progress = 100, "
+        "output_path = ?, finished_ms = ? WHERE job_uuid = ?;",
+        { output_path, std::to_string((int64_t)ELLE_MS_NOW()), job_uuid }).success;
+}
+
+bool FailVideoJob(const std::string& job_uuid, const std::string& error) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.video_jobs SET status = 'failed', error = ?, "
+        "finished_ms = ? WHERE job_uuid = ?;",
+        { error, std::to_string((int64_t)ELLE_MS_NOW()), job_uuid }).success;
+}
+
+bool RegisterAvatar(const UserAvatar& in, int32_t& newId) {
+    newId = 0;
+    if (in.is_default) {
+        /* Clear existing defaults for this user. */
+        ElleSQLPool::Instance().QueryParams(
+            "UPDATE ElleCore.dbo.user_avatars SET is_default = 0 WHERE user_id = ?;",
+            { std::to_string(in.user_id) });
+    }
+    auto r1 = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.user_avatars "
+        "(user_id, label, file_path, mime_type, is_default) VALUES (?, ?, ?, ?, ?);",
+        { std::to_string(in.user_id), in.label, in.file_path,
+          in.mime_type, in.is_default ? "1" : "0" });
+    if (!r1.success) return false;
+    auto r2 = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id FROM ElleCore.dbo.user_avatars "
+        "WHERE user_id = ? AND file_path = ? ORDER BY id DESC;",
+        { std::to_string(in.user_id), in.file_path });
+    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetInt(0);
+    return newId > 0;
+}
+
+bool GetDefaultAvatar(int32_t user_id, UserAvatar& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id, user_id, ISNULL(label,''), file_path, ISNULL(mime_type,''), is_default "
+        "FROM ElleCore.dbo.user_avatars WHERE user_id = ? "
+        "ORDER BY is_default DESC, id DESC;",
+        { std::to_string(user_id) });
+    if (!rs.success || rs.rows.empty()) return false;
+    auto& r = rs.rows[0];
+    out.id         = (int32_t)r.GetInt(0);
+    out.user_id    = (int32_t)r.GetInt(1);
+    out.label      = r.values.size() > 2 ? r.values[2] : "";
+    out.file_path  = r.values.size() > 3 ? r.values[3] : "";
+    out.mime_type  = r.values.size() > 4 ? r.values[4] : "";
+    out.is_default = r.GetInt(5) != 0;
+    return true;
+}
+
+bool ListAvatars(int32_t user_id, std::vector<UserAvatar>& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT id, user_id, ISNULL(label,''), file_path, ISNULL(mime_type,''), is_default "
+        "FROM ElleCore.dbo.user_avatars WHERE user_id = ? "
+        "ORDER BY is_default DESC, id DESC;",
+        { std::to_string(user_id) });
+    if (!rs.success) return false;
+    for (auto& r : rs.rows) {
+        UserAvatar a;
+        a.id         = (int32_t)r.GetInt(0);
+        a.user_id    = (int32_t)r.GetInt(1);
+        a.label      = r.values.size() > 2 ? r.values[2] : "";
+        a.file_path  = r.values.size() > 3 ? r.values[3] : "";
+        a.mime_type  = r.values.size() > 4 ? r.values[4] : "";
+        a.is_default = r.GetInt(5) != 0;
+        out.push_back(a);
+    }
+    return true;
+}
+
+/*══════════════════════════════════════════════════════════════════════════════
+ * DICTIONARY LOADER — companion helpers for dictionary_loader.py port
+ *═════════════════════════════════════════════════════════════════════════════*/
+bool GetDictionaryLoaderState(DictionaryLoaderState& out) {
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT TOP 1 status, loaded, failed, skipped, ISNULL(last_word,''), "
+        "       ISNULL(error,''), ISNULL(started_ms, 0), ISNULL(updated_ms, 0) "
+        "FROM ElleCore.dbo.dictionary_loader_state ORDER BY id DESC;");
+    if (!rs.success || rs.rows.empty()) {
+        out.status = "idle";
+        return true;
+    }
+    auto& r = rs.rows[0];
+    out.status     = r.values.size() > 0 ? r.values[0] : "idle";
+    out.loaded     = (int32_t)r.GetInt(1);
+    out.failed     = (int32_t)r.GetInt(2);
+    out.skipped    = (int32_t)r.GetInt(3);
+    out.last_word  = r.values.size() > 4 ? r.values[4] : "";
+    out.error      = r.values.size() > 5 ? r.values[5] : "";
+    out.started_ms = r.GetInt(6);
+    out.updated_ms = r.GetInt(7);
+    return true;
+}
+
+bool UpsertDictionaryLoaderState(const DictionaryLoaderState& in) {
+    /* Keep a single active row — update if exists, else insert. */
+    auto exists = ElleSQLPool::Instance().Query(
+        "SELECT TOP 1 id FROM ElleCore.dbo.dictionary_loader_state ORDER BY id DESC;");
+    if (exists.success && !exists.rows.empty()) {
+        int64_t id = exists.rows[0].GetInt(0);
+        return ElleSQLPool::Instance().QueryParams(
+            "UPDATE ElleCore.dbo.dictionary_loader_state "
+            "SET status = ?, loaded = ?, failed = ?, skipped = ?, "
+            "    last_word = ?, error = ?, started_ms = ?, updated_ms = ? "
+            "WHERE id = ?;",
+            { in.status, std::to_string(in.loaded), std::to_string(in.failed),
+              std::to_string(in.skipped), in.last_word, in.error,
+              std::to_string(in.started_ms), std::to_string((int64_t)ELLE_MS_NOW()),
+              std::to_string(id) }).success;
+    }
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.dictionary_loader_state "
+        "(status, loaded, failed, skipped, last_word, error, started_ms, updated_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        { in.status, std::to_string(in.loaded), std::to_string(in.failed),
+          std::to_string(in.skipped), in.last_word, in.error,
+          std::to_string(in.started_ms), std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+}
+
+bool InsertDictionaryWord(const std::string& word,
+                          const std::string& part_of_speech,
+                          const std::string& definition,
+                          const std::string& example) {
+    /* Idempotent: skip if (word, part_of_speech) already present. */
+    auto exists = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id FROM ElleCore.dbo.dictionary_words "
+        "WHERE LOWER(word) = LOWER(?) AND ISNULL(part_of_speech,'') = ?;",
+        { word, part_of_speech });
+    if (exists.success && !exists.rows.empty()) return false;
+
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.dictionary_words "
+        "(word, definition, example, part_of_speech) VALUES (?, ?, ?, ?);",
+        { word, definition, example, part_of_speech }).success;
+}
+
+int64_t CountDictionaryWords() {
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT COUNT(*) FROM ElleCore.dbo.dictionary_words;");
+    if (!rs.success || rs.rows.empty()) return 0;
+    return rs.rows[0].GetInt(0);
+}
+
 } /* namespace ElleDB */

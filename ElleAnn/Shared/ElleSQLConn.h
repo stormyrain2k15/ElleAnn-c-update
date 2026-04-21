@@ -261,6 +261,123 @@ namespace ElleDB {
 
     /* Analytics */
     bool RecordMetric(const std::string& name, double value);
+
+    /*──────────────────────────────────────────────────────────────────────
+     * Education — learned_subjects / education_references / learning_milestones / skills
+     * Ported from legacy Python `app/routers/education.py`.
+     *──────────────────────────────────────────────────────────────────────*/
+    struct LearnedSubject {
+        int32_t     id = 0;
+        std::string subject;
+        std::string category;
+        int32_t     proficiency_level = 0;
+        std::string who_taught;
+        std::string where_learned;
+        float       time_to_learn_hours = 0.0f;
+        std::string notes;
+        std::string date_started;
+        std::string date_completed;
+    };
+    struct EducationReference {
+        int32_t     id = 0;
+        int32_t     subject_id = 0;
+        std::string reference_type;
+        std::string reference_title;
+        std::string reference_content;
+        std::string file_path;
+        float       relevance_score = 0.5f;
+        std::string notes;
+    };
+    struct LearningMilestone {
+        int32_t     id = 0;
+        int32_t     subject_id = 0;
+        std::string milestone;
+        std::string description;
+        std::string achieved_at;
+    };
+    struct Skill {
+        int32_t     id = 0;
+        std::string skill_name;
+        std::string category;
+        int32_t     proficiency = 0;
+        int32_t     learned_from_subject_id = 0;  /* 0 = null */
+        int32_t     times_used = 0;
+        std::string last_used;
+        std::string notes;
+    };
+    bool ListSubjects(std::vector<LearnedSubject>& out,
+                      const std::string& category /* empty = all */, uint32_t limit = 50);
+    bool GetSubject(int32_t subject_id, LearnedSubject& out);
+    bool CreateSubject(const LearnedSubject& in, int32_t& newId);
+    bool UpdateSubject(int32_t subject_id, const LearnedSubject& patch,
+                       const std::vector<std::string>& fieldsToUpdate);
+    bool ListSubjectReferences(int32_t subject_id, std::vector<EducationReference>& out);
+    bool AddSubjectReference(const EducationReference& in);
+    bool ListSubjectMilestones(int32_t subject_id, std::vector<LearningMilestone>& out);
+    bool AddSubjectMilestone(const LearningMilestone& in);
+    bool ListSkills(std::vector<Skill>& out, const std::string& category /* empty = all */);
+    bool CreateSkill(const Skill& in, int32_t& newId);
+    bool RecordSkillUse(const std::string& skill_name);
+
+    /*──────────────────────────────────────────────────────────────────────
+     * Video — job queue + avatar registry
+     * Ported from legacy Python `app/services/video_generator.py`.
+     *──────────────────────────────────────────────────────────────────────*/
+    struct VideoJob {
+        int64_t     id = 0;
+        std::string job_uuid;
+        std::string text;
+        std::string avatar_path;
+        int64_t     call_id = 0;
+        std::string status;         /* queued|running|done|failed */
+        int32_t     progress = 0;
+        std::string output_path;
+        std::string error;
+        int64_t     created_ms = 0;
+        int64_t     started_ms = 0;
+        int64_t     finished_ms = 0;
+    };
+    bool CreateVideoJob(const std::string& text, const std::string& avatar_path,
+                        int64_t call_id, VideoJob& out);
+    bool GetVideoJob(const std::string& job_uuid, VideoJob& out);
+    bool ClaimNextVideoJob(VideoJob& out);  /* atomic queued→running */
+    bool UpdateVideoJobProgress(const std::string& job_uuid, int32_t progress);
+    bool CompleteVideoJob(const std::string& job_uuid, const std::string& output_path);
+    bool FailVideoJob(const std::string& job_uuid, const std::string& error);
+
+    struct UserAvatar {
+        int32_t     id = 0;
+        int32_t     user_id = 1;
+        std::string label;
+        std::string file_path;
+        std::string mime_type;
+        bool        is_default = false;
+    };
+    bool RegisterAvatar(const UserAvatar& in, int32_t& newId);
+    bool GetDefaultAvatar(int32_t user_id, UserAvatar& out);
+    bool ListAvatars(int32_t user_id, std::vector<UserAvatar>& out);
+
+    /*──────────────────────────────────────────────────────────────────────
+     * Dictionary loader state (companion to dictionary_words)
+     * Ported from legacy `dictionary_loader.py` progress tracking.
+     *──────────────────────────────────────────────────────────────────────*/
+    struct DictionaryLoaderState {
+        std::string status;
+        int32_t     loaded = 0;
+        int32_t     failed = 0;
+        int32_t     skipped = 0;
+        std::string last_word;
+        std::string error;
+        int64_t     started_ms = 0;
+        int64_t     updated_ms = 0;
+    };
+    bool GetDictionaryLoaderState(DictionaryLoaderState& out);
+    bool UpsertDictionaryLoaderState(const DictionaryLoaderState& in);
+    bool InsertDictionaryWord(const std::string& word,
+                              const std::string& part_of_speech,
+                              const std::string& definition,
+                              const std::string& example);
+    int64_t CountDictionaryWords();
 }
 
 #endif /* ELLE_SQL_CONN_H */

@@ -257,4 +257,148 @@ BEGIN
 END
 GO
 
+/*──────────────────────────────────────────────────────────────────────────────
+ * Education — ported from legacy Python app/routers/education.py.
+ * Matches the Pydantic shapes: learned_subjects + references + milestones + skills.
+ *──────────────────────────────────────────────────────────────────────────────*/
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'learned_subjects')
+BEGIN
+    CREATE TABLE [dbo].[learned_subjects] (
+        [id]                    INT IDENTITY(1,1) PRIMARY KEY,
+        [subject]               NVARCHAR(256) NOT NULL,
+        [category]              NVARCHAR(64) NULL,
+        [proficiency_level]     INT NOT NULL DEFAULT 0,   /* 0..100 */
+        [who_taught]            NVARCHAR(128) NULL,
+        [where_learned]         NVARCHAR(256) NULL,
+        [time_to_learn_hours]   FLOAT NULL,
+        [notes]                 NVARCHAR(MAX) NULL,
+        [date_started]          DATETIME2(7) NOT NULL DEFAULT GETUTCDATE(),
+        [date_completed]        DATETIME2(7) NULL,
+        [created_at]            DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    CREATE INDEX IX_learned_subjects_category ON [dbo].[learned_subjects] ([category]);
+    PRINT '[learned_subjects] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'education_references')
+BEGIN
+    CREATE TABLE [dbo].[education_references] (
+        [id]                INT IDENTITY(1,1) PRIMARY KEY,
+        [subject_id]        INT NOT NULL,
+        [reference_type]    NVARCHAR(64) NULL,  /* book, url, paper, person, course */
+        [reference_title]   NVARCHAR(500) NULL,
+        [reference_content] NVARCHAR(MAX) NULL,
+        [file_path]         NVARCHAR(500) NULL,
+        [relevance_score]   FLOAT NOT NULL DEFAULT 0.5,
+        [notes]             NVARCHAR(MAX) NULL,
+        [created_at]        DATETIME2(7) NOT NULL DEFAULT GETUTCDATE(),
+        CONSTRAINT FK_education_references_subject
+            FOREIGN KEY (subject_id) REFERENCES [dbo].[learned_subjects] (id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_education_references_subject ON [dbo].[education_references] ([subject_id]);
+    PRINT '[education_references] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'learning_milestones')
+BEGIN
+    CREATE TABLE [dbo].[learning_milestones] (
+        [id]          INT IDENTITY(1,1) PRIMARY KEY,
+        [subject_id]  INT NOT NULL,
+        [milestone]   NVARCHAR(256) NOT NULL,
+        [description] NVARCHAR(MAX) NULL,
+        [achieved_at] DATETIME2(7) NOT NULL DEFAULT GETUTCDATE(),
+        CONSTRAINT FK_learning_milestones_subject
+            FOREIGN KEY (subject_id) REFERENCES [dbo].[learned_subjects] (id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_learning_milestones_subject ON [dbo].[learning_milestones] ([subject_id]);
+    PRINT '[learning_milestones] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'skills')
+BEGIN
+    CREATE TABLE [dbo].[skills] (
+        [id]                       INT IDENTITY(1,1) PRIMARY KEY,
+        [skill_name]               NVARCHAR(256) NOT NULL UNIQUE,
+        [category]                 NVARCHAR(64) NULL,
+        [proficiency]              INT NOT NULL DEFAULT 0,   /* 0..100 */
+        [learned_from_subject_id]  INT NULL,
+        [times_used]               INT NOT NULL DEFAULT 0,
+        [last_used]                DATETIME2(7) NULL,
+        [notes]                    NVARCHAR(MAX) NULL,
+        [created_at]               DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    CREATE INDEX IX_skills_category ON [dbo].[skills] ([category]);
+    PRINT '[skills] created.';
+END
+GO
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Video generation pipeline — ported from legacy video_generator.py.
+ * The Python impl ran Wav2Lip+GFPGAN+ffmpeg inline. The C++ core uses a queue:
+ *   HTTPServer inserts a row → VideoEngine spawns the configured exe subprocess
+ *   → subprocess writes the final .mp4 path + status back via SQL.
+ *──────────────────────────────────────────────────────────────────────────────*/
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'video_jobs')
+BEGIN
+    CREATE TABLE [dbo].[video_jobs] (
+        [id]            BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [job_uuid]      NVARCHAR(64) NOT NULL UNIQUE,
+        [text]          NVARCHAR(MAX) NOT NULL,
+        [avatar_path]   NVARCHAR(500) NULL,
+        [call_id]       BIGINT NULL,
+        [status]        NVARCHAR(32) NOT NULL DEFAULT 'queued', /* queued|running|done|failed */
+        [progress]      INT NOT NULL DEFAULT 0,                  /* 0..100 */
+        [output_path]   NVARCHAR(500) NULL,
+        [error]         NVARCHAR(MAX) NULL,
+        [created_ms]    BIGINT NOT NULL,
+        [started_ms]    BIGINT NULL,
+        [finished_ms]   BIGINT NULL,
+        [created_at]    DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    CREATE INDEX IX_video_jobs_status_created ON [dbo].[video_jobs] ([status], [created_ms] DESC);
+    PRINT '[video_jobs] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'user_avatars')
+BEGIN
+    CREATE TABLE [dbo].[user_avatars] (
+        [id]          INT IDENTITY(1,1) PRIMARY KEY,
+        [user_id]     INT NOT NULL DEFAULT 1,
+        [label]       NVARCHAR(128) NULL,
+        [file_path]   NVARCHAR(500) NOT NULL,
+        [mime_type]   NVARCHAR(64) NULL,
+        [is_default]  BIT NOT NULL DEFAULT 0,
+        [created_at]  DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    CREATE INDEX IX_user_avatars_user ON [dbo].[user_avatars] ([user_id], [is_default] DESC);
+    PRINT '[user_avatars] created.';
+END
+GO
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Dictionary loader progress — ported from legacy dictionary_loader.py.
+ * The CORE_WORDS batch progress lives here so the loader can resume after
+ * service restarts without re-downloading words it already fetched.
+ *──────────────────────────────────────────────────────────────────────────────*/
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'dictionary_loader_state')
+BEGIN
+    CREATE TABLE [dbo].[dictionary_loader_state] (
+        [id]             INT IDENTITY(1,1) PRIMARY KEY,
+        [status]         NVARCHAR(32) NOT NULL DEFAULT 'idle', /* idle|running|done|failed */
+        [loaded]         INT NOT NULL DEFAULT 0,
+        [failed]         INT NOT NULL DEFAULT 0,
+        [skipped]        INT NOT NULL DEFAULT 0,
+        [last_word]      NVARCHAR(128) NULL,
+        [error]          NVARCHAR(MAX) NULL,
+        [started_ms]     BIGINT NULL,
+        [updated_ms]     BIGINT NULL
+    );
+    PRINT '[dictionary_loader_state] created.';
+END
+GO
+
 PRINT '----- Full delta complete -----';
