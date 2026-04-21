@@ -183,6 +183,37 @@ namespace ElleDB {
     bool GetEntity(const std::string& name, ELLE_WORLD_ENTITY& out);
     bool UpdateEntityInteraction(uint64_t entityId);
 
+    /* Memory listing / CRUD (real backing in dbo.memory) */
+    struct MemoryRow {
+        int64_t id; int type; int tier;
+        std::string content; std::string summary;
+        float emotional_valence; float importance; float relevance;
+        int access_count; uint64_t created_ms; uint64_t last_access_ms;
+    };
+    bool ListMemories(std::vector<MemoryRow>& out, int memory_type /* -1 = all */,
+                      uint32_t limit, uint32_t offset);
+    bool GetMemory(int64_t memId, MemoryRow& out);
+    bool DeleteMemory(int64_t memId);
+    bool UpdateMemoryContent(int64_t memId, const std::string& content,
+                              const std::string& summary, float importance);
+
+    /* Conversations CRUD */
+    struct ConversationRow {
+        int32_t id; int32_t user_id; std::string title;
+        std::string started_at; std::string last_message_at;
+        int32_t total_messages; bool is_active;
+    };
+    bool CreateConversation(int32_t user_id, const std::string& title, int32_t& newId);
+    bool ListConversations(std::vector<ConversationRow>& out, uint32_t limit = 50);
+    bool GetConversation(int32_t convId, ConversationRow& out);
+
+    /* Voice calls */
+    bool StartVoiceCall(int32_t user_id, int32_t conv_id, std::string& callId);
+    bool EndVoiceCall(const std::string& callId);
+
+    /* Generic counts */
+    int64_t CountTable(const std::string& table);
+
     /* Workers/Services */
     bool RegisterWorker(ELLE_SERVICE_ID svc, const std::string& name);
     bool UpdateWorkerHeartbeat(ELLE_SERVICE_ID svc);

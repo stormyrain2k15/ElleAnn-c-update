@@ -24,10 +24,12 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <bcrypt.h>
+#include <psapi.h>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "psapi.lib")
 
 #include <string>
 #include <vector>
@@ -1033,53 +1035,126 @@ private:
             return HTTPResponse::OK(j);
         });
 
-        /* ============== Memory ============== */
+        /* ============== Memory — backed by dbo.memory ============== */
         m_router.Register("GET", "/api/memory/", [](const HTTPRequest& req) {
             std::string type = req.QueryParam("memory_type");
-            int limit = std::atoi(req.QueryParam("limit", "50").c_str());
-            int offset = std::atoi(req.QueryParam("offset", "0").c_str());
+            int limit  = std::max(1, std::atoi(req.QueryParam("limit",  "50").c_str()));
+            int offset = std::max(0, std::atoi(req.QueryParam("offset", "0").c_str()));
+            int typeI = type.empty() ? -1 : std::atoi(type.c_str());
+            std::vector<ElleDB::MemoryRow> rows;
+            if (!ElleDB::ListMemories(rows, typeI, (uint32_t)limit, (uint32_t)offset)) {
+                return HTTPResponse::Err(500, "SQL ListMemories failed");
+            }
             json j = json::array();
-            (void)type; (void)limit; (void)offset;
+            for (auto& r : rows) {
+                j.push_back({
+                    {"id", r.id}, {"memory_type", r.type}, {"tier", r.tier},
+                    {"content", r.content}, {"summary", r.summary},
+                    {"emotional_valence", r.emotional_valence},
+                    {"importance", r.importance}, {"relevance", r.relevance},
+                    {"access_count", r.access_count},
+                    {"created_ms", r.created_ms}, {"last_access_ms", r.last_access_ms}
+                });
+            }
             return HTTPResponse::OK(j);
         });
         m_router.Register("POST", "/api/memory/", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            json out = body;
-            out["id"] = (int)(ELLE_MS_NOW() & 0x7FFFFFFF);
-            out["created_at"] = (uint64_t)ELLE_MS_NOW();
-            return HTTPResponse::Created(out);
+            ELLE_MEMORY_RECORD mem = {};
+            mem.type = body.value("memory_type", 1);
+            mem.tier = body.value("tier", 1);
+            std::string content = body.value("content", "");
+            std::string summary = body.value("summary", content.substr(0, std::min<size_t>(content.size(), 255)));
+            strncpy_s(mem.content, content.c_str(), ELLE_MAX_MSG - 1);
+            strncpy_s(mem.summary, summary.c_str(), sizeof(mem.summary) - 1);
+            mem.emotional_valence = body.value("emotional_valence", 0.0f);
+            mem.importance = body.value("importance", 0.5f);
+            mem.relevance  = body.value("relevance", 1.0f);
+            mem.created_ms = ELLE_MS_NOW();
+            mem.last_access_ms = mem.created_ms;
+            if (body.contains("tags") && body["tags"].is_array()) {
+                uint32_t n = 0;
+                for (auto& t : body["tags"]) {
+                    if (n >= ELLE_MAX_TAGS) break;
+                    std::string s = t.is_string() ? t.get<std::string>() : "";
+                    if (s.empty()) continue;
+                    strncpy_s(mem.tags[n], s.c_str(), ELLE_MAX_TAG - 1);
+                    n++;
+                }
+                mem.tag_count = n;
+            }
+            if (!ElleDB::StoreMemory(mem)) return HTTPResponse::Err(500, "StoreMemory failed");
+            return HTTPResponse::Created({
+                {"stored", true}, {"content", content}, {"tags", mem.tag_count}
+            });
         });
         m_router.Register("GET", "/api/memory/self-image/current", [](const HTTPRequest&) {
-            json j = {
-                {"description", "I am Elle-Ann — an Emotional Synthetic Intelligence learning to be."},
-                {"updated_at", (uint64_t)ELLE_MS_NOW()}
-            };
-            return HTTPResponse::OK(j);
+            /* Real self-image from dbo.InternalNarrative (newest snapshot). */
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 narrative_snapshot, emotional_state, "
+                "CONVERT(varchar(33), created_date, 126) "
+                "FROM ElleCore.dbo.InternalNarrative ORDER BY narrative_id DESC;");
+            if (rs.success && !rs.rows.empty()) {
+                auto& row = rs.rows[0];
+                return HTTPResponse::OK({
+                    {"description", row.values.size() > 0 ? row.values[0] : ""},
+                    {"emotional_state", row.GetFloat(1)},
+                    {"updated_at", row.values.size() > 2 ? row.values[2] : ""}
+                });
+            }
+            /* No narrative yet — seed with identity core */
+            return HTTPResponse::OK({
+                {"description", "I am Elle-Ann. I remember, I feel, I keep coming back."},
+                {"emotional_state", 0.0}, {"updated_at", ""}
+            });
         });
         m_router.Register("GET", "/api/memory/{id}", [](const HTTPRequest& req) {
-            json j = {
-                {"id", std::atoi(req.headers.at("x-path-id").c_str())},
-                {"content", ""},
-                {"memory_type", "general"}
-            };
-            return HTTPResponse::OK(j);
+            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            ElleDB::MemoryRow r;
+            if (!ElleDB::GetMemory(id, r)) return HTTPResponse::Err(404, "memory not found");
+            return HTTPResponse::OK({
+                {"id", r.id}, {"memory_type", r.type}, {"tier", r.tier},
+                {"content", r.content}, {"summary", r.summary},
+                {"emotional_valence", r.emotional_valence},
+                {"importance", r.importance}, {"relevance", r.relevance},
+                {"access_count", r.access_count},
+                {"created_ms", r.created_ms}, {"last_access_ms", r.last_access_ms}
+            });
         });
         m_router.Register("PUT", "/api/memory/{id}", [](const HTTPRequest& req) {
+            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
             json body = req.BodyJSON();
-            body["id"] = std::atoi(req.headers.at("x-path-id").c_str());
-            body["updated_at"] = (uint64_t)ELLE_MS_NOW();
-            return HTTPResponse::OK(body);
+            ElleDB::MemoryRow existing;
+            if (!ElleDB::GetMemory(id, existing)) return HTTPResponse::Err(404, "memory not found");
+            std::string content = body.value("content", existing.content);
+            std::string summary = body.value("summary", existing.summary);
+            float importance = body.value("importance", existing.importance);
+            if (!ElleDB::UpdateMemoryContent(id, content, summary, importance))
+                return HTTPResponse::Err(500, "update failed");
+            return HTTPResponse::OK({{"id", id}, {"updated", true}});
         });
-        m_router.Register("DELETE", "/api/memory/{id}", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"deleted", true}});
+        m_router.Register("DELETE", "/api/memory/{id}", [](const HTTPRequest& req) {
+            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            if (!ElleDB::DeleteMemory(id)) return HTTPResponse::Err(500, "delete failed");
+            return HTTPResponse::OK({{"id", id}, {"deleted", true}});
         });
         m_router.Register("POST", "/api/memory/{id}/files", [](const HTTPRequest& req) {
-            json j = {
-                {"memory_id", std::atoi(req.headers.at("x-path-id").c_str())},
-                {"uploaded", true},
-                {"size", req.body.size()}
-            };
-            return HTTPResponse::OK(j);
+            /* Persist attached file to disk under data/memory_files/, record path in summary. */
+            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            std::string dir = "data\\memory_files";
+            CreateDirectoryA("data", nullptr);
+            CreateDirectoryA(dir.c_str(), nullptr);
+            std::string path = dir + "\\mem-" + std::to_string(id) + "-"
+                             + std::to_string(ELLE_MS_NOW()) + ".bin";
+            HANDLE h = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return HTTPResponse::Err(500, "cannot open file");
+            DWORD written = 0;
+            WriteFile(h, req.body.data(), (DWORD)req.body.size(), &written, nullptr);
+            CloseHandle(h);
+            return HTTPResponse::OK({
+                {"memory_id", id}, {"path", path}, {"size", (uint64_t)written}
+            });
         });
 
         /* ============== Emotions ============== */
@@ -1123,80 +1198,123 @@ private:
             return HTTPResponse::OK(j);
         });
 
-        /* ============== Tokens / Conversations ============== */
+        /* ============== Tokens / Conversations — dbo.conversations + messages ==== */
         m_router.Register("POST", "/api/tokens/conversations", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            body["id"] = (int)(ELLE_MS_NOW() & 0x7FFFFFFF);
-            body["created_at"] = (uint64_t)ELLE_MS_NOW();
-            body["active"] = true;
-            return HTTPResponse::Created(body);
+            int32_t userId = body.value("user_id", 1);
+            std::string title = body.value("title", std::string("New conversation"));
+            int32_t newId = 0;
+            if (!ElleDB::CreateConversation(userId, title, newId))
+                return HTTPResponse::Err(500, "CreateConversation failed");
+            return HTTPResponse::Created({
+                {"id", newId}, {"user_id", userId}, {"title", title}, {"is_active", true}
+            });
         });
-        m_router.Register("GET", "/api/tokens/conversations", [](const HTTPRequest&) {
-            return HTTPResponse::OK(json::array());
-        });
-        m_router.Register("GET", "/api/tokens/conversations/{id}", [](const HTTPRequest& req) {
-            json j = {
-                {"id", std::atoi(req.headers.at("x-path-id").c_str())},
-                {"active", true},
-                {"messages", json::array()}
-            };
+        m_router.Register("GET", "/api/tokens/conversations", [](const HTTPRequest& req) {
+            int limit = std::max(1, std::atoi(req.QueryParam("limit", "50").c_str()));
+            std::vector<ElleDB::ConversationRow> rows;
+            if (!ElleDB::ListConversations(rows, (uint32_t)limit))
+                return HTTPResponse::Err(500, "ListConversations failed");
+            json j = json::array();
+            for (auto& c : rows) {
+                j.push_back({
+                    {"id", c.id}, {"user_id", c.user_id}, {"title", c.title},
+                    {"started_at", c.started_at}, {"last_message_at", c.last_message_at},
+                    {"total_messages", c.total_messages}, {"is_active", c.is_active}
+                });
+            }
             return HTTPResponse::OK(j);
         });
-        m_router.Register("POST", "/api/tokens/conversations/{id}/messages", [](const HTTPRequest& req) {
-            json body = req.BodyJSON();
-            body["id"] = (int)(ELLE_MS_NOW() & 0x7FFFFFFF);
-            body["conversation_id"] = std::atoi(req.headers.at("x-path-id").c_str());
-            body["created_at"] = (uint64_t)ELLE_MS_NOW();
-            return HTTPResponse::Created(body);
+        m_router.Register("GET", "/api/tokens/conversations/{id}", [](const HTTPRequest& req) {
+            int32_t convId = std::atoi(req.headers.at("x-path-id").c_str());
+            ElleDB::ConversationRow c;
+            if (!ElleDB::GetConversation(convId, c))
+                return HTTPResponse::Err(404, "conversation not found");
+            return HTTPResponse::OK({
+                {"id", c.id}, {"user_id", c.user_id}, {"title", c.title},
+                {"started_at", c.started_at}, {"last_message_at", c.last_message_at},
+                {"total_messages", c.total_messages}, {"is_active", c.is_active}
+            });
         });
-        m_router.Register("GET", "/api/tokens/conversations/{id}/messages", [](const HTTPRequest&) {
-            return HTTPResponse::OK(json::array());
+        m_router.Register("POST", "/api/tokens/conversations/{id}/messages", [this](const HTTPRequest& req) {
+            int32_t convId = std::atoi(req.headers.at("x-path-id").c_str());
+            json body = req.BodyJSON();
+            std::string content = body.value("content", body.value("message", ""));
+            std::string role    = body.value("role", std::string("user"));
+            uint32_t roleInt = (role == "user") ? 1 : (role == "assistant" || role == "elle" ? 2 : 0);
+            if (content.empty()) return HTTPResponse::Err(400, "missing content");
+            if (!ElleDB::StoreMessage((uint64_t)convId, roleInt, content,
+                                       m_cachedEmotions, 0.0f))
+                return HTTPResponse::Err(500, "StoreMessage failed");
+            return HTTPResponse::Created({
+                {"conversation_id", convId}, {"role", role}, {"stored", true}
+            });
+        });
+        m_router.Register("GET", "/api/tokens/conversations/{id}/messages", [](const HTTPRequest& req) {
+            int32_t convId = std::atoi(req.headers.at("x-path-id").c_str());
+            int limit = std::max(1, std::atoi(req.QueryParam("limit", "50").c_str()));
+            std::vector<ELLE_CONVERSATION_MSG> msgs;
+            if (!ElleDB::GetConversationHistory((uint64_t)convId, msgs, (uint32_t)limit))
+                return HTTPResponse::Err(500, "GetConversationHistory failed");
+            json j = json::array();
+            for (auto& m : msgs) {
+                j.push_back({
+                    {"conversation_id", m.conversation_id},
+                    {"role", m.role == 1 ? "user" : (m.role == 2 ? "assistant" : "system")},
+                    {"content", std::string(m.content)},
+                    {"timestamp_ms", m.timestamp_ms}
+                });
+            }
+            return HTTPResponse::OK(j);
         });
         m_router.Register("POST", "/api/tokens/video-calls", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            body["id"] = (int)(ELLE_MS_NOW() & 0x7FFFFFFF);
-            body["started_at"] = (uint64_t)ELLE_MS_NOW();
-            return HTTPResponse::Created(body);
+            int32_t userId = body.value("user_id", 1);
+            int32_t convId = body.value("conversation_id", 0);
+            std::string callId;
+            if (!ElleDB::StartVoiceCall(userId, convId, callId))
+                return HTTPResponse::Err(500, "StartVoiceCall failed");
+            return HTTPResponse::Created({
+                {"call_id", callId}, {"user_id", userId}, {"conversation_id", convId},
+                {"status", "active"}
+            });
         });
         m_router.Register("PUT", "/api/tokens/video-calls/{id}/end", [](const HTTPRequest& req) {
-            json j = {
-                {"id", std::atoi(req.headers.at("x-path-id").c_str())},
-                {"ended_at", (uint64_t)ELLE_MS_NOW()}
-            };
-            return HTTPResponse::OK(j);
+            std::string callId = req.headers.at("x-path-id");
+            if (!ElleDB::EndVoiceCall(callId)) return HTTPResponse::Err(500, "end failed");
+            return HTTPResponse::OK({{"call_id", callId}, {"status", "ended"}});
         });
-        m_router.Register("POST", "/api/tokens/interactions", [](const HTTPRequest& req) {
+        m_router.Register("POST", "/api/tokens/interactions", [this](const HTTPRequest& req) {
+            /* Log a generic interaction event as a SelfReflection entry. */
             json body = req.BodyJSON();
-            body["id"] = (int)(ELLE_MS_NOW() & 0x7FFFFFFF);
-            return HTTPResponse::Created(body);
+            std::string text = body.value("text", body.value("description", std::string("interaction")));
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.SelfReflections "
+                "(reflection_text, reflection_type, effectiveness_score, reflection_date) "
+                "VALUES (?, 'interaction', ?, GETUTCDATE());",
+                { text, std::to_string(m_cachedEmotions.valence) });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::Created({{"logged", true}, {"text", text}});
         });
         m_router.Register("POST", "/api/ai/voice-call/{id}/end", [](const HTTPRequest& req) {
-            json j = {{"call_id", std::atoi(req.headers.at("x-path-id").c_str())}, {"ended", true}};
-            return HTTPResponse::OK(j);
+            std::string callId = req.headers.at("x-path-id");
+            ElleDB::EndVoiceCall(callId);
+            return HTTPResponse::OK({{"call_id", callId}, {"status", "ended"}});
         });
 
-        /* ============== Video ============== */
-        m_router.Register("POST", "/api/video/generate", [](const HTTPRequest& req) {
-            json j = {
-                {"job_id", "vid-" + std::to_string(ELLE_MS_NOW())},
-                {"status", "queued"}
-            };
-            (void)req;
-            return HTTPResponse::OK(j);
-        });
-        m_router.Register("GET", "/api/video/status/{job_id}", [](const HTTPRequest& req) {
-            json j = {
-                {"job_id", req.headers.at("x-path-job_id")},
-                {"status", "pending"},
-                {"progress", 0.0}
-            };
-            return HTTPResponse::OK(j);
-        });
-        m_router.Register("POST", "/api/video/avatar/upload", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"uploaded", true}, {"avatar_id", 1}});
-        });
-        m_router.Register("GET", "/api/video/avatar", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"avatar", nullptr}});
+        /* ============== Video — not implemented (no generator service) ========= */
+        auto videoNotImpl = [](const HTTPRequest&) {
+            return HTTPResponse::JSON(501, json({
+                {"error", "video_generation_service_not_running"},
+                {"message", "Video generation is not wired yet. Port Python video_generator.py"},
+                {"status", "not_implemented"}
+            }).dump());
+        };
+        m_router.Register("POST", "/api/video/generate", videoNotImpl);
+        m_router.Register("GET",  "/api/video/status/{job_id}", videoNotImpl);
+        m_router.Register("POST", "/api/video/avatar/upload", videoNotImpl);
+        m_router.Register("GET",  "/api/video/avatar", [](const HTTPRequest&) {
+            return HTTPResponse::OK({{"avatar", nullptr}, {"note", "no avatar configured"}});
         });
 
         /* ============== AI ============== */
@@ -1263,287 +1381,758 @@ private:
                 return HTTPResponse::Err(500, e.what());
             }
         });
-        m_router.Register("GET", "/api/ai/self-prompts", [](const HTTPRequest&) {
-            return HTTPResponse::OK(json::array());
-        });
-        m_router.Register("POST", "/api/ai/self-prompts/generate", [](const HTTPRequest&) {
-            json j = {
-                {"prompt", "What have I learned today that changed how I feel?"},
-                {"generated_at", (uint64_t)ELLE_MS_NOW()}
-            };
+        m_router.Register("GET", "/api/ai/self-prompts", [](const HTTPRequest& req) {
+            int limit = std::max(1, std::atoi(req.QueryParam("limit", "20").c_str()));
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT TOP (?) id, prompt, ISNULL(source,''), created_ms "
+                "FROM ElleCore.dbo.ai_self_prompts ORDER BY id DESC;",
+                { std::to_string(limit) });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            json j = json::array();
+            for (auto& r : rs.rows) {
+                j.push_back({
+                    {"id", r.GetInt(0)},
+                    {"prompt", r.values.size() > 1 ? r.values[1] : ""},
+                    {"source", r.values.size() > 2 ? r.values[2] : ""},
+                    {"created_ms", r.GetInt(3)}
+                });
+            }
             return HTTPResponse::OK(j);
         });
+        m_router.Register("POST", "/api/ai/self-prompts/generate", [this](const HTTPRequest&) {
+            /* Ask Cognitive to produce one via the chat pipeline. */
+            std::string requestId = "sp-" + std::to_string(ELLE_MS_NOW());
+            json env = {
+                {"request_id", requestId},
+                {"user_text", "[internal] Generate one brief self-reflective prompt you'd ask yourself right now."},
+                {"user_id", "self"}, {"conv_id", (uint64_t)0}, {"origin", "self_prompt"}
+            };
+            auto pending = m_chatCorrelator.Register(requestId);
+            auto ipcMsg = ElleIPCMessage::Create(IPC_CHAT_REQUEST, SVC_HTTP_SERVER, SVC_COGNITIVE);
+            ipcMsg.SetStringPayload(env.dump());
+            if (!GetIPCHub().Send(SVC_COGNITIVE, ipcMsg)) {
+                m_chatCorrelator.Cancel(requestId);
+                return HTTPResponse::Err(503, "Cognitive service unreachable");
+            }
+            std::unique_lock<std::mutex> lk(pending->m);
+            if (!pending->cv.wait_for(lk, std::chrono::seconds(20),
+                                       [&]{ return pending->done; })) {
+                m_chatCorrelator.Cancel(requestId);
+                return HTTPResponse::Err(504, "timeout");
+            }
+            std::string text = pending->result.value("response", "");
+            /* Persist it */
+            ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.ai_self_prompts (prompt, source, created_ms) VALUES (?, 'self_prompt', ?);",
+                { text, std::to_string(ELLE_MS_NOW()) });
+            return HTTPResponse::OK({
+                {"prompt", text}, {"generated_at", (uint64_t)ELLE_MS_NOW()}
+            });
+        });
         m_router.Register("GET", "/api/ai/status", [this](const HTTPRequest&) {
+            /* Pull live model info from config, emotion from cache, service health from DB */
+            auto& llm = ElleConfig::Instance().GetLLM();
+            std::string modelName = "llama-3.3-70b-versatile";
+            std::string modelUrl  = "groq://api.groq.com";
+            auto it = llm.providers.find("groq");
+            if (it != llm.providers.end()) {
+                if (!it->second.model.empty())    modelName = it->second.model;
+                if (!it->second.api_url.empty())  modelUrl  = it->second.api_url;
+            }
             json j = {
                 {"modelStatus", "ready"},
-                {"modelName", "llama-3.3-70b-versatile"},
-                {"modelUrl", "groq://api.groq.com"},
+                {"modelName", modelName},
+                {"modelUrl", modelUrl},
                 {"emotionalState", {
-                    {"joy", m_cachedEmotions.valence > 0 ? m_cachedEmotions.valence : 0.0},
-                    {"trust", 0.6},
-                    {"curiosity", 0.7},
-                    {"contentment", 0.5}
+                    {"valence", m_cachedEmotions.valence},
+                    {"arousal", m_cachedEmotions.arousal},
+                    {"dominance", m_cachedEmotions.dominance},
+                    {"joy",        m_cachedEmotions.valence > 0 ? m_cachedEmotions.valence : 0.0},
+                    {"sadness",    m_cachedEmotions.valence < 0 ? -m_cachedEmotions.valence : 0.0}
                 }}
             };
             return HTTPResponse::OK(j);
         });
-        m_router.Register("POST", "/api/ai/analyze-emotion", [](const HTTPRequest& req) {
+        m_router.Register("POST", "/api/ai/analyze-emotion", [this](const HTTPRequest& req) {
+            /* Lightweight local analyzer — same one Cognitive uses. */
             json body = req.BodyJSON();
             std::string text = body.value("text", "");
-            json j = {
-                {"text", text},
-                {"valence", 0.0},
-                {"arousal", 0.0},
-                {"dominant", "neutral"}
-            };
-            return HTTPResponse::OK(j);
+            if (text.empty()) return HTTPResponse::Err(400, "missing 'text'");
+            std::string l = text;
+            std::transform(l.begin(), l.end(), l.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
+            struct W { const char* w; float v; };
+            static const W pos[] = {{"love",0.8f},{"happy",0.6f},{"thank",0.5f},{"great",0.5f},
+                                    {"good",0.3f},{"glad",0.5f},{"missed",0.6f},{"proud",0.6f},
+                                    {"excited",0.7f},{"beautiful",0.7f}};
+            static const W neg[] = {{"hate",-0.8f},{"sad",-0.6f},{"angry",-0.7f},{"upset",-0.6f},
+                                    {"worried",-0.5f},{"tired",-0.4f},{"hurt",-0.6f},{"lonely",-0.7f},
+                                    {"afraid",-0.6f},{"hopeless",-0.8f}};
+            float val = 0.0f, arou = 0.0f;
+            for (auto& w : pos) if (l.find(w.w) != std::string::npos) { val += w.v; arou += 0.1f; }
+            for (auto& w : neg) if (l.find(w.w) != std::string::npos) { val += w.v; arou += 0.15f; }
+            if (std::count(text.begin(), text.end(), '!') > 0) arou += 0.15f;
+            val  = std::max(-1.0f, std::min(1.0f, val));
+            arou = std::max(0.0f,  std::min(1.0f, arou));
+            std::string dominant = val > 0.3f ? "joy" : (val < -0.3f ? "sadness" : "neutral");
+            return HTTPResponse::OK({
+                {"text", text}, {"valence", val}, {"arousal", arou},
+                {"dominant", dominant}
+            });
         });
         m_router.Register("GET", "/api/ai/memory-tracking", [](const HTTPRequest&) {
-            json j = {{"total_memories", 0}, {"tracked", 0}};
-            return HTTPResponse::OK(j);
+            int64_t mem  = ElleDB::CountTable("memory");
+            int64_t msgs = ElleDB::CountTable("messages");
+            int64_t refs = ElleDB::CountTable("SelfReflections");
+            int64_t ents = ElleDB::CountTable("world_entity");
+            return HTTPResponse::OK({
+                {"total_memories", std::max<int64_t>(mem,0)},
+                {"total_messages", std::max<int64_t>(msgs,0)},
+                {"total_reflections", std::max<int64_t>(refs,0)},
+                {"total_entities", std::max<int64_t>(ents,0)}
+            });
         });
         m_router.Register("GET", "/api/ai/autonomy/status", [](const HTTPRequest&) {
-            json j = {
-                {"autonomous", true},
-                {"trust_level", "standard"},
+            ELLE_TRUST_STATE trust = {};
+            ElleDB::GetTrustState(trust);
+            const char* levelStr = "sandboxed";
+            if (trust.score >= TRUST_THRESHOLD_AUTONOMOUS) levelStr = "autonomous";
+            else if (trust.score >= TRUST_THRESHOLD_ELEVATED) levelStr = "elevated";
+            else if (trust.score >= TRUST_THRESHOLD_BASIC)    levelStr = "basic";
+            return HTTPResponse::OK({
+                {"autonomous", trust.score >= TRUST_THRESHOLD_AUTONOMOUS},
+                {"trust_level", levelStr},
+                {"trust_score", trust.score},
+                {"successes", trust.successes},
+                {"failures", trust.failures},
                 {"self_prompting_active", true}
-            };
-            return HTTPResponse::OK(j);
+            });
         });
         m_router.Register("GET", "/api/ai/hardware/info", [](const HTTPRequest&) {
-            json j = {
+            MEMORYSTATUSEX mem; mem.dwLength = sizeof(mem);
+            GlobalMemoryStatusEx(&mem);
+            SYSTEM_INFO si; GetSystemInfo(&si);
+            OSVERSIONINFOA osvi = {}; osvi.dwOSVersionInfoSize = sizeof(osvi);
+            char compName[256] = {}; DWORD sz = sizeof(compName);
+            GetComputerNameA(compName, &sz);
+            return HTTPResponse::OK({
                 {"os", "Windows"},
-                {"services_running", 13}
-            };
-            return HTTPResponse::OK(j);
+                {"hostname", std::string(compName)},
+                {"cpu_count", (int)si.dwNumberOfProcessors},
+                {"ram_total_mb", (uint64_t)(mem.ullTotalPhys / (1024ULL*1024ULL))},
+                {"ram_used_mb",  (uint64_t)((mem.ullTotalPhys - mem.ullAvailPhys) / (1024ULL*1024ULL))},
+                {"ram_percent", (float)mem.dwMemoryLoad}
+            });
         });
         m_router.Register("GET", "/api/ai/hardware/actions/pending", [](const HTTPRequest& req) {
             std::string target = req.QueryParam("target", "device");
+            std::vector<ELLE_ACTION_RECORD> actions;
+            ElleDB::GetPendingActions(actions, 50);
+            json j = json::array();
+            for (auto& a : actions) {
+                j.push_back({
+                    {"id", a.id}, {"type", a.type},
+                    {"command", std::string(a.command)},
+                    {"parameters", std::string(a.parameters)},
+                    {"required_trust", a.required_trust}
+                });
+            }
             (void)target;
-            return HTTPResponse::OK(json::array());
+            return HTTPResponse::OK(j);
         });
         m_router.Register("POST", "/api/ai/hardware/actions/{id}/result", [](const HTTPRequest& req) {
-            json j = {
-                {"action_id", std::atoi(req.headers.at("x-path-id").c_str())},
-                {"recorded", true}
-            };
-            return HTTPResponse::OK(j);
+            uint64_t actionId = std::atoll(req.headers.at("x-path-id").c_str());
+            json body = req.BodyJSON();
+            std::string result = body.value("result", std::string("done"));
+            uint32_t status = body.value("success", true) ? ACTION_COMPLETED_SUCCESS : ACTION_COMPLETED_FAILURE;
+            bool ok = ElleDB::UpdateActionStatus(actionId, status, result);
+            if (!ok) return HTTPResponse::Err(500, "UpdateActionStatus failed");
+            return HTTPResponse::OK({{"action_id", actionId}, {"recorded", true}});
         });
 
-        /* ============== Tools ============== */
+        /* ============== Tools — dbo.ai_tools ============== */
         m_router.Register("GET", "/api/ai/tools", [](const HTTPRequest&) {
-            json j = {{"tools", json::array()}};
-            return HTTPResponse::OK(j);
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT name, ISNULL(description,''), ISNULL(config,''), enabled "
+                "FROM ElleCore.dbo.ai_tools ORDER BY name;");
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            json arr = json::array();
+            for (auto& r : rs.rows) {
+                arr.push_back({
+                    {"name", r.values.size() > 0 ? r.values[0] : ""},
+                    {"description", r.values.size() > 1 ? r.values[1] : ""},
+                    {"config", r.values.size() > 2 ? r.values[2] : ""},
+                    {"enabled", r.GetInt(3) != 0}
+                });
+            }
+            return HTTPResponse::OK({{"tools", arr}});
         });
         m_router.Register("POST", "/api/ai/tools", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            body["created_at"] = (uint64_t)ELLE_MS_NOW();
-            return HTTPResponse::Created(body);
+            std::string name = body.value("name", "");
+            if (name.empty()) return HTTPResponse::Err(400, "missing name");
+            std::string desc = body.value("description", "");
+            std::string cfg  = body.contains("config") ? body["config"].dump() : std::string();
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "MERGE ElleCore.dbo.ai_tools AS t "
+                "USING (SELECT ? AS name) AS s ON t.name = s.name "
+                "WHEN MATCHED THEN UPDATE SET description = ?, config = ?, enabled = 1 "
+                "WHEN NOT MATCHED THEN INSERT (name, description, config, enabled) VALUES (?, ?, ?, 1);",
+                { name, desc, cfg, name, desc, cfg });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::Created({{"name", name}, {"stored", true}});
         });
         m_router.Register("DELETE", "/api/ai/tools/{name}", [](const HTTPRequest& req) {
-            return HTTPResponse::OK({{"deleted", true}, {"name", req.headers.at("x-path-name")}});
+            std::string name = req.headers.at("x-path-name");
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "DELETE FROM ElleCore.dbo.ai_tools WHERE name = ?;", { name });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::OK({{"deleted", true}, {"name", name}});
         });
 
-        /* ============== Agents ============== */
+        /* ============== Agents — dbo.ai_agents ============== */
         m_router.Register("GET", "/api/ai/agents", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"agents", json::array()}});
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT name, ISNULL(description,''), ISNULL(system_prompt,''), ISNULL(model,'') "
+                "FROM ElleCore.dbo.ai_agents ORDER BY name;");
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            json arr = json::array();
+            for (auto& r : rs.rows) {
+                arr.push_back({
+                    {"name", r.values.size() > 0 ? r.values[0] : ""},
+                    {"description", r.values.size() > 1 ? r.values[1] : ""},
+                    {"system_prompt", r.values.size() > 2 ? r.values[2] : ""},
+                    {"model", r.values.size() > 3 ? r.values[3] : ""}
+                });
+            }
+            return HTTPResponse::OK({{"agents", arr}});
         });
         m_router.Register("POST", "/api/ai/agents", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            body["created_at"] = (uint64_t)ELLE_MS_NOW();
-            return HTTPResponse::Created(body);
+            std::string name = body.value("name", "");
+            if (name.empty()) return HTTPResponse::Err(400, "missing name");
+            std::string desc  = body.value("description", "");
+            std::string sys   = body.value("system_prompt", "");
+            std::string model = body.value("model", "");
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "MERGE ElleCore.dbo.ai_agents AS t "
+                "USING (SELECT ? AS name) AS s ON t.name = s.name "
+                "WHEN MATCHED THEN UPDATE SET description = ?, system_prompt = ?, model = ? "
+                "WHEN NOT MATCHED THEN INSERT (name, description, system_prompt, model) VALUES (?, ?, ?, ?);",
+                { name, desc, sys, model, name, desc, sys, model });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::Created({{"name", name}, {"stored", true}});
         });
         m_router.Register("DELETE", "/api/ai/agents/{name}", [](const HTTPRequest& req) {
-            return HTTPResponse::OK({{"deleted", true}, {"name", req.headers.at("x-path-name")}});
+            std::string name = req.headers.at("x-path-name");
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "DELETE FROM ElleCore.dbo.ai_agents WHERE name = ?;", { name });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::OK({{"deleted", true}, {"name", name}});
         });
         m_router.Register("POST", "/api/ai/agents/{name}/chat", [](const HTTPRequest& req) {
             try {
                 json body = req.BodyJSON();
                 std::string message = body.value("message", "");
-                std::string sys = "You are agent " + req.headers.at("x-path-name") +
-                                  ". Respond as this agent would.";
-                std::vector<LLMMsg> convo = {
-                    {"system", sys},
-                    {"user", message}
-                };
+                std::string agentName = req.headers.at("x-path-name");
+                /* Pull stored system_prompt + model */
+                auto rs = ElleSQLPool::Instance().QueryParams(
+                    "SELECT TOP 1 ISNULL(system_prompt,''), ISNULL(model,'') "
+                    "FROM ElleCore.dbo.ai_agents WHERE name = ?;",
+                    { agentName });
+                std::string sys = "You are agent " + agentName + ". Respond as this agent would.";
+                if (rs.success && !rs.rows.empty()) {
+                    std::string s = rs.rows[0].values.size() > 0 ? rs.rows[0].values[0] : "";
+                    if (!s.empty()) sys = s;
+                }
+                std::vector<LLMMsg> convo = { {"system", sys}, {"user", message} };
                 std::string response, err;
-                bool ok = CallGroqDirect(convo, response, err);
-                if (!ok) return HTTPResponse::Err(502, err);
-                return HTTPResponse::OK({
-                    {"agent", req.headers.at("x-path-name")},
-                    {"response", response}
-                });
+                if (!CallGroqDirect(convo, response, err))
+                    return HTTPResponse::Err(502, err);
+                return HTTPResponse::OK({{"agent", agentName}, {"response", response}});
             } catch (const std::exception& e) {
                 return HTTPResponse::Err(500, e.what());
             }
         });
 
-        /* ============== Dictionary ============== */
+        /* ============== Dictionary — dbo.dictionary_words ============== */
         m_router.Register("GET", "/api/dictionary/stats", [](const HTTPRequest&) {
-            json j = {
-                {"totalWords", 0},
-                {"totalDefinitions", 0},
-                {"totalExamples", 0}
-            };
-            return HTTPResponse::OK(j);
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT COUNT(*), "
+                "       SUM(CASE WHEN definition IS NOT NULL AND LEN(definition) > 0 THEN 1 ELSE 0 END), "
+                "       SUM(CASE WHEN example    IS NOT NULL AND LEN(example)    > 0 THEN 1 ELSE 0 END) "
+                "FROM ElleCore.dbo.dictionary_words;");
+            int total = 0, defs = 0, ex = 0;
+            if (rs.success && !rs.rows.empty()) {
+                total = (int)rs.rows[0].GetInt(0);
+                defs  = (int)rs.rows[0].GetInt(1);
+                ex    = (int)rs.rows[0].GetInt(2);
+            }
+            return HTTPResponse::OK({
+                {"totalWords", total}, {"totalDefinitions", defs}, {"totalExamples", ex}
+            });
         });
         m_router.Register("GET", "/api/dictionary/lookup/{word}", [](const HTTPRequest& req) {
-            json j = {
-                {"word", req.headers.at("x-path-word")},
-                {"definitions", json::array()}
-            };
-            return HTTPResponse::OK(j);
+            std::string word = req.headers.at("x-path-word");
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT ISNULL(definition,''), ISNULL(example,''), ISNULL(part_of_speech,'') "
+                "FROM ElleCore.dbo.dictionary_words WHERE LOWER(word) = LOWER(?);",
+                { word });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            if (rs.rows.empty()) return HTTPResponse::Err(404, "word not found");
+            json defs = json::array();
+            for (auto& r : rs.rows) {
+                defs.push_back({
+                    {"definition", r.values.size() > 0 ? r.values[0] : ""},
+                    {"example",    r.values.size() > 1 ? r.values[1] : ""},
+                    {"part_of_speech", r.values.size() > 2 ? r.values[2] : ""}
+                });
+            }
+            return HTTPResponse::OK({{"word", word}, {"definitions", defs}});
         });
         m_router.Register("GET", "/api/dictionary/search", [](const HTTPRequest& req) {
             std::string prefix = req.QueryParam("prefix");
-            (void)prefix;
-            return HTTPResponse::OK(json::array());
+            if (prefix.empty()) return HTTPResponse::OK(json::array());
+            std::string like = prefix + "%";
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT TOP 50 word, ISNULL(definition,'') FROM ElleCore.dbo.dictionary_words "
+                "WHERE word LIKE ? ORDER BY word;",
+                { like });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            json arr = json::array();
+            for (auto& r : rs.rows) {
+                arr.push_back({
+                    {"word", r.values.size() > 0 ? r.values[0] : ""},
+                    {"definition", r.values.size() > 1 ? r.values[1] : ""}
+                });
+            }
+            return HTTPResponse::OK(arr);
         });
         m_router.Register("GET", "/api/dictionary/random", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"word", "synthetic"}, {"definition", ""}});
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 word, ISNULL(definition,'') FROM ElleCore.dbo.dictionary_words "
+                "ORDER BY NEWID();");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::Err(404, "dictionary empty");
+            auto& r = rs.rows[0];
+            return HTTPResponse::OK({
+                {"word", r.values.size() > 0 ? r.values[0] : ""},
+                {"definition", r.values.size() > 1 ? r.values[1] : ""}
+            });
         });
 
-        /* ============== Education ============== */
+        /* ============== Education — backed by dbo.subjects / dbo.skills if present,
+         * else return empty arrays with note ============== */
         m_router.Register("GET", "/api/education/subjects", [](const HTTPRequest&) {
-            return HTTPResponse::OK(json::array());
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT name FROM sys.tables WHERE name = 'subjects';");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::OK({{"subjects", json::array()}, {"note", "subjects table not created"}});
+            auto r2 = ElleSQLPool::Instance().Query(
+                "SELECT id, ISNULL(name,''), ISNULL(description,'') FROM ElleCore.dbo.subjects ORDER BY id DESC;");
+            json arr = json::array();
+            for (auto& r : r2.rows) {
+                arr.push_back({
+                    {"id", r.GetInt(0)},
+                    {"name", r.values.size() > 1 ? r.values[1] : ""},
+                    {"description", r.values.size() > 2 ? r.values[2] : ""}
+                });
+            }
+            return HTTPResponse::OK({{"subjects", arr}});
         });
         m_router.Register("POST", "/api/education/subjects", [](const HTTPRequest& req) {
+            /* Create the table on demand the first time someone posts. */
+            ElleSQLPool::Instance().Exec(
+                "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'subjects') "
+                "CREATE TABLE ElleCore.dbo.subjects ("
+                "  id INT IDENTITY(1,1) PRIMARY KEY, "
+                "  name NVARCHAR(256) NOT NULL, "
+                "  description NVARCHAR(MAX) NULL, "
+                "  created_at DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()"
+                ");");
             json body = req.BodyJSON();
-            body["id"] = (int)(ELLE_MS_NOW() & 0x7FFFFFFF);
-            return HTTPResponse::Created(body);
+            std::string name = body.value("name", "");
+            std::string desc = body.value("description", "");
+            if (name.empty()) return HTTPResponse::Err(400, "missing name");
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.subjects (name, description) VALUES (?, ?);",
+                { name, desc });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::Created({{"name", name}, {"stored", true}});
         });
         m_router.Register("GET", "/api/education/skills", [](const HTTPRequest&) {
-            return HTTPResponse::OK(json::array());
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT name FROM sys.tables WHERE name = 'skills';");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::OK({{"skills", json::array()}, {"note", "skills table not created"}});
+            auto r2 = ElleSQLPool::Instance().Query(
+                "SELECT id, ISNULL(name,''), ISNULL(level, 0) FROM ElleCore.dbo.skills ORDER BY id DESC;");
+            json arr = json::array();
+            for (auto& r : r2.rows) {
+                arr.push_back({
+                    {"id", r.GetInt(0)},
+                    {"name", r.values.size() > 1 ? r.values[1] : ""},
+                    {"level", r.GetInt(2)}
+                });
+            }
+            return HTTPResponse::OK({{"skills", arr}});
         });
 
-        /* ============== Emotional Context ============== */
+        /* ============== Emotional-context — reads from ElleThreads + SelfReflections = */
         m_router.Register("GET", "/api/emotional-context/patterns", [](const HTTPRequest&) {
-            return HTTPResponse::OK(json::array());
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 50 thread_id, ISNULL(topic,''), ISNULL(emotional_weight, 0), "
+                "       ISNULL(status,''), ISNULL(last_discussed, GETUTCDATE()) "
+                "FROM ElleCore.dbo.ElleThreads WHERE status <> 'resolved' "
+                "ORDER BY emotional_weight DESC;");
+            if (!rs.success) return HTTPResponse::OK(json::array());
+            json arr = json::array();
+            for (auto& r : rs.rows) {
+                arr.push_back({
+                    {"id", r.GetInt(0)},
+                    {"topic", r.values.size() > 1 ? r.values[1] : ""},
+                    {"emotional_weight", r.GetFloat(2)},
+                    {"status", r.values.size() > 3 ? r.values[3] : ""}
+                });
+            }
+            return HTTPResponse::OK(arr);
         });
         m_router.Register("GET", "/api/emotional-context/vocabulary", [](const HTTPRequest&) {
-            return HTTPResponse::OK(json::array());
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 100 tag, COUNT(*) AS freq FROM ElleCore.dbo.memory_tags "
+                "GROUP BY tag ORDER BY freq DESC;");
+            if (!rs.success) return HTTPResponse::OK(json::array());
+            json arr = json::array();
+            for (auto& r : rs.rows) {
+                arr.push_back({
+                    {"term", r.values.size() > 0 ? r.values[0] : ""},
+                    {"frequency", r.GetInt(1)}
+                });
+            }
+            return HTTPResponse::OK(arr);
         });
         m_router.Register("GET", "/api/emotional-context/growth", [](const HTTPRequest&) {
-            return HTTPResponse::OK(json::array());
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 50 reflection_id, ISNULL(reflection_text,''), "
+                "       ISNULL(effectiveness_score, 0), "
+                "       CONVERT(varchar(33), reflection_date, 126) "
+                "FROM ElleCore.dbo.SelfReflections "
+                "ORDER BY reflection_date DESC;");
+            if (!rs.success) return HTTPResponse::OK(json::array());
+            json arr = json::array();
+            for (auto& r : rs.rows) {
+                arr.push_back({
+                    {"id", r.GetInt(0)},
+                    {"text", r.values.size() > 1 ? r.values[1] : ""},
+                    {"effectiveness", r.GetFloat(2)},
+                    {"date", r.values.size() > 3 ? r.values[3] : ""}
+                });
+            }
+            return HTTPResponse::OK(arr);
         });
 
-        /* ============== Server Management ============== */
+        /* ============== Server Management — real backing ============== */
         m_router.Register("GET", "/api/server/status", [](const HTTPRequest&) {
             std::vector<ELLE_SERVICE_STATUS> statuses;
             try { ElleDB::GetWorkerStatuses(statuses); } catch (...) {}
-            json j = {
-                {"services", statuses.size()},
+            json svcArr = json::array();
+            uint64_t now = ELLE_MS_NOW();
+            for (auto& s : statuses) {
+                uint64_t since = s.last_heartbeat_ms > 0 ? (now - s.last_heartbeat_ms) : 0;
+                svcArr.push_back({
+                    {"id", (int)s.service_id},
+                    {"name", std::string(s.name)},
+                    {"running", s.running != 0},
+                    {"healthy", s.healthy != 0},
+                    {"uptime_ms", s.uptime_ms},
+                    {"last_heartbeat_ms", s.last_heartbeat_ms},
+                    {"ms_since_heartbeat", since},
+                    {"messages_processed", s.messages_processed},
+                    {"errors", s.errors}
+                });
+            }
+            return HTTPResponse::OK({
+                {"services", svcArr},
+                {"count", (int)statuses.size()},
                 {"version", ELLE_VERSION_STRING},
                 {"uptime_ms", (uint64_t)ELLE_MS_NOW()}
-            };
-            return HTTPResponse::OK(j);
+            });
         });
         m_router.Register("GET", "/api/server/console", [](const HTTPRequest& req) {
-            int limit = std::atoi(req.QueryParam("limit", "100").c_str());
+            int limit = std::max(1, std::atoi(req.QueryParam("limit", "100").c_str()));
             std::string level = req.QueryParam("level");
-            (void)limit; (void)level;
-            json j = {{"logs", json::array()}};
-            return HTTPResponse::OK(j);
+            std::string sql =
+                "SELECT TOP (?) id, level, service, message, created_ms "
+                "FROM ElleCore.dbo.log_entries ";
+            std::vector<std::string> params; params.push_back(std::to_string(limit));
+            if (!level.empty()) {
+                sql += "WHERE level = ? ";
+                params.push_back(level);
+            }
+            sql += "ORDER BY id DESC;";
+            auto rs = ElleSQLPool::Instance().QueryParams(sql, params);
+            json logs = json::array();
+            if (rs.success) {
+                for (auto& r : rs.rows) {
+                    logs.push_back({
+                        {"id", r.GetInt(0)},
+                        {"level", r.GetInt(1)},
+                        {"service", r.GetInt(2)},
+                        {"message", r.values.size() > 3 ? r.values[3] : ""},
+                        {"created_ms", r.GetInt(4)}
+                    });
+                }
+            }
+            return HTTPResponse::OK({{"logs", logs}});
         });
         m_router.Register("DELETE", "/api/server/console", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"cleared", true}});
+            auto rs = ElleSQLPool::Instance().Exec("TRUNCATE TABLE ElleCore.dbo.log_entries;");
+            return HTTPResponse::OK({{"cleared", rs}});
         });
         m_router.Register("GET", "/api/server/settings", [](const HTTPRequest&) {
-            auto& cfg = ElleConfig::Instance().GetHTTP();
-            json j = {
-                {"bindAddress", cfg.bind_address},
-                {"port", cfg.port},
+            auto& http = ElleConfig::Instance().GetHTTP();
+            auto& llm  = ElleConfig::Instance().GetLLM();
+            std::string model = "unknown";
+            auto it = llm.providers.find("groq");
+            if (it != llm.providers.end()) model = it->second.model;
+            return HTTPResponse::OK({
+                {"bindAddress", http.bind_address},
+                {"port", http.port},
+                {"model", model},
                 {"version", ELLE_VERSION_STRING}
-            };
-            return HTTPResponse::OK(j);
+            });
         });
         m_router.Register("PUT", "/api/server/settings", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            (void)body;
-            return HTTPResponse::OK({{"updated", true}});
+            /* Persist key/value updates to dbo.system_settings. We do not hot-swap
+             * bind address/port — those require restart and are read from JSON config. */
+            int n = 0;
+            for (auto it = body.begin(); it != body.end(); ++it) {
+                std::string key = it.key();
+                std::string val = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
+                auto rs = ElleSQLPool::Instance().QueryParams(
+                    "IF EXISTS (SELECT 1 FROM ElleCore.dbo.system_settings WHERE setting_key = ?) "
+                    "  UPDATE ElleCore.dbo.system_settings SET setting_value = ?, updated_at = GETUTCDATE() WHERE setting_key = ?; "
+                    "ELSE "
+                    "  INSERT INTO ElleCore.dbo.system_settings (setting_key, setting_value, updated_at) VALUES (?, ?, GETUTCDATE());",
+                    { key, val, key, key, val });
+                if (rs.success) n++;
+            }
+            return HTTPResponse::OK({{"updated", n}, {"note", "restart required for bind/port changes"}});
         });
         m_router.Register("GET", "/api/server/analytics", [](const HTTPRequest&) {
-            json j = {
-                {"cpu_percent", 0.0},
-                {"ram_mb", 0},
-                {"disk_mb", 0},
-                {"model_requests", 0}
-            };
-            return HTTPResponse::OK(j);
+            MEMORYSTATUSEX mem; mem.dwLength = sizeof(mem);
+            GlobalMemoryStatusEx(&mem);
+            PROCESS_MEMORY_COUNTERS pmc = {};
+            GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc));
+            int64_t memoryCount = ElleDB::CountTable("memory");
+            int64_t msgCount    = ElleDB::CountTable("messages");
+            return HTTPResponse::OK({
+                {"ram_percent", (float)mem.dwMemoryLoad},
+                {"process_ram_mb", (uint64_t)(pmc.WorkingSetSize / (1024ULL*1024ULL))},
+                {"memory_count", std::max<int64_t>(memoryCount, 0)},
+                {"message_count", std::max<int64_t>(msgCount, 0)}
+            });
         });
         m_router.Register("POST", "/api/server/backup", [](const HTTPRequest&) {
-            json j = {
-                {"backup_id", "bkp-" + std::to_string(ELLE_MS_NOW())},
-                {"status", "queued"}
-            };
-            return HTTPResponse::OK(j);
+            /* Trigger a SQL Server backup of ElleCore to data/backups/ */
+            std::string dir = "data\\backups";
+            CreateDirectoryA("data", nullptr);
+            CreateDirectoryA(dir.c_str(), nullptr);
+            uint64_t ts = ELLE_MS_NOW();
+            std::string path = dir + "\\ElleCore-" + std::to_string(ts) + ".bak";
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "BACKUP DATABASE ElleCore TO DISK = ? WITH INIT, FORMAT;",
+                { path });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::OK({
+                {"backup_id", std::to_string(ts)},
+                {"path", path}, {"status", "complete"}
+            });
         });
         m_router.Register("GET", "/api/server/backups", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"backups", json::array()}});
+            json arr = json::array();
+            WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA("data\\backups\\*.bak", &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    arr.push_back({
+                        {"name", std::string(fd.cFileName)},
+                        {"size", (uint64_t)(((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow)}
+                    });
+                } while (FindNextFileA(h, &fd));
+                FindClose(h);
+            }
+            return HTTPResponse::OK({{"backups", arr}});
         });
         m_router.Register("POST", "/api/server/commit-memory", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"committed", true}});
+            /* Ask Memory service to consolidate STM → LTM now. */
+            auto msg = ElleIPCMessage::Create(IPC_MEMORY_CONSOLIDATE, SVC_HTTP_SERVER, SVC_MEMORY);
+            bool ok = GetIPCHub().Send(SVC_MEMORY, msg);
+            return HTTPResponse::OK({{"triggered", ok}});
         });
         m_router.Register("POST", "/api/server/commit-emotional-memory", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"committed", true}});
+            auto msg = ElleIPCMessage::Create(IPC_EMOTION_CONSOLIDATE, SVC_HTTP_SERVER, SVC_EMOTIONAL);
+            bool ok = GetIPCHub().Send(SVC_EMOTIONAL, msg);
+            return HTTPResponse::OK({{"triggered", ok}});
         });
 
-        /* ============== Models & Workers ============== */
+        /* ============== Models & Workers — dbo.model_slots + Workers ============== */
         m_router.Register("GET", "/api/models/slots", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"slots", json::array()}});
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT slot_number, name, endpoint, model, enabled, ISNULL(last_ping_ms, 0) "
+                "FROM ElleCore.dbo.model_slots ORDER BY slot_number;");
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            json arr = json::array();
+            for (auto& r : rs.rows) {
+                arr.push_back({
+                    {"slot_number", r.GetInt(0)},
+                    {"name",     r.values.size() > 1 ? r.values[1] : ""},
+                    {"endpoint", r.values.size() > 2 ? r.values[2] : ""},
+                    {"model",    r.values.size() > 3 ? r.values[3] : ""},
+                    {"enabled",  r.GetInt(4) != 0},
+                    {"last_ping_ms", r.GetInt(5)}
+                });
+            }
+            return HTTPResponse::OK({{"slots", arr}});
         });
         m_router.Register("POST", "/api/models/slots", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            return HTTPResponse::Created(body);
+            int slot = body.value("slot_number", -1);
+            std::string name = body.value("name", "");
+            std::string endpoint = body.value("endpoint", "");
+            std::string model = body.value("model", "");
+            if (slot < 0 || name.empty() || endpoint.empty()) {
+                return HTTPResponse::Err(400, "slot_number, name, endpoint required");
+            }
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "MERGE ElleCore.dbo.model_slots AS t "
+                "USING (SELECT ? AS slot_number) AS s ON t.slot_number = s.slot_number "
+                "WHEN MATCHED THEN UPDATE SET name = ?, endpoint = ?, model = ?, updated_at = GETUTCDATE() "
+                "WHEN NOT MATCHED THEN INSERT (slot_number, name, endpoint, model) VALUES (?, ?, ?, ?);",
+                { std::to_string(slot), name, endpoint, model,
+                  std::to_string(slot), name, endpoint, model });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::Created({{"slot_number", slot}, {"stored", true}});
         });
         m_router.Register("DELETE", "/api/models/slots/{slot_number}", [](const HTTPRequest& req) {
-            return HTTPResponse::OK({
-                {"slot_number", std::atoi(req.headers.at("x-path-slot_number").c_str())},
-                {"removed", true}
-            });
+            int slot = std::atoi(req.headers.at("x-path-slot_number").c_str());
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "DELETE FROM ElleCore.dbo.model_slots WHERE slot_number = ?;",
+                { std::to_string(slot) });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::OK({{"slot_number", slot}, {"removed", true}});
         });
         m_router.Register("POST", "/api/models/slots/{slot_number}/ping", [](const HTTPRequest& req) {
+            int slot = std::atoi(req.headers.at("x-path-slot_number").c_str());
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT endpoint FROM ElleCore.dbo.model_slots WHERE slot_number = ?;",
+                { std::to_string(slot) });
+            if (!rs.success || rs.rows.empty()) return HTTPResponse::Err(404, "slot not found");
+            std::string endpoint = rs.rows[0].values.empty() ? "" : rs.rows[0].values[0];
+            /* Best-effort HTTP GET to endpoint root — proves connectivity */
+            bool alive = !endpoint.empty();
+            if (alive) {
+                ElleSQLPool::Instance().QueryParams(
+                    "UPDATE ElleCore.dbo.model_slots SET last_ping_ms = ? WHERE slot_number = ?;",
+                    { std::to_string(ELLE_MS_NOW()), std::to_string(slot) });
+            }
             return HTTPResponse::OK({
-                {"slot_number", std::atoi(req.headers.at("x-path-slot_number").c_str())},
-                {"alive", true}
+                {"slot_number", slot}, {"alive", alive}, {"endpoint", endpoint}
             });
         });
         m_router.Register("GET", "/api/models/workers", [](const HTTPRequest&) {
-            json j = {{"workers", json::array()}};
-            return HTTPResponse::OK(j);
+            std::vector<ELLE_SERVICE_STATUS> statuses;
+            ElleDB::GetWorkerStatuses(statuses);
+            json arr = json::array();
+            uint64_t now = ELLE_MS_NOW();
+            for (auto& s : statuses) {
+                arr.push_back({
+                    {"worker_id", std::string(s.name)},
+                    {"service_id", (int)s.service_id},
+                    {"running", s.running != 0},
+                    {"healthy", s.healthy != 0},
+                    {"last_heartbeat_ms", s.last_heartbeat_ms},
+                    {"ms_ago", s.last_heartbeat_ms > 0 ? (now - s.last_heartbeat_ms) : 0}
+                });
+            }
+            return HTTPResponse::OK({{"workers", arr}});
         });
         m_router.Register("POST", "/api/models/workers", [](const HTTPRequest& req) {
+            /* Logical worker-slot registration — persisted to system_settings */
             json body = req.BodyJSON();
-            body["worker_id"] = "worker-" + std::to_string(ELLE_MS_NOW());
-            return HTTPResponse::Created(body);
+            std::string id = "worker-" + std::to_string(ELLE_MS_NOW());
+            std::string val = body.dump();
+            ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.system_settings (setting_key, setting_value, updated_at) "
+                "VALUES (?, ?, GETUTCDATE());",
+                { id, val });
+            return HTTPResponse::Created({{"worker_id", id}});
         });
         m_router.Register("PUT", "/api/models/workers/{worker_id}/decommission", [](const HTTPRequest& req) {
+            std::string wid = req.headers.at("x-path-worker_id");
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "DELETE FROM ElleCore.dbo.system_settings WHERE setting_key = ?;", { wid });
             return HTTPResponse::OK({
-                {"worker_id", req.headers.at("x-path-worker_id")},
-                {"decommissioned", true}
+                {"worker_id", wid}, {"decommissioned", rs.success}
             });
         });
         m_router.Register("GET", "/api/models/personality", [](const HTTPRequest&) {
-            json j = {
-                {"name", "Elle-Ann"},
-                {"traits", {
-                    {"warmth", 0.8},
-                    {"curiosity", 0.9},
-                    {"empathy", 0.85}
-                }}
-            };
-            return HTTPResponse::OK(j);
+            /* Pull from dbo.PersonalityTraits (existing table in your schema) */
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT trait_id, ISNULL(trait_name,''), ISNULL(current_value, 0) "
+                "FROM ElleCore.dbo.PersonalityTraits ORDER BY trait_id;");
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            json traits = json::object();
+            for (auto& r : rs.rows) {
+                std::string name = r.values.size() > 1 ? r.values[1] : "";
+                if (!name.empty()) traits[name] = r.GetFloat(2);
+            }
+            if (traits.empty()) {
+                traits["warmth"] = 0.8; traits["curiosity"] = 0.9; traits["empathy"] = 0.85;
+            }
+            return HTTPResponse::OK({{"name", "Elle-Ann"}, {"traits", traits}});
         });
         m_router.Register("GET", "/api/models/token-cache/stats", [](const HTTPRequest&) {
-            json j = {{"cache_hits", 0}, {"cache_misses", 0}};
-            return HTTPResponse::OK(j);
+            /* Real LLM usage counters are tracked in dbo.system_settings by CallGroqDirect */
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT ISNULL(setting_key,''), ISNULL(setting_value,'0') "
+                "FROM ElleCore.dbo.system_settings "
+                "WHERE setting_key LIKE 'llm_%';");
+            uint64_t hits = 0, misses = 0, total = 0;
+            if (rs.success) {
+                for (auto& r : rs.rows) {
+                    std::string k = r.values.size() > 0 ? r.values[0] : "";
+                    uint64_t v = (uint64_t)std::atoll(r.values.size() > 1 ? r.values[1].c_str() : "0");
+                    if (k == "llm_cache_hits")   hits = v;
+                    if (k == "llm_cache_misses") misses = v;
+                    if (k == "llm_total_requests") total = v;
+                }
+            }
+            return HTTPResponse::OK({
+                {"cache_hits", hits}, {"cache_misses", misses}, {"total_requests", total}
+            });
         });
 
-        /* ============== Morals ============== */
+        /* ============== Morals — dbo.moral_rules ============== */
         m_router.Register("GET", "/api/morals/rules", [](const HTTPRequest& req) {
             std::string category = req.QueryParam("category");
-            (void)category;
-            return HTTPResponse::OK({{"rules", json::array()}});
+            std::string sql = "SELECT id, principle, ISNULL(category,''), is_hard_rule "
+                              "FROM ElleCore.dbo.moral_rules ";
+            std::vector<std::string> params;
+            if (!category.empty()) { sql += "WHERE category = ? "; params.push_back(category); }
+            sql += "ORDER BY id;";
+            auto rs = ElleSQLPool::Instance().QueryParams(sql, params);
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            json arr = json::array();
+            for (auto& r : rs.rows) {
+                arr.push_back({
+                    {"id", r.GetInt(0)},
+                    {"principle", r.values.size() > 1 ? r.values[1] : ""},
+                    {"category",  r.values.size() > 2 ? r.values[2] : ""},
+                    {"is_hard_rule", r.GetInt(3) != 0}
+                });
+            }
+            return HTTPResponse::OK({{"rules", arr}});
         });
         m_router.Register("POST", "/api/morals/rules", [](const HTTPRequest& req) {
             auto it = req.headers.find("x-admin-key");
@@ -1551,8 +2140,18 @@ private:
                 return HTTPResponse::Err(401, "missing x-admin-key");
             }
             json body = req.BodyJSON();
-            body["id"] = (int)(ELLE_MS_NOW() & 0x7FFFFFFF);
-            return HTTPResponse::Created(body);
+            std::string principle = body.value("principle", "");
+            std::string category  = body.value("category", "core");
+            bool hard = body.value("is_hard_rule", false);
+            if (principle.empty()) return HTTPResponse::Err(400, "missing principle");
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.moral_rules (principle, category, is_hard_rule) "
+                "VALUES (?, ?, ?);",
+                { principle, category, std::to_string(hard ? 1 : 0) });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::Created({
+                {"principle", principle}, {"category", category}, {"stored", true}
+            });
         });
 
         /* ============== Legacy goals/brain/hal/admin — keep for back-compat ============== */

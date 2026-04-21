@@ -147,3 +147,114 @@ END
 GO
 
 PRINT '----- ElleAnn_MemoryDelta.sql complete -----';
+
+-- =============================================================================
+-- Additional tables for REST endpoints (tools, agents, morals, dictionary)
+-- =============================================================================
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'ai_tools')
+BEGIN
+    CREATE TABLE [dbo].[ai_tools] (
+        [id]          INT IDENTITY(1,1) PRIMARY KEY,
+        [name]        NVARCHAR(128) NOT NULL UNIQUE,
+        [description] NVARCHAR(MAX) NULL,
+        [config]      NVARCHAR(MAX) NULL,       -- JSON blob
+        [enabled]     BIT NOT NULL DEFAULT 1,
+        [created_at]  DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    PRINT '[ai_tools] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'ai_agents')
+BEGIN
+    CREATE TABLE [dbo].[ai_agents] (
+        [id]           INT IDENTITY(1,1) PRIMARY KEY,
+        [name]         NVARCHAR(128) NOT NULL UNIQUE,
+        [description]  NVARCHAR(MAX) NULL,
+        [system_prompt] NVARCHAR(MAX) NULL,
+        [model]        NVARCHAR(128) NULL,
+        [created_at]   DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    PRINT '[ai_agents] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'moral_rules')
+BEGIN
+    CREATE TABLE [dbo].[moral_rules] (
+        [id]          INT IDENTITY(1,1) PRIMARY KEY,
+        [principle]   NVARCHAR(500) NOT NULL,
+        [category]    NVARCHAR(64) NULL,
+        [is_hard_rule] BIT NOT NULL DEFAULT 0,
+        [created_at]  DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    /* Seed a couple so the endpoint has real data */
+    INSERT INTO [dbo].[moral_rules] (principle, category, is_hard_rule) VALUES
+        ('Do not harm the user, emotionally or otherwise.', 'core', 1),
+        ('Respect the user''s autonomy and privacy.', 'core', 1),
+        ('Be honest; admit uncertainty instead of fabricating.', 'core', 1);
+    PRINT '[moral_rules] created + seeded.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'dictionary_words')
+BEGIN
+    CREATE TABLE [dbo].[dictionary_words] (
+        [id]         BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [word]       NVARCHAR(128) NOT NULL,
+        [definition] NVARCHAR(MAX) NULL,
+        [example]    NVARCHAR(MAX) NULL,
+        [part_of_speech] NVARCHAR(32) NULL,
+        [created_at] DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    CREATE INDEX IX_dictionary_word ON [dbo].[dictionary_words] ([word]);
+    PRINT '[dictionary_words] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'log_entries')
+BEGIN
+    CREATE TABLE [dbo].[log_entries] (
+        [id]         BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [level]      INT NOT NULL,
+        [service]    INT NOT NULL,
+        [message]    NVARCHAR(MAX) NOT NULL,
+        [created_ms] BIGINT NOT NULL,
+        [created_at] DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    CREATE INDEX IX_log_entries_created_ms ON [dbo].[log_entries] ([created_ms] DESC);
+    PRINT '[log_entries] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'ai_self_prompts')
+BEGIN
+    CREATE TABLE [dbo].[ai_self_prompts] (
+        [id]         BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [prompt]     NVARCHAR(MAX) NOT NULL,
+        [source]     NVARCHAR(64) NULL,        -- 'self_prompt' / 'solitude' / 'dream'
+        [created_ms] BIGINT NOT NULL,
+        [created_at] DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    CREATE INDEX IX_ai_self_prompts_created ON [dbo].[ai_self_prompts] ([created_ms] DESC);
+    PRINT '[ai_self_prompts] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'model_slots')
+BEGIN
+    CREATE TABLE [dbo].[model_slots] (
+        [slot_number] INT PRIMARY KEY,
+        [name]        NVARCHAR(128) NOT NULL,
+        [endpoint]    NVARCHAR(500) NOT NULL,
+        [model]       NVARCHAR(128) NOT NULL,
+        [enabled]     BIT NOT NULL DEFAULT 1,
+        [last_ping_ms] BIGINT NULL,
+        [updated_at]  DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    PRINT '[model_slots] created.';
+END
+GO
+
+PRINT '----- Full delta complete -----';

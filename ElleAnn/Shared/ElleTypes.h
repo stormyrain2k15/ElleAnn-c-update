@@ -414,7 +414,10 @@ typedef enum ELLE_IPC_MSG_TYPE {
      * Cognitive handles memory cross-reference, emotion analysis,
      * LLM surface rendering, then replies with IPC_CHAT_RESPONSE (JSON).  */
     IPC_CHAT_REQUEST,
-    IPC_CHAT_RESPONSE
+    IPC_CHAT_RESPONSE,
+    /* Memory/Emotion consolidation triggers (on-demand STM→LTM promotion) */
+    IPC_MEMORY_CONSOLIDATE,
+    IPC_EMOTION_CONSOLIDATE
 } ELLE_IPC_MSG_TYPE;
 
 #define ELLE_IPC_FLAG_URGENT      0x0001

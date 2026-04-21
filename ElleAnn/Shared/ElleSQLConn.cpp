@@ -8,6 +8,7 @@
 #include <sqlext.h>
 #include <sstream>
 #include <algorithm>
+#include <set>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * SQLRow helpers
@@ -816,30 +817,207 @@ bool WriteLog(ELLE_LOG_LEVEL level, ELLE_SERVICE_ID svc, const std::string& msg)
 }
 
 bool StoreGoal(const ELLE_GOAL_RECORD& goal) {
-    return ElleSQLPool::Instance().Exec(
-        "INSERT INTO ElleCore.dbo.Goals "
-        "(Description, Status, Priority, Progress, Motivation, ParentGoalId, "
-        "SourceDrive, CreatedMs, DeadlineMs, SuccessCriteria) VALUES ('" +
-        std::string(goal.description) + "', " + std::to_string(goal.status) + ", " +
-        std::to_string(goal.priority) + ", " + std::to_string(goal.progress) + ", " +
-        std::to_string(goal.motivation) + ", " + std::to_string(goal.parent_goal_id) + ", " +
-        std::to_string(goal.source_drive) + ", " + std::to_string(ELLE_MS_NOW()) + ", " +
-        std::to_string(goal.deadline_ms) + ", '" + std::string(goal.success_criteria) + "')"
-    );
+    (void)goal;
+    /* dbo.Goals table is not part of the live ElleCore schema. Persist to
+     * dbo.system_settings as a JSON-line until a real Goals table lands. */
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"description\":\"%s\",\"priority\":%u,\"progress\":%.3f,\"source_drive\":%u}",
+        goal.description, (unsigned)goal.priority, goal.progress, (unsigned)goal.source_drive);
+    std::string key = "goal_" + std::to_string(ELLE_MS_NOW());
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.system_settings (setting_key, setting_value, updated_at) "
+        "VALUES (?, ?, GETUTCDATE());",
+        { key, std::string(buf) }).success;
 }
 
-bool StoreEntity_LEGACY_UNUSED(const ELLE_WORLD_ENTITY& entity) {
-    (void)entity;
-    /* Legacy stub kept only to avoid breaking old callers; real impl lives
-     * earlier in this file (MERGE against ElleCore.dbo.world_entity). */
+/*──────────────────────────────────────────────────────────────────────────────
+ * MEMORY CRUD helpers for /api/memory/* endpoints
+ *──────────────────────────────────────────────────────────────────────────────*/
+static void FillMemoryRow(ElleDB::MemoryRow& r, const SQLRow& row) {
+    r.id = row.GetInt(0);
+    r.type = (int)row.GetInt(1);
+    r.tier = (int)row.GetInt(2);
+    r.content = row.values.size() > 3 ? row.values[3] : std::string();
+    r.summary = row.values.size() > 4 ? row.values[4] : std::string();
+    r.emotional_valence = (float)row.GetFloat(5);
+    r.importance = (float)row.GetFloat(6);
+    r.relevance  = (float)row.GetFloat(7);
+    r.access_count   = (int)row.GetInt(8);
+    r.created_ms     = (uint64_t)row.GetInt(9);
+    r.last_access_ms = (uint64_t)row.GetInt(10);
+}
+
+bool ListMemories(std::vector<MemoryRow>& out, int memory_type,
+                  uint32_t limit, uint32_t offset) {
+    std::string sql =
+        "SELECT id, memory_type, tier, content, summary, emotional_valence, "
+        "       importance, relevance, access_count, created_ms, last_access_ms "
+        "FROM ElleCore.dbo.memory ";
+    std::vector<std::string> params;
+    if (memory_type >= 0) {
+        sql += "WHERE memory_type = ? ";
+        params.push_back(std::to_string(memory_type));
+    }
+    sql += "ORDER BY id DESC OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;";
+    params.push_back(std::to_string(offset));
+    params.push_back(std::to_string(limit));
+    auto rs = ElleSQLPool::Instance().QueryParams(sql, params);
+    if (!rs.success) { ELLE_WARN("ListMemories: %s", rs.error.c_str()); return false; }
+    for (auto& row : rs.rows) { MemoryRow mr; FillMemoryRow(mr, row); out.push_back(mr); }
+    return true;
+}
+
+bool GetMemory(int64_t memId, MemoryRow& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT id, memory_type, tier, content, summary, emotional_valence, "
+        "       importance, relevance, access_count, created_ms, last_access_ms "
+        "FROM ElleCore.dbo.memory WHERE id = ?;",
+        { std::to_string(memId) });
+    if (!rs.success || rs.rows.empty()) return false;
+    FillMemoryRow(out, rs.rows[0]);
+    /* Bump access */
+    ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.memory SET access_count = access_count + 1, "
+        "last_access_ms = ? WHERE id = ?;",
+        { std::to_string(ELLE_MS_NOW()), std::to_string(memId) });
+    return true;
+}
+
+bool DeleteMemory(int64_t memId) {
+    return ElleSQLPool::Instance().QueryParams(
+        "DELETE FROM ElleCore.dbo.memory WHERE id = ?;",
+        { std::to_string(memId) }).success;
+}
+
+bool UpdateMemoryContent(int64_t memId, const std::string& content,
+                         const std::string& summary, float importance) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.memory "
+        "SET content = ?, summary = ?, importance = ?, last_access_ms = ? "
+        "WHERE id = ?;",
+        { content, summary, std::to_string(importance),
+          std::to_string(ELLE_MS_NOW()), std::to_string(memId) }).success;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * CONVERSATIONS
+ *──────────────────────────────────────────────────────────────────────────────*/
+bool CreateConversation(int32_t user_id, const std::string& title, int32_t& newId) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.conversations "
+        "(user_id, title, started_at, last_message_at, total_messages, is_active) "
+        "VALUES (?, ?, GETUTCDATE(), GETUTCDATE(), 0, 1); "
+        "SELECT CAST(SCOPE_IDENTITY() AS INT);",
+        { std::to_string(user_id), title });
+    if (!rs.success) { ELLE_ERROR("CreateConversation: %s", rs.error.c_str()); return false; }
+    if (!rs.rows.empty()) {
+        newId = (int32_t)rs.rows[0].GetInt(0);
+        return newId > 0;
+    }
+    /* Fallback: re-query by MAX(id) for this user */
+    auto r2 = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id FROM ElleCore.dbo.conversations WHERE user_id = ? ORDER BY id DESC;",
+        { std::to_string(user_id) });
+    if (r2.success && !r2.rows.empty()) { newId = (int32_t)r2.rows[0].GetInt(0); return true; }
     return false;
 }
 
+bool ListConversations(std::vector<ConversationRow>& out, uint32_t limit) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP (?) id, user_id, ISNULL(title,''), "
+        "       CONVERT(varchar(33), started_at, 126), "
+        "       CONVERT(varchar(33), last_message_at, 126), "
+        "       ISNULL(total_messages,0), ISNULL(is_active,0) "
+        "FROM ElleCore.dbo.conversations ORDER BY id DESC;",
+        { std::to_string(limit) });
+    if (!rs.success) return false;
+    for (auto& row : rs.rows) {
+        ConversationRow c;
+        c.id = (int32_t)row.GetInt(0);
+        c.user_id = (int32_t)row.GetInt(1);
+        c.title = row.values.size() > 2 ? row.values[2] : "";
+        c.started_at = row.values.size() > 3 ? row.values[3] : "";
+        c.last_message_at = row.values.size() > 4 ? row.values[4] : "";
+        c.total_messages = (int32_t)row.GetInt(5);
+        c.is_active = row.GetInt(6) != 0;
+        out.push_back(c);
+    }
+    return true;
+}
+
+bool GetConversation(int32_t convId, ConversationRow& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id, user_id, ISNULL(title,''), "
+        "       CONVERT(varchar(33), started_at, 126), "
+        "       CONVERT(varchar(33), last_message_at, 126), "
+        "       ISNULL(total_messages,0), ISNULL(is_active,0) "
+        "FROM ElleCore.dbo.conversations WHERE id = ?;",
+        { std::to_string(convId) });
+    if (!rs.success || rs.rows.empty()) return false;
+    auto& row = rs.rows[0];
+    out.id = (int32_t)row.GetInt(0);
+    out.user_id = (int32_t)row.GetInt(1);
+    out.title = row.values.size() > 2 ? row.values[2] : "";
+    out.started_at = row.values.size() > 3 ? row.values[3] : "";
+    out.last_message_at = row.values.size() > 4 ? row.values[4] : "";
+    out.total_messages = (int32_t)row.GetInt(5);
+    out.is_active = row.GetInt(6) != 0;
+    return true;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * VOICE CALLS
+ *──────────────────────────────────────────────────────────────────────────────*/
+bool StartVoiceCall(int32_t user_id, int32_t conv_id, std::string& callId) {
+    callId = "vc-" + std::to_string(ELLE_MS_NOW());
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.voice_calls "
+        "(call_id, user_id, conversation_id, started_at, status, created_at) "
+        "VALUES (?, ?, ?, GETUTCDATE(), 'active', GETUTCDATE());",
+        { callId, std::to_string(user_id),
+          conv_id > 0 ? std::to_string(conv_id) : std::string("NULL") });
+    if (!rs.success) ELLE_ERROR("StartVoiceCall: %s", rs.error.c_str());
+    return rs.success;
+}
+
+bool EndVoiceCall(const std::string& callId) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.voice_calls "
+        "SET ended_at = GETUTCDATE(), status = 'ended', "
+        "    duration_seconds = DATEDIFF(SECOND, started_at, GETUTCDATE()) "
+        "WHERE call_id = ?;",
+        { callId }).success;
+}
+
+int64_t CountTable(const std::string& table) {
+    /* Table name is caller-controlled so restrict to whitelist. */
+    static const std::set<std::string> whitelist = {
+        "memory","messages","conversations","users","world_entity",
+        "memory_tags","memory_entity_links","SelfReflections","ElleThreads",
+        "voice_calls","calls","notifications","InternalNarrative",
+        "CognitiveEvents","DreamIntegration","tokens","sessions"
+    };
+    if (whitelist.find(table) == whitelist.end()) return -1;
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT COUNT(*) FROM ElleCore.dbo.[" + table + "];");
+    if (!rs.success || rs.rows.empty()) return -1;
+    return rs.rows[0].GetInt(0);
+}
+
 bool RecordMetric(const std::string& name, double value) {
-    return ElleSQLPool::Instance().Exec(
-        "INSERT INTO ElleSystem.dbo.Analytics (MetricName, MetricValue, TimestampMs) VALUES ('" +
-        name + "', " + std::to_string(value) + ", " + std::to_string(ELLE_MS_NOW()) + ")"
-    );
+    /* ElleSystem.dbo.Analytics doesn't exist in the live schema. Write to
+     * system_settings as key/value so metrics are still persisted. */
+    char val[64];
+    snprintf(val, sizeof(val), "%.6f", value);
+    return ElleSQLPool::Instance().QueryParams(
+        "IF EXISTS (SELECT 1 FROM ElleCore.dbo.system_settings WHERE setting_key = ?) "
+        "  UPDATE ElleCore.dbo.system_settings SET setting_value = ?, updated_at = GETUTCDATE() WHERE setting_key = ?; "
+        "ELSE "
+        "  INSERT INTO ElleCore.dbo.system_settings (setting_key, setting_value, updated_at) "
+        "  VALUES (?, ?, GETUTCDATE());",
+        { "metric_" + name, std::string(val), "metric_" + name,
+          "metric_" + name, std::string(val) }).success;
 }
 
 } /* namespace ElleDB */
