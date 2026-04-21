@@ -312,3 +312,117 @@ int main() {
     return 0;
 }
 #endif
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MEMORY HARNESS — Exercise the STM→LTM consolidation pipeline end-to-end
+//
+// Build flag: BUILD_MEMORY_HARNESS
+// Links against: ../Shared/* and ../Services/Elle.Service.Memory/MemoryEngine.cpp
+//
+// What it does:
+//   1. Loads elle_master_config.json + opens the ODBC pool
+//   2. Creates a MemoryEngine (no SCM, no IPC — pure in-process)
+//   3. Seeds STM with entries spanning every priority tier
+//      (critical / high / normal / low / fleeting)
+//   4. Runs DecaySTM() in a loop to simulate the subconscious tick
+//   5. Calls ConsolidateMemories() to force the conscious flush
+//   6. Prints STM residency and relevance at each stage so the user can
+//      confirm the Python-parity decay curve is behaving correctly.
+// ═══════════════════════════════════════════════════════════════════════════
+#ifdef BUILD_MEMORY_HARNESS
+
+#include "../Shared/ElleTypes.h"
+#include "../Shared/ElleConfig.h"
+#include "../Shared/ElleLogger.h"
+#include "../Shared/ElleSQLConn.h"
+#include "../Services/Elle.Service.Memory/MemoryEngine.h"
+#include <iostream>
+#include <iomanip>
+#include <vector>
+
+struct Seed { const char* tag; const char* content; float importance; };
+
+static void DumpSTM(MemoryEngine& eng, const char* label) {
+    auto recent = eng.RecallRecent(256);
+    std::cout << "\n── " << label << " (stm=" << eng.STMCount() << ") ──\n";
+    std::cout << std::left
+              << std::setw(6)  << "id"
+              << std::setw(10) << "imp"
+              << std::setw(10) << "rel"
+              << std::setw(6)  << "acc"
+              << "content\n";
+    for (auto& m : recent) {
+        std::cout << std::setw(6)  << m.id
+                  << std::setw(10) << std::fixed << std::setprecision(2) << m.importance
+                  << std::setw(10) << std::fixed << std::setprecision(3) << m.relevance
+                  << std::setw(6)  << m.access_count
+                  << std::string(m.content).substr(0, 60) << "\n";
+    }
+}
+
+int main() {
+    std::cout << "=== ELLE-ANN Memory Harness ===\n";
+
+    if (!ElleConfig::Instance().Load("elle_master_config.json")) {
+        std::cerr << "Failed to load elle_master_config.json\n";
+        return 1;
+    }
+    auto& svc = ElleConfig::Instance().GetService();
+    if (!ElleSQLPool::Instance().Initialize(svc.sql_connection_string, 2)) {
+        std::cerr << "Failed to open SQL pool — LTM writes will fail!\n";
+        /* Harness still exercises STM logic even without SQL. */
+    }
+
+    MemoryEngine eng;
+    if (!eng.Initialize()) { std::cerr << "Engine init failed\n"; return 1; }
+
+    float zero[ELLE_MAX_EMOTIONS] = {};
+
+    std::vector<Seed> seeds = {
+        { "critical", "Users name is Kage and we are building Elle-Ann together.", 0.95f },
+        { "high",     "User prefers direct, affectionate tone with technical depth.", 0.80f },
+        { "normal",   "Installed Visual Studio and ran first successful build today.", 0.55f },
+        { "low",      "Weather outside looks cloudy.",                                 0.30f },
+        { "fleeting", "Idle cursor blink noticed on the status bar.",                  0.10f },
+    };
+
+    std::cout << "\nSeeding STM with one entry per priority tier...\n";
+    for (auto& s : seeds) {
+        eng.StoreSTM(s.content, s.importance, zero, { s.tag });
+    }
+    DumpSTM(eng, "After seed");
+
+    /* Subconscious tick simulation: 3 decay passes with brief waits.            */
+    for (int pass = 1; pass <= 3; pass++) {
+        Sleep(2000);
+        eng.DecaySTM();
+        char label[64];
+        sprintf_s(label, "After DecaySTM pass %d", pass);
+        DumpSTM(eng, label);
+    }
+
+    /* Access-boost verification: recall "Kage" — the critical entry should bump. */
+    std::cout << "\nRecall(\"Kage\") to verify access-boost...\n";
+    auto hits = eng.Recall("Kage", 5, 0.0f);
+    for (auto& h : hits) {
+        std::cout << "  hit id=" << h.id
+                  << " rel=" << h.relevance
+                  << " acc=" << h.access_count
+                  << " tier=" << (h.tier == MEM_STM ? "STM" : "LTM")
+                  << " | " << std::string(h.content).substr(0, 60) << "\n";
+    }
+
+    /* Conscious / on-demand flush.                                              */
+    std::cout << "\nForcing ConsolidateMemories() (conscious path)...\n";
+    eng.ConsolidateMemories();
+    DumpSTM(eng, "After conscious consolidation");
+
+    /* Shutdown-flush test.                                                      */
+    std::cout << "\nCalling Shutdown() to flush remainder...\n";
+    eng.Shutdown();
+    std::cout << "Final STM count: " << eng.STMCount() << " (should be 0)\n";
+
+    std::cout << "\nDone. Inspect ElleCore.dbo.memory in SSMS to confirm LTM rows.\n";
+    return 0;
+}
+#endif

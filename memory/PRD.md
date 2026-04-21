@@ -66,6 +66,37 @@ Replaced direct Groq call with proper service orchestration:
 
 Root · Memory · Emotions · Tokens/Conversations · Video · AI (chat + agents + tools) · Dictionary · Education · Emotional-context · Server-management · Models & Workers · Morals · Hardware-actions · Legacy (goals/brain/hal/admin)
 
+## Phase 7 — STM → LTM Consolidation Port (Feb 2026, this session) ✅
+
+Ported Elle's memory consolidation algorithm from legacy Python
+(`ElleAnn_PythonRef/.../short_term_memory.py`) into `MemoryEngine.cpp`.
+User directive: *"Memory should be looped in sub consciousness but on demand for conscious."*
+
+**Subconscious** — `RecallLoop` background thread:
+- `DecaySTM()` every `recall_interval_sec` with priority-tiered decay
+  (critical/high/normal/low/fleeting — derived from `importance`)
+- Emergency floor-sweep promotes entries below 0.05 relevance inline
+- `ConsolidateMemories()` every `consolidation_interval_min` (default 5 min)
+
+**Conscious** — new IPC handler:
+- `IPC_MEMORY_CONSOLIDATE` now wired in `ElleMemoryService::OnMessage`
+- HTTP `POST /api/server/commit-memory` already emits this — now actually fires a flush
+- Cognitive engine can force consolidation after high-stakes turns
+
+**Promotion criteria** (any → LTM write + STM erase):
+importance ≥ `promote_threshold` · access_count ≥ 3 · |valence| > 0.5 · relevance ≤ 0.15
+
+**Safety fixes**:
+- Capacity pressure now promotes-before-evicts (was FIFO `pop_front` data loss)
+- Critical tier (importance ≥ 0.90) pinned in STM
+- `Shutdown()` wholesale-flushes every STM entry to LTM (was selective promotion only)
+- STM erase is gated on successful SQL write — failed LTM writes keep the entry alive
+
+Debug harness added at `Debug/DebugTools.cpp` under `BUILD_MEMORY_HARNESS`.
+Full port notes: `/app/ElleAnn/MEMORY_CONSOLIDATION_PORT.md`
+
+---
+
 ## Known Open Items
 
 ### P1 — Verify on user's Windows box
@@ -74,6 +105,8 @@ Root · Memory · Emotions · Tokens/Conversations · Video · AI (chat + agents
 - Heartbeat log spam silenced after rebuild
 
 ### P2 — Deepen behavior
+- Port `video_generator.py`, `education.py`, `dictionary_loader.py` from the
+  Python reference into their respective C++ services
 - Wire hardware action push through WS (Android `DeviceActionExecutor` polls /api/ai/hardware/actions/pending)
 - Video generation pipeline (currently stub)
 - Dictionary backing data
