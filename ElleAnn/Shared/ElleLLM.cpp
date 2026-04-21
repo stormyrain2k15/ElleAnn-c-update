@@ -7,6 +7,7 @@
 #include "ElleLLM.h"
 #include "ElleLogger.h"
 
+#include <windows.h>
 #include <winhttp.h>
 #include <sstream>
 #include <algorithm>
@@ -567,31 +568,86 @@ std::string LLMLocalProvider::Generate(const std::string& prompt, uint32_t maxTo
                                         float temperature, LLMStreamCallback callback) {
     std::lock_guard<std::mutex> lock(m_inferenceMutex);
 
-    /* This is the llama.cpp inference loop scaffold.
-       In real implementation, this calls llama_decode + llama_sample in a loop.
-       
-       auto tokens = Tokenize(prompt, true);
-       llama_decode(m_ctx, llama_batch_get_one(tokens.data(), tokens.size(), 0, 0));
-       
-       std::string output;
-       for (uint32_t i = 0; i < maxTokens; i++) {
-           int32_t token = SampleToken(temperature, m_config.top_p, 
-                                        m_config.repeat_penalty, tokens);
-           if (token == llama_token_eos(m_model)) break;
-           
-           std::string piece = Detokenize({token});
-           output += piece;
-           
-           if (callback) callback(piece, false);
-           
-           llama_decode(m_ctx, llama_batch_get_one(&token, 1, tokens.size() + i, 0));
-       }
-       
-       if (callback) callback("", true);
-       return output;
-    */
+    /* Real implementation: spawn an external llama.cpp CLI (llama-cli.exe)
+     * with the model path from config. This avoids the linking/compilation
+     * overhead of embedding libllama while still giving genuine local inference.
+     *
+     * Expected config:
+     *   m_config.binary_path   - full path to llama-cli.exe (optional; falls
+     *                            back to "llama-cli.exe" on PATH)
+     *   m_config.model_path    - .gguf model file
+     *   m_config.n_ctx         - context size
+     */
+    if (m_config.model_path.empty()) {
+        return "";  /* let the engine fail-over to API providers */
+    }
 
-    return "[Local inference placeholder — link llama.cpp to activate]";
+    /* Escape prompt for command line — replace " with \" */
+    std::string escaped;
+    escaped.reserve(prompt.size() + 16);
+    for (char c : prompt) {
+        if (c == '"') escaped += "\\\"";
+        else if (c == '\r') continue;
+        else if (c == '\n') escaped += "\\n";
+        else escaped += c;
+    }
+
+    /* Build cmd line. --log-disable keeps stdout clean so we can capture
+     * only generated tokens.                                                 */
+    std::string bin = m_config.binary_path.empty() ? "llama-cli.exe"
+                                                    : m_config.binary_path;
+    char tempCmd[4096];
+    snprintf(tempCmd, sizeof(tempCmd),
+        "\"%s\" -m \"%s\" -c %u -n %u --temp %.2f --log-disable -p \"%s\"",
+        bin.c_str(), m_config.model_path.c_str(),
+        (unsigned)m_config.context_size, (unsigned)maxTokens,
+        (double)temperature, escaped.c_str());
+
+    /* Spawn with a pipe on stdout. */
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+    HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) return "";
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si = {}; si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdOutput = hWritePipe;
+    si.hStdError  = hWritePipe;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+
+    PROCESS_INFORMATION pi = {};
+    BOOL ok = CreateProcessA(nullptr, tempCmd, nullptr, nullptr, TRUE,
+                              CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(hWritePipe);
+    if (!ok) { CloseHandle(hReadPipe); return ""; }
+
+    /* Stream-read the child's stdout until EOF. */
+    std::string output;
+    char buf[4096];
+    DWORD read = 0;
+    while (ReadFile(hReadPipe, buf, sizeof(buf), &read, nullptr) && read > 0) {
+        std::string chunk(buf, read);
+        output.append(chunk);
+        if (callback) callback(chunk, false);
+    }
+    CloseHandle(hReadPipe);
+
+    WaitForSingleObject(pi.hProcess, 120000);   /* 2-min hard cap */
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (callback) callback("", true);
+
+    /* llama-cli echoes the prompt; strip it off the front if present. */
+    size_t promptPos = output.find(prompt);
+    if (promptPos != std::string::npos) {
+        output.erase(0, promptPos + prompt.size());
+    }
+    /* Trim leading whitespace. */
+    while (!output.empty() && (output.front() == '\n' || output.front() == '\r' ||
+                                output.front() == ' '  || output.front() == '\t'))
+        output.erase(0, 1);
+    return output;
 }
 
 uint32_t LLMLocalProvider::EstimateTokens(const std::string& text) const {

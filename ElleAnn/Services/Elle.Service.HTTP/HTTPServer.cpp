@@ -1169,33 +1169,75 @@ private:
             return HTTPResponse::OK(j);
         });
         m_router.Register("GET", "/api/emotions/dimensions", [this](const HTTPRequest&) {
-            /* Return top-level dimensions stub — Cognitive service owns the 102 dims */
+            /* Full 102-dim emotion state from cached ELLE_EMOTION_STATE */
             json j = json::array();
-            const char* names[] = {"joy","sadness","anger","fear","surprise","trust","curiosity","empathy","contentment","excitement"};
-            double weights[] = {m_cachedEmotions.valence > 0 ? m_cachedEmotions.valence : 0.0,
-                                m_cachedEmotions.valence < 0 ? -m_cachedEmotions.valence : 0.0,
-                                0.0, 0.0, 0.0, 0.5, 0.6, 0.5, 0.5, m_cachedEmotions.arousal};
-            for (int i = 0; i < 10; i++) {
-                j.push_back({{"name", names[i]}, {"weight", weights[i]}, {"category", "core"}});
+            for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
+                j.push_back({
+                    {"id", i},
+                    {"name", kEmotionMeta[i].name},
+                    {"category", kEmotionMeta[i].category},
+                    {"weight", (double)m_cachedEmotions.dimensions[i]}
+                });
             }
             return HTTPResponse::OK(j);
         });
-        m_router.Register("GET", "/api/emotions/dimensions/{name}", [](const HTTPRequest& req) {
-            json j = {
-                {"name", req.headers.at("x-path-name")},
-                {"weight", 0.5},
-                {"category", "core"}
-            };
-            return HTTPResponse::OK(j);
+        m_router.Register("GET", "/api/emotions/dimensions/{name}", [this](const HTTPRequest& req) {
+            std::string name = req.headers.at("x-path-name");
+            std::string needle = name;
+            std::transform(needle.begin(), needle.end(), needle.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
+            for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
+                if (needle == kEmotionMeta[i].name) {
+                    return HTTPResponse::OK({
+                        {"id", i},
+                        {"name", kEmotionMeta[i].name},
+                        {"category", kEmotionMeta[i].category},
+                        {"weight", (double)m_cachedEmotions.dimensions[i]}
+                    });
+                }
+            }
+            return HTTPResponse::Err(404, "emotion not found");
         });
         m_router.Register("PUT", "/api/emotions/dimensions/{name}", [](const HTTPRequest& req) {
+            /* Setting an emotion dimension directly is a write-through to Emotional
+             * service via IPC so it can recompute V/A/D + broadcast. */
+            std::string name = req.headers.at("x-path-name");
             json body = req.BodyJSON();
-            body["name"] = req.headers.at("x-path-name");
-            return HTTPResponse::OK(body);
+            float weight = body.value("weight", 0.0f);
+            int id = -1;
+            std::string lc = name;
+            std::transform(lc.begin(), lc.end(), lc.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
+            for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
+                if (lc == kEmotionMeta[i].name) { id = i; break; }
+            }
+            if (id < 0) return HTTPResponse::Err(404, "emotion not found");
+
+            auto msg = ElleIPCMessage::Create(IPC_EMOTION_UPDATE, SVC_HTTP_SERVER, SVC_EMOTIONAL);
+            struct { uint32_t emoId; float absolute; } payload;
+            payload.emoId = (uint32_t)id;
+            payload.absolute = weight;
+            msg.payload.resize(sizeof(payload));
+            memcpy(msg.payload.data(), &payload, sizeof(payload));
+            msg.header.payload_size = sizeof(payload);
+            GetIPCHub().Send(SVC_EMOTIONAL, msg);
+
+            return HTTPResponse::OK({{"id", id}, {"name", kEmotionMeta[id].name},
+                                      {"weight", weight}, {"dispatched", true}});
         });
-        m_router.Register("GET", "/api/emotions/weights", [](const HTTPRequest&) {
+        m_router.Register("GET", "/api/emotions/weights", [this](const HTTPRequest&) {
+            /* Return just the 102 weights without metadata — compact form */
             json j = json::array();
-            return HTTPResponse::OK(j);
+            for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
+                j.push_back((double)m_cachedEmotions.dimensions[i]);
+            }
+            return HTTPResponse::OK({
+                {"weights", j},
+                {"count", ELLE_EMOTION_COUNT},
+                {"valence",   m_cachedEmotions.valence},
+                {"arousal",   m_cachedEmotions.arousal},
+                {"dominance", m_cachedEmotions.dominance}
+            });
         });
 
         /* ============== Tokens / Conversations — dbo.conversations + messages ==== */

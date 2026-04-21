@@ -56,6 +56,7 @@ struct LLMProviderConfig {
     uint32_t    rate_limit_rpm = 60;
     /* Local-specific */
     std::string model_path;
+    std::string binary_path;           /* path to llama-cli.exe; blank=PATH */
     uint32_t    context_size = 8192;
     uint32_t    gpu_layers = 0;
     uint32_t    threads = 4;

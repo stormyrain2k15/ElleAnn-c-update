@@ -164,6 +164,12 @@ typedef enum ELLE_EMOTION_ID {
     ELLE_EMOTION_COUNT  /* == 102 */
 } ELLE_EMOTION_ID;
 
+/*  Human-readable name + category per emotion dimension.
+ *  Indexed by ELLE_EMOTION_ID. Defined in ElleTypes.cpp.
+ *  Used by /api/emotions/dimensions to expose the full 102-dim state.   */
+struct ELLE_EMOTION_META { const char* name; const char* category; };
+extern const ELLE_EMOTION_META kEmotionMeta[ELLE_EMOTION_COUNT];
+
 /*──────────────────────────────────────────────────────────────────────────────
  * DRIVE SYSTEM
  *──────────────────────────────────────────────────────────────────────────────*/
