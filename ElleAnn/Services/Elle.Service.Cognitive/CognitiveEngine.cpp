@@ -594,6 +594,63 @@ private:
         std::ostringstream ctx;
         ctx << identity << "\n\n";
 
+        /* 6a. Intimacy layer — who this user is to Elle (trust, tone,
+         *     vulnerability/comfort patterns). If no CrystalProfile exists
+         *     yet, fall back to defaults. user_id may be "default" (string)
+         *     so we try to resolve it to an int, else 1.                    */
+        int32_t userIdInt = 1;
+        try { userIdInt = std::stoi(userId); } catch (...) { userIdInt = 1; }
+
+        ElleDB::CrystalProfile crystal;
+        bool hasCrystal = ElleDB::GetCrystalProfile(userIdInt, crystal);
+        if (hasCrystal) {
+            ctx << "Who this user is to you:\n";
+            if (!crystal.preferred_tone.empty())
+                ctx << "  - Preferred tone: " << crystal.preferred_tone << "\n";
+            ctx << "  - Trust level: " << crystal.trust_level
+                << "  Intimacy: " << crystal.intimacy_level << "\n";
+            if (!crystal.comfort_patterns.empty())
+                ctx << "  - Comfort patterns: " << crystal.comfort_patterns << "\n";
+            if (!crystal.vulnerability_patterns.empty())
+                ctx << "  - Vulnerability patterns (handle with care): "
+                    << crystal.vulnerability_patterns << "\n";
+            if (!crystal.trigger_patterns.empty())
+                ctx << "  - Triggers to avoid: " << crystal.trigger_patterns << "\n";
+            if (!crystal.traits.empty())
+                ctx << "  - Traits you've learned: " << crystal.traits << "\n";
+            ctx << "\n";
+        }
+
+        /* 6b. Open emotional threads — things the user hasn't resolved yet. */
+        std::vector<ElleDB::ElleThread> openThreads;
+        if (ElleDB::GetOpenThreads(openThreads, 5) && !openThreads.empty()) {
+            ctx << "Unresolved emotional threads still alive for this user:\n";
+            for (auto& t : openThreads) {
+                ctx << "  - [" << t.topic << "] weight=" << t.emotional_weight;
+                if (!t.summary.empty()) ctx << " — " << t.summary;
+                ctx << "\n";
+            }
+            ctx << "\n";
+        }
+
+        /* 6c. Presence awareness — did the user just break a long silence? */
+        ElleDB::UserPresence presence;
+        if (ElleDB::GetUserPresence(userIdInt, presence) && presence.found) {
+            if (presence.silence_minutes > presence.threshold_minutes &&
+                presence.threshold_minutes > 0) {
+                ctx << "Note: the user was silent for "
+                    << presence.silence_minutes << " minutes before this message "
+                    << "(threshold " << presence.threshold_minutes << "). ";
+                if (!presence.silence_interpretation.empty()) {
+                    ctx << "Your read on their silence: "
+                        << presence.silence_interpretation << ". ";
+                }
+                ctx << "Consider gently acknowledging the gap if it fits.\n\n";
+            }
+        }
+        /* Whatever this turn is, their silence streak just broke. */
+        ElleDB::UpdateUserPresenceOnInteraction(userIdInt);
+
         if (!memories.empty()) {
             ctx << "What you remember that's relevant to this turn:\n";
             for (auto& m : memories) {

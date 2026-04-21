@@ -214,6 +214,41 @@ namespace ElleDB {
     /* Generic counts */
     int64_t CountTable(const std::string& table);
 
+    /* Intimacy layer — reads from prior-system tables */
+    struct CrystalProfile {
+        bool        found = false;
+        std::string traits;                /* JSON blob */
+        std::string vulnerability_patterns;
+        std::string comfort_patterns;
+        std::string trigger_patterns;
+        std::string preferred_tone;
+        float       trust_level    = 0.0f;
+        float       intimacy_level = 0.0f;
+    };
+    bool GetCrystalProfile(int32_t user_id, CrystalProfile& out);
+
+    struct ElleThread {
+        int32_t     id = 0;
+        std::string topic;
+        std::string status;
+        float       emotional_weight = 0.0f;
+        float       intensity = 0.0f;
+        std::string summary;
+        std::string unresolved_questions;
+    };
+    /* Return up to `limit` unresolved threads ordered by weight desc */
+    bool GetOpenThreads(std::vector<ElleThread>& out, uint32_t limit = 5);
+
+    struct UserPresence {
+        bool        found = false;
+        int32_t     silence_minutes = 0;
+        int32_t     threshold_minutes = 0;
+        std::string silence_interpretation;
+        int32_t     abnormal_silence_count = 0;
+    };
+    bool GetUserPresence(int32_t user_id, UserPresence& out);
+    bool UpdateUserPresenceOnInteraction(int32_t user_id);
+
     /* Workers/Services */
     bool RegisterWorker(ELLE_SERVICE_ID svc, const std::string& name);
     bool UpdateWorkerHeartbeat(ELLE_SERVICE_ID svc);

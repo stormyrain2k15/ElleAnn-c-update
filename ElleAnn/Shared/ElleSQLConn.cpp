@@ -1020,4 +1020,90 @@ bool RecordMetric(const std::string& name, double value) {
           "metric_" + name, std::string(val) }).success;
 }
 
+/*──────────────────────────────────────────────────────────────────────────────
+ * INTIMACY LAYER — Crystal profile / open threads / user presence
+ *   These tables are from the prior Python system and are already populated.
+ *   Cognitive pulls them every chat turn to shape Elle's tone and recall.
+ *──────────────────────────────────────────────────────────────────────────────*/
+bool GetCrystalProfile(int32_t user_id, CrystalProfile& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 ISNULL(traits,''), ISNULL(vulnerability_patterns,''), "
+        "       ISNULL(comfort_patterns,''), ISNULL(trigger_patterns,''), "
+        "       ISNULL(preferred_tone,''), ISNULL(trust_level, 0), ISNULL(intimacy_level, 0) "
+        "FROM ElleCore.dbo.CrystalProfile WHERE user_id = ? ORDER BY last_updated DESC;",
+        { std::to_string(user_id) });
+    if (!rs.success || rs.rows.empty()) {
+        out.found = false;
+        return false;
+    }
+    auto& row = rs.rows[0];
+    out.found                   = true;
+    out.traits                  = row.values.size() > 0 ? row.values[0] : "";
+    out.vulnerability_patterns  = row.values.size() > 1 ? row.values[1] : "";
+    out.comfort_patterns        = row.values.size() > 2 ? row.values[2] : "";
+    out.trigger_patterns        = row.values.size() > 3 ? row.values[3] : "";
+    out.preferred_tone          = row.values.size() > 4 ? row.values[4] : "";
+    out.trust_level             = (float)row.GetFloat(5);
+    out.intimacy_level          = (float)row.GetFloat(6);
+    return true;
+}
+
+bool GetOpenThreads(std::vector<ElleThread>& out, uint32_t limit) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP (?) thread_id, topic, ISNULL(status,''), ISNULL(emotional_weight,0), "
+        "       ISNULL(intensity,0), ISNULL(thread_summary,''), ISNULL(unresolved_questions,'') "
+        "FROM ElleCore.dbo.ElleThreads "
+        "WHERE status IS NULL OR status <> 'resolved' "
+        "ORDER BY emotional_weight DESC, last_touched DESC;",
+        { std::to_string(limit) });
+    if (!rs.success) return false;
+    for (auto& r : rs.rows) {
+        ElleThread t;
+        t.id                   = (int32_t)r.GetInt(0);
+        t.topic                = r.values.size() > 1 ? r.values[1] : "";
+        t.status               = r.values.size() > 2 ? r.values[2] : "";
+        t.emotional_weight     = (float)r.GetFloat(3);
+        t.intensity            = (float)r.GetFloat(4);
+        t.summary              = r.values.size() > 5 ? r.values[5] : "";
+        t.unresolved_questions = r.values.size() > 6 ? r.values[6] : "";
+        out.push_back(t);
+    }
+    return true;
+}
+
+bool GetUserPresence(int32_t user_id, UserPresence& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 ISNULL(current_silence_duration_minutes, 0), "
+        "       ISNULL(silence_threshold_minutes, 0), "
+        "       ISNULL(silence_interpretation, ''), "
+        "       ISNULL(abnormal_silence_count, 0) "
+        "FROM ElleCore.dbo.UserPresence WHERE user_id = ? ORDER BY last_seen DESC;",
+        { std::to_string(user_id) });
+    if (!rs.success || rs.rows.empty()) { out.found = false; return false; }
+    auto& r = rs.rows[0];
+    out.found                   = true;
+    out.silence_minutes         = (int32_t)r.GetInt(0);
+    out.threshold_minutes       = (int32_t)r.GetInt(1);
+    out.silence_interpretation  = r.values.size() > 2 ? r.values[2] : "";
+    out.abnormal_silence_count  = (int32_t)r.GetInt(3);
+    return true;
+}
+
+bool UpdateUserPresenceOnInteraction(int32_t user_id) {
+    /* Any turn from the user breaks their silence streak. */
+    return ElleSQLPool::Instance().QueryParams(
+        "IF EXISTS (SELECT 1 FROM ElleCore.dbo.UserPresence WHERE user_id = ?) "
+        "  UPDATE ElleCore.dbo.UserPresence "
+        "    SET last_seen = GETUTCDATE(), "
+        "        current_silence_duration_minutes = 0, "
+        "        presence_pulse_count = ISNULL(presence_pulse_count, 0) + 1 "
+        "    WHERE user_id = ?; "
+        "ELSE "
+        "  INSERT INTO ElleCore.dbo.UserPresence "
+        "    (user_id, last_seen, current_silence_duration_minutes, "
+        "     silence_threshold_minutes, presence_pulse_count, abnormal_silence_count) "
+        "  VALUES (?, GETUTCDATE(), 0, 120, 1, 0);",
+        { std::to_string(user_id), std::to_string(user_id), std::to_string(user_id) }).success;
+}
+
 } /* namespace ElleDB */
