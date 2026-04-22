@@ -262,6 +262,13 @@ Full notes in `/app/ElleAnn/AUDIT_FIX_REPORT.md`.
   channel for strings; WorldModel keeps `IPC_WORLD_STATE` for entity
   structs; HTTPServer WS fan-out listens on `IPC_WORLD_EVENT`. Callers
   updated: ActionExecutor, XChromosome, Continuity, file-watcher.
+- **Pending-row TOCTOU race (follow-up)** — `GetPendingIntents` /
+  `GetPendingActions` did a plain `SELECT WHERE status=0`; any consumer
+  taking longer than the 500 ms poll saw its row re-selected and
+  dispatched twice. Fixed: both are now atomic single-statement
+  `UPDATE TOP (N) ... OUTPUT inserted.* ... WITH (ROWLOCK, READPAST)
+  WHERE status=<pending>` claim-on-select. Each row is observed by
+  exactly one caller even under parallel polling.
 
 ---
 

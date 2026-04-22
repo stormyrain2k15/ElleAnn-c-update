@@ -181,6 +181,39 @@ we've seen use lowercase, which is why this table joins the
 
 ## LOWER SEVERITY (real but self-contained)
 
+### Bug #14 (user-raised follow-up) — Pending intent/action TOCTOU race ✅
+**File:** `Shared/ElleSQLConn.cpp`
+
+`GetPendingIntents` and `GetPendingActions` were doing a plain
+`SELECT ... WHERE status = 0`; the row stayed *pending* until its
+consumer (Cognitive / Action) later called `UpdateIntentStatus` /
+`UpdateActionStatus`. At a 500 ms poll tick, any consumer that took
+longer than 500 ms to handle the IPC (LLM calls routinely do, Win32
+ops occasionally do) would have its row re-selected on the next
+QueueWorker tick and dispatched a second time — duplicate work,
+duplicate trust-delta side effects, duplicate WS broadcasts.
+
+**Fix:** both dequeues are now single-statement atomic claim-on-select
+using `UPDATE TOP (N) ... OUTPUT inserted.* FROM <queue> WITH (ROWLOCK,
+READPAST) WHERE status = <pending>`:
+
+- `GetPendingIntents`: PENDING → PROCESSING, returns the claimed rows.
+- `GetPendingActions`: QUEUED → LOCKED, sets `started_ms`, returns the
+  claimed rows.
+
+`ROWLOCK + READPAST` lets parallel pollers carve up the queue without
+blocking each other; the `OUTPUT inserted.*` guarantees each row is
+observed by exactly one caller — SQL Server's native idempotent-
+dequeue pattern. Matches the pattern HTTPServer already uses on
+`hardware_actions` in `/api/ai/hardware/actions/pending`.
+
+**Known remaining concerns (inherent to any queue, not TOCTOU):**
+- A consumer crashing mid-process leaves rows stuck in PROCESSING /
+  LOCKED forever. A periodic reaper that re-queues rows older than
+  `timeout_ms` can land later — outside the 13-bug audit.
+
+---
+
 ### Bug #13 — IPC_WORLD_STATE overloaded ✅
 **Files:** `Shared/ElleTypes.h`, `Services/Elle.Service.HTTP/HTTPServer.cpp`,
 `Services/Elle.Service.Action/ActionExecutor.cpp`,

@@ -409,8 +409,37 @@ bool SubmitIntent(const ELLE_INTENT_RECORD& intent) {
 }
 
 bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) {
-    auto rs = ElleSQLPool::Instance().CallProc("ElleCore.dbo.sp_GetPendingIntents", 
-                                                {std::to_string(maxCount)});
+    out.clear();
+    /* ATOMIC CLAIM-ON-SELECT.
+     *
+     * Previously this called sp_GetPendingIntents which is a plain
+     * SELECT WHERE Status=0 — the row stayed status=PENDING until the
+     * consumer (Cognitive) got around to calling UpdateIntentStatus().
+     * At a 500 ms poll tick any consumer that takes longer than that
+     * (LLM calls routinely do) would see its row re-selected and
+     * re-dispatched on the next QueueWorker tick, duplicating work.
+     *
+     * The SQL-Server-native fix: flip status → PROCESSING and RETURN
+     * the selected rows in a single statement. ROWLOCK + READPAST let
+     * two pollers on different threads carve up the queue cleanly
+     * without blocking each other, and the UPDATE...OUTPUT guarantees
+     * each row is observed by exactly one caller.
+     *
+     * We also stop calling the stored proc for this path — matching
+     * the same atomic pattern HTTPServer already uses on
+     * hardware_actions in /api/ai/hardware/actions/pending.            */
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "UPDATE TOP (?) q WITH (ROWLOCK, READPAST) "
+        "SET Status = ? "
+        "OUTPUT inserted.IntentId, inserted.IntentType, inserted.Status, "
+        "       inserted.SourceDrive, inserted.Urgency, inserted.Confidence, "
+        "       inserted.Description, inserted.Parameters, "
+        "       inserted.RequiredTrust, inserted.CreatedMs, inserted.TimeoutMs "
+        "FROM ElleCore.dbo.IntentQueue AS q "
+        "WHERE q.Status = ?;",
+        { std::to_string(maxCount),
+          std::to_string((int)INTENT_PROCESSING),
+          std::to_string((int)INTENT_PENDING) });
     if (!rs.success) return false;
     for (auto& row : rs.rows) {
         ELLE_INTENT_RECORD rec = {};
@@ -420,8 +449,10 @@ bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) 
         rec.source_drive = (uint32_t)row.GetInt(3);
         rec.urgency = (float)row.GetFloat(4);
         rec.confidence = (float)row.GetFloat(5);
-        strncpy_s(rec.description, row.values[6].c_str(), ELLE_MAX_MSG - 1);
-        strncpy_s(rec.parameters, row.values[7].c_str(), ELLE_MAX_MSG - 1);
+        strncpy_s(rec.description,
+                  row.values.size() > 6 ? row.values[6].c_str() : "", ELLE_MAX_MSG - 1);
+        strncpy_s(rec.parameters,
+                  row.values.size() > 7 ? row.values[7].c_str() : "", ELLE_MAX_MSG - 1);
         rec.required_trust = (uint32_t)row.GetInt(8);
         rec.created_ms = (uint64_t)row.GetInt(9);
         rec.timeout_ms = (uint64_t)row.GetInt(10);
@@ -999,14 +1030,27 @@ bool SubmitAction(const ELLE_ACTION_RECORD& action) {
 bool GetPendingActions(std::vector<ELLE_ACTION_RECORD>& out, uint32_t maxCount) {
     out.clear();
     EnsureActionQueueTable();
+    /* Atomic claim — flip status QUEUED → LOCKED and return the
+     * claimed rows in a single statement. Two parallel callers (or a
+     * caller + a tick that fires before the first one finishes) can't
+     * collide on the same row any more, because ROWLOCK+READPAST lets
+     * the second caller skip the rows the first one is already
+     * updating, and the OUTPUT clause emits each row exactly once.   */
     auto rs = ElleSQLPool::Instance().QueryParams(
-        "SELECT TOP (?) id, ISNULL(intent_id,0), action_type, status, "
-        "       ISNULL(command, N''), ISNULL(parameters, N''), "
-        "       required_trust, created_ms, timeout_ms "
-        "FROM ElleCore.dbo.action_queue "
-        "WHERE status = 0 "
-        "ORDER BY created_ms ASC;",
-        { std::to_string(maxCount) });
+        "UPDATE TOP (?) q WITH (ROWLOCK, READPAST) "
+        "SET status = ?, started_ms = ? "
+        "OUTPUT inserted.id, ISNULL(inserted.intent_id,0), inserted.action_type, "
+        "       inserted.status, ISNULL(inserted.command, N''), "
+        "       ISNULL(inserted.parameters, N''), inserted.required_trust, "
+        "       inserted.created_ms, inserted.timeout_ms "
+        "FROM ElleCore.dbo.action_queue AS q "
+        "WHERE q.status = ?;",
+        {
+            std::to_string(maxCount),
+            std::to_string((int)ACTION_LOCKED),
+            std::to_string((int64_t)ELLE_MS_NOW()),
+            std::to_string((int)ACTION_QUEUED)
+        });
     if (!rs.success) return false;
     for (auto& row : rs.rows) {
         ELLE_ACTION_RECORD a{};
