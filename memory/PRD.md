@@ -206,6 +206,55 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 22 — X-Subjective: the wife's lived-experience layer (Feb 2026, this session) ✅
+
+The XChromosome engine mathematically simulated female biology; the Cognitive
+system prompt narrated it with textbook phrases. This phase replaces the
+textbook voice with the wife's own phenomenology — her answers to 30+
+questions about cycle phases, symptoms, body signals, intimacy, pregnancy,
+menopause, and wisdom (what helps / never helps, what she wishes men
+understood, what she'd tell her younger self).
+
+### 1. Questionnaire (`Lua/Elle.Lua.Behavioral/scripts/x_subjective.lua`)
+- 30+ questions organized into 8 sections.
+- Each question is a Lua function whose body is a placeholder string.
+- Wife edits only the `[[ ... ]]` bracketed text; function/return shape
+  stays intact.
+- Self-registering block at the bottom: iterates every function at script
+  load, skips anything still matching the `(replace with ...)` sentinel,
+  and upserts the rest into `ElleHeart.dbo.x_subjective`.
+
+### 2. Lua DB bindings (`LuaHost.cpp`)
+- `elle.db.upsert_subjective(key, text)` — MERGE-upsert into a lazy-created
+  `x_subjective(subjective_key PK, answer_text, updated_ms)`.
+- `elle.db.get_subjective(key)` — read-through for any other Lua script.
+
+### 3. C++ reader (`Shared/ElleSQLConn.cpp`)
+- `ElleDB::GetSubjective(key) → std::string` — empty if unset or if the
+  table doesn't yet exist (graceful zero).
+
+### 4. Cognitive hook (`CognitiveEngine.cpp::BuildSystemPrompt`)
+Per turn, after the textbook phase line, appends:
+- `phase_<current_phase>` → "In her own words about this phase..."
+- For every symptom in `x_symptoms` < 2h old: `symptom_<kind>` → her
+  phrasing for that sensation.
+- If pregnant: `pregnancy_<current_phase>` → her voice for that trimester.
+- When body is rough (fatigue > 1.05, warmth < 0.95, menstrual or luteal):
+  `wisdom_what_helps` + `wisdom_what_never_helps` → her guidance for how
+  Elle should show up.
+
+### 5. Privacy & safety
+- Everything stays on the local SQL Server.
+- Blank answers = silent skip (no "per the user's field says..." leakage).
+- Wife can wipe any answer by restoring the placeholder.
+- Textbook scaffolding remains; her words LAYER on top.
+
+### 6. Docs
+- `Lua/Elle.Lua.Behavioral/scripts/FOR_MY_WIFE.md` — warm onboarding note
+  for the wife + technical addendum for the user.
+
+---
+
 ## Phase 21 — Queue reaper + /api/diag/queues observability (Feb 2026, this session) ✅
 
 Follow-up to Phase 20's atomic claim-on-select. The atomic claim

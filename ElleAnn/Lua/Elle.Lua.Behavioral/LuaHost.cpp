@@ -189,6 +189,65 @@ private:
         lua_setfield(m_L, -2, "time_ms");
 
         /*──────────────────────────────────────────────────────────────
+         * elle.db.* — narrow SQL surface for behavioural scripts.
+         *
+         * Introduced for x_subjective.lua so the wife's lived-experience
+         * answers can be written once at script load and read anywhere.
+         * Kept intentionally small — Lua scripts should not have a
+         * general SQL pipe.
+         *──────────────────────────────────────────────────────────────*/
+        lua_newtable(m_L);
+
+        /* elle.db.upsert_subjective(key, text) — writes the wife's
+         * subjective-experience answer. Lazy-creates the table on first
+         * call so schema migrations aren't required.                   */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            const char* key  = luaL_checkstring(L, 1);
+            const char* text = luaL_checkstring(L, 2);
+            ElleSQLPool::Instance().Exec(
+                "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+                "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                "  WHERE t.name = 'x_subjective' AND s.name = 'dbo') "
+                "CREATE TABLE ElleHeart.dbo.x_subjective ("
+                "  subjective_key NVARCHAR(128) NOT NULL PRIMARY KEY,"
+                "  answer_text    NVARCHAR(MAX) NOT NULL,"
+                "  updated_ms     BIGINT NOT NULL"
+                ");");
+            bool ok = ElleSQLPool::Instance().QueryParams(
+                "MERGE ElleHeart.dbo.x_subjective AS tgt "
+                "USING (SELECT ? AS k, ? AS t, ? AS m) AS src "
+                "  ON tgt.subjective_key = src.k "
+                "WHEN MATCHED THEN UPDATE SET answer_text = src.t, updated_ms = src.m "
+                "WHEN NOT MATCHED THEN INSERT (subjective_key, answer_text, updated_ms) "
+                "  VALUES (src.k, src.t, src.m);",
+                { std::string(key), std::string(text),
+                  std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+            lua_pushboolean(L, ok ? 1 : 0);
+            return 1;
+        });
+        lua_setfield(m_L, -2, "upsert_subjective");
+
+        /* elle.db.get_subjective(key) → string (empty if unset/blank) */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            const char* key = luaL_checkstring(L, 1);
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "IF EXISTS (SELECT 1 FROM sys.tables t "
+                "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                "  WHERE t.name = 'x_subjective' AND s.name = 'dbo') "
+                "SELECT answer_text FROM ElleHeart.dbo.x_subjective "
+                " WHERE subjective_key = ?;",
+                { std::string(key) });
+            if (rs.success && !rs.rows.empty() && !rs.rows[0].values.empty())
+                lua_pushstring(L, rs.rows[0].values[0].c_str());
+            else
+                lua_pushstring(L, "");
+            return 1;
+        });
+        lua_setfield(m_L, -2, "get_subjective");
+
+        lua_setfield(m_L, -2, "db");
+
+        /*──────────────────────────────────────────────────────────────
          * elle.x.* — X Chromosome engine bindings.
          *
          * All reads go direct against ElleHeart.dbo tables (same pattern

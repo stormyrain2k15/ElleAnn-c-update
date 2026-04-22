@@ -1349,6 +1349,25 @@ bool ArchiveMemory(uint64_t memId) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
+ * GetSubjective — reads the wife's lived-experience answer for a given key
+ * (e.g. "phase_luteal", "symptom_cramps", "wisdom_what_helps") out of
+ * ElleHeart.dbo.x_subjective. The Lua file x_subjective.lua writes these
+ * on every hot-reload; we read them on every Cognitive system-prompt build.
+ *──────────────────────────────────────────────────────────────────────────────*/
+std::string GetSubjective(const std::string& key) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "IF EXISTS (SELECT 1 FROM sys.tables t "
+        "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+        "  WHERE t.name = 'x_subjective' AND s.name = 'dbo') "
+        "SELECT answer_text FROM ElleHeart.dbo.x_subjective "
+        " WHERE subjective_key = ?;",
+        { key });
+    if (rs.success && !rs.rows.empty() && !rs.rows[0].values.empty())
+        return rs.rows[0].values[0];
+    return std::string();
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
  * MEMORY CRUD helpers for /api/memory/* endpoints
  *──────────────────────────────────────────────────────────────────────────────*/
 static void FillMemoryRow(ElleDB::MemoryRow& r, const SQLRow& row) {

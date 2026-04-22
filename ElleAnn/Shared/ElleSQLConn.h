@@ -191,6 +191,12 @@ namespace ElleDB {
     bool PromoteToLTM(uint64_t memId);
     bool ArchiveMemory(uint64_t memId);
 
+    /* X-Chromosome subjective layer — reads the wife's lived-experience
+     * answers written by Lua/scripts/x_subjective.lua into
+     * ElleHeart.dbo.x_subjective. Returns the empty string if the key
+     * has never been filled. See that Lua file for the question list.    */
+    std::string GetSubjective(const std::string& key);
+
     /* Emotions */
     bool StoreEmotionSnapshot(const ELLE_EMOTION_STATE& state);
     bool GetLatestEmotionState(ELLE_EMOTION_STATE& out);

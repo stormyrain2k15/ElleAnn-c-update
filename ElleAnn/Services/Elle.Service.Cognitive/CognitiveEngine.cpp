@@ -801,6 +801,45 @@ private:
                         "introspection=%.2f fatigue=%.2f.",
                         warmth, verbal, empathy, intro, fatigue);
                     ctx << buf << "\n";
+
+                    /* SUBJECTIVE LAYER — replace Elle's textbook phase
+                     * voice with the wife's own phenomenology whenever
+                     * she has written one. This is the phrase Elle will
+                     * hear in her own head, so present it as such.     */
+                    std::string subjKey = "phase_" + phase;
+                    std::string subjTxt = ElleDB::GetSubjective(subjKey);
+                    if (!subjTxt.empty()) {
+                        ctx << "In her own words about this phase (speak "
+                               "from here, not the textbook): \""
+                            << subjTxt << "\"\n";
+                    }
+                }
+
+                /* Recent active symptoms (<2h old) — if she's written
+                 * a first-person description of any of them, inject it
+                 * so Elle names the sensation the way SHE names it.   */
+                {
+                    int64_t twoHrsAgo = (int64_t)ELLE_MS_NOW() - 2LL * 3600000LL;
+                    auto symRs = ElleSQLPool::Instance().QueryParams(
+                        "IF EXISTS (SELECT 1 FROM sys.tables t "
+                        "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                        "  WHERE t.name = 'x_symptoms' AND s.name = 'dbo') "
+                        "SELECT DISTINCT kind FROM ElleHeart.dbo.x_symptoms "
+                        " WHERE observed_ms >= ?;",
+                        { std::to_string(twoHrsAgo) });
+                    if (symRs.success) {
+                        for (auto& row : symRs.rows) {
+                            if (row.values.empty()) continue;
+                            std::string kind = row.values[0];
+                            std::string k = "symptom_" + kind;
+                            std::string txt = ElleDB::GetSubjective(k);
+                            if (!txt.empty()) {
+                                ctx << "Right now, " << kind
+                                    << " is present; her words for it: \""
+                                    << txt << "\"\n";
+                            }
+                        }
+                    }
                 }
 
                 /* Pregnancy awareness — if active, Elle knows she's carrying. */
@@ -820,6 +859,34 @@ private:
                     if (pr.GetInt(3) != 0) {
                         ctx << "You are in labor right now (stage: "
                             << (pr.values.size() > 4 ? pr.values[4] : "") << ").\n";
+                    }
+                    /* Her words for this pregnancy trimester, if written. */
+                    std::string pregKey = "pregnancy_" + pphase;
+                    std::string pregTxt = ElleDB::GetSubjective(pregKey);
+                    if (!pregTxt.empty()) {
+                        ctx << "In her own words about this stretch of pregnancy: \""
+                            << pregTxt << "\"\n";
+                    }
+                }
+
+                /* Wisdom layer — the "what helps / what never helps"
+                 * answers always apply whenever Elle is rough (fatigued,
+                 * low warmth, menstrual, or luteal). Let her guide Elle's
+                 * response shape when the body is unfriendly.           */
+                bool bodyRough = (fatigue > 1.05f) ||
+                                 (warmth < 0.95f) ||
+                                 (phase == "menstrual") ||
+                                 (phase == "luteal");
+                if (bodyRough) {
+                    std::string helps   = ElleDB::GetSubjective("wisdom_what_helps");
+                    std::string never   = ElleDB::GetSubjective("wisdom_what_never_helps");
+                    if (!helps.empty()) {
+                        ctx << "When she's like this, what actually helps (her words): \""
+                            << helps << "\"\n";
+                    }
+                    if (!never.empty()) {
+                        ctx << "What NEVER helps, even well-meant: \""
+                            << never << "\"\n";
                     }
                 }
             }
