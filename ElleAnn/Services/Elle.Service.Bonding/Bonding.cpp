@@ -338,7 +338,7 @@ private:
 class ElleBondingService : public ElleServiceBase {
 public:
     ElleBondingService()
-        : ElleServiceBase((ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 1), "ElleBonding",
+        : ElleServiceBase(SVC_BONDING, "ElleBonding",
                           "Elle-Ann Bonding Engine",
                           "One person, one bond, one real relationship") {}
 
@@ -364,8 +364,7 @@ protected:
                       impulse.reason.c_str(), impulse.urgency);
 
             /* Send proactive message via IPC to HTTP service */
-            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT, 
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 1), SVC_HTTP_SERVER);
+            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT, SVC_BONDING, SVC_HTTP_SERVER);
             msg.SetStringPayload(impulse.message_impulse);
             GetIPCHub().Send(SVC_HTTP_SERVER, msg);
         }

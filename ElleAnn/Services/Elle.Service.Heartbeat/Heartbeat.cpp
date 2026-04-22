@@ -76,6 +76,14 @@ protected:
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
+        /* Bounds-check sender against the fixed-size tracking arrays. A
+         * malformed frame or a yet-to-be-added service ID could index past
+         * the end otherwise.                                               */
+        if ((int)sender < 0 || (int)sender >= ELLE_SERVICE_COUNT) {
+            ELLE_WARN("Heartbeat OnMessage: sender %d out of range [0, %d)",
+                      (int)sender, ELLE_SERVICE_COUNT);
+            return;
+        }
         if (msg.header.msg_type == IPC_HEARTBEAT) {
             m_lastHeartbeat[sender] = ELLE_MS_NOW();
             m_healthy[sender] = true;
@@ -83,6 +91,8 @@ protected:
         if (msg.header.msg_type == IPC_SERVICE_STATUS) {
             ELLE_SERVICE_STATUS status;
             if (msg.GetPayload(status)) {
+                if ((int)status.service_id < 0 ||
+                    (int)status.service_id >= ELLE_SERVICE_COUNT) return;
                 m_lastHeartbeat[status.service_id] = ELLE_MS_NOW();
                 m_healthy[status.service_id] = status.healthy;
             }
@@ -99,6 +109,10 @@ private:
     uint32_t m_restartAttempts[ELLE_SERVICE_COUNT] = {};
 
     void AttemptRestart(ELLE_SERVICE_ID svc) {
+        if ((int)svc < 0 || (int)svc >= ELLE_SERVICE_COUNT) {
+            ELLE_WARN("AttemptRestart: service id %d out of range", (int)svc);
+            return;
+        }
         auto maxRestarts = ElleConfig::Instance().GetService().max_restarts;
         if (m_restartAttempts[svc] >= maxRestarts) {
             ELLE_FATAL("Max restart attempts reached for %s — manual intervention required",

@@ -342,22 +342,33 @@ protected:
     void OnTick() override {
         m_engine.Tick();
 
-        /* Process pending intents from queue */
-        std::vector<ELLE_INTENT_RECORD> intents;
-        ElleDB::GetPendingIntents(intents, 5);
-
-        for (auto& intent : intents) {
-            ElleDB::UpdateIntentStatus(intent.id, INTENT_PROCESSING);
-            /* Route to appropriate service based on intent type */
-            RouteIntent(intent);
-        }
+        /* Intent polling is owned by SVC_QUEUE_WORKER, which forwards each
+         * pending row to us via IPC_INTENT_REQUEST. We used to poll the
+         * same SQL queue here, which meant every queued intent got picked
+         * up twice (once by QueueWorker, once by us) and ran through
+         * RouteIntent a second time — the cognitive engine saw double. */
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
         switch ((ELLE_IPC_MSG_TYPE)msg.header.msg_type) {
             case IPC_INTENT_REQUEST: {
-                std::string text = msg.GetStringPayload();
-                m_engine.ProcessInput(text, "", 0);
+                /* QueueWorker polls dbo.IntentQueue and hands each pending
+                 * row to us as a full ELLE_INTENT_RECORD via SetPayload().
+                 * Our job: mark the row PROCESSING and route it to the
+                 * appropriate downstream service.
+                 *
+                 * WARNING: do NOT call ProcessInput() here — ProcessInput
+                 * re-parses the text and SubmitIntent()s a new row,
+                 * producing a tight loop (QueueWorker → Cognitive →
+                 * SubmitIntent → QueueWorker → …). We previously read
+                 * GetStringPayload() against the binary struct, which
+                 * garbled the text and fed garbage into ProcessInput —
+                 * both bugs fixed here.                                    */
+                ELLE_INTENT_RECORD intent{};
+                if (msg.GetPayload(intent)) {
+                    ElleDB::UpdateIntentStatus(intent.id, INTENT_PROCESSING);
+                    RouteIntent(intent);
+                }
                 break;
             }
             case IPC_LLM_REQUEST: {

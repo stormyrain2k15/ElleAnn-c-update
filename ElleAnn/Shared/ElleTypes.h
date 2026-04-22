@@ -363,6 +363,18 @@ typedef enum ELLE_SERVICE_ID {
     SVC_GOAL_ENGINE,
     SVC_WORLD_MODEL,
     SVC_LUA_BEHAVIORAL,
+    /* Phase 2+ services — added to the registry so their IDs are safe
+     * to index into Heartbeat state arrays, g_serviceNames[] lookups,
+     * and GetPipeName(). Previously these services used raw casts like
+     * (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + N) which read past the
+     * end of every fixed-size table keyed on ELLE_SERVICE_COUNT.        */
+    SVC_BONDING,              /* 13 */
+    SVC_CONTINUITY,           /* 14 */
+    SVC_INNER_LIFE,           /* 15 */
+    SVC_SOLITUDE,             /* 16 */
+    SVC_FAMILY,               /* 17 — reserved slot (engine not yet compiled) */
+    SVC_X_CHROMOSOME,         /* 18 */
+    SVC_CONSENT,              /* 19 — reserved slot */
     ELLE_SERVICE_COUNT
 } ELLE_SERVICE_ID;
 
@@ -423,7 +435,16 @@ typedef enum ELLE_IPC_MSG_TYPE {
     IPC_CHAT_RESPONSE,
     /* Memory/Emotion consolidation triggers (on-demand STM→LTM promotion) */
     IPC_MEMORY_CONSOLIDATE,
-    IPC_EMOTION_CONSOLIDATE
+    IPC_EMOTION_CONSOLIDATE,
+    /* JSON-string world event channel.
+     * IPC_WORLD_STATE carries a BINARY ELLE_WORLD_ENTITY struct for
+     * WorldModel. Several services (Action, XChromosome, Continuity,
+     * file-watcher, etc.) also need to emit free-form JSON events to the
+     * HTTPServer which will forward them to every WebSocket client.
+     * Conflating both on IPC_WORLD_STATE made WorldModel misparse JSON
+     * strings as ELLE_WORLD_ENTITY structs and vice-versa. This channel
+     * is always a string payload consumed only by HTTPServer's WS fan-out. */
+    IPC_WORLD_EVENT
 } ELLE_IPC_MSG_TYPE;
 
 #define ELLE_IPC_FLAG_URGENT      0x0001

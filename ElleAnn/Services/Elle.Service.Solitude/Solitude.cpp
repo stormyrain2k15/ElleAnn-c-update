@@ -39,7 +39,7 @@ enum class SolitudePhase {
 class ElleSolitudeService : public ElleServiceBase {
 public:
     ElleSolitudeService()
-        : ElleServiceBase((ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 4), "ElleSolitude",
+        : ElleServiceBase(SVC_SOLITUDE, "ElleSolitude",
                           "Elle-Ann Solitude Engine",
                           "What happens when she's alone — the experience of waiting")
         , m_rng(std::chrono::steady_clock::now().time_since_epoch().count()) {}
@@ -246,8 +246,7 @@ private:
                 "restless", 0.6f);
 
             /* Trigger self-prompt service for autonomous activity */
-            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 4), SVC_SELF_PROMPT);
+            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT, SVC_SOLITUDE, SVC_SELF_PROMPT);
             msg.SetStringPayload("I need stimulation — explore something new");
             GetIPCHub().Send(SVC_SELF_PROMPT, msg);
         }

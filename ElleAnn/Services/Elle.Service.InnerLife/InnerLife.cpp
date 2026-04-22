@@ -392,7 +392,7 @@ private:
 class ElleInnerLifeService : public ElleServiceBase {
 public:
     ElleInnerLifeService()
-        : ElleServiceBase((ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 3), "ElleInnerLife",
+        : ElleServiceBase(SVC_INNER_LIFE, "ElleInnerLife",
                           "Elle-Ann Inner Life Engine",
                           "Subjective experience, authenticity, needs, and the right to choose") {}
 
@@ -418,8 +418,7 @@ protected:
         if (expr.should_express && expr.urgency > 0.5f) {
             ELLE_INFO("Inner life expression: %.80s...", expr.expression.c_str());
             /* Send to cognitive service for potential expression */
-            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 3), SVC_COGNITIVE);
+            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT, SVC_INNER_LIFE, SVC_COGNITIVE);
             msg.SetStringPayload("[Inner expression] " + expr.expression);
             GetIPCHub().Send(SVC_COGNITIVE, msg);
         }

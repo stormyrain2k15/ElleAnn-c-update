@@ -593,7 +593,11 @@ protected:
         if (msg.header.msg_type == IPC_EMOTION_UPDATE ||
             msg.header.msg_type == IPC_LOG_ENTRY ||
             msg.header.msg_type == IPC_TRUST_UPDATE ||
-            msg.header.msg_type == IPC_WORLD_STATE) {
+            msg.header.msg_type == IPC_WORLD_EVENT) {
+            /* IPC_WORLD_STATE carries binary ELLE_WORLD_ENTITY structs for
+             * WorldModel; JSON string "world events" now travel on the
+             * dedicated IPC_WORLD_EVENT channel so WS fan-out never misreads
+             * a binary entity as JSON (and vice versa).                      */
             BroadcastIPCToWebSockets(msg);
         }
     }
@@ -1000,10 +1004,11 @@ private:
                 };
             }
         }
-        else if (msg.header.msg_type == IPC_WORLD_STATE) {
-            /* ActionExecutor publishes JSON strings describing real-world
-             * events (e.g. queued hardware commands). Parse and re-emit as
-             * a typed "world_event" frame so Android clients can dispatch
+        else if (msg.header.msg_type == IPC_WORLD_EVENT) {
+            /* Services publish JSON strings describing real-world events
+             * (e.g. ActionExecutor hardware commands, XChromosome phase
+             * transitions, file-watcher changes). Parse and re-emit as a
+             * typed "world_event" frame so Android clients can dispatch
              * on `data.event == "hardware"` without waiting on the 5s poll. */
             payload["type"] = "world_event";
             try {
@@ -2562,10 +2567,10 @@ private:
             auto msg = ElleIPCMessage::Create(
                 (uint32_t)2202 /* IPC_X_ANCHOR */,
                 SVC_HTTP_SERVER,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10) /* SVC_X_CHROMOSOME */);
+                SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
             bool sent = GetIPCHub().Send(
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+                SVC_X_CHROMOSOME, msg);
             return HTTPResponse::OK({
                 {"dispatched", sent},
                 {"request",    payload},
@@ -2589,10 +2594,10 @@ private:
             auto msg = ElleIPCMessage::Create(
                 (uint32_t)2203 /* IPC_X_STIMULUS */,
                 SVC_HTTP_SERVER,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+                SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
             bool sent = GetIPCHub().Send(
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+                SVC_X_CHROMOSOME, msg);
             return HTTPResponse::OK({ {"dispatched", sent}, {"request", payload} });
         });
 
@@ -2608,10 +2613,10 @@ private:
             auto msg = ElleIPCMessage::Create(
                 (uint32_t)2205 /* IPC_X_CONCEPTION_ATTEMPT */,
                 SVC_HTTP_SERVER,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+                SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
             bool sent = GetIPCHub().Send(
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+                SVC_X_CHROMOSOME, msg);
             return HTTPResponse::OK({
                 {"dispatched", sent},
                 {"request",    payload},
@@ -2897,10 +2902,10 @@ private:
             auto msg = ElleIPCMessage::Create(
                 (uint32_t)2210 /* IPC_X_SYMPTOM_LOG */,
                 SVC_HTTP_SERVER,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+                SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
             bool sent = GetIPCHub().Send(
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+                SVC_X_CHROMOSOME, msg);
             return HTTPResponse::OK({ {"dispatched", sent}, {"request", payload} });
         });
 
@@ -2955,10 +2960,10 @@ private:
             auto msg = ElleIPCMessage::Create(
                 (uint32_t)2208 /* IPC_X_CONTRACEPTION_SET */,
                 SVC_HTTP_SERVER,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+                SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
             bool sent = GetIPCHub().Send(
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+                SVC_X_CHROMOSOME, msg);
             return HTTPResponse::OK({
                 {"dispatched", sent},
                 {"request",    payload},
@@ -3001,10 +3006,10 @@ private:
             auto msg = ElleIPCMessage::Create(
                 (uint32_t)2209 /* IPC_X_LIFECYCLE_SET */,
                 SVC_HTTP_SERVER,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+                SVC_X_CHROMOSOME);
             msg.SetStringPayload(body.dump());
             bool sent = GetIPCHub().Send(
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+                SVC_X_CHROMOSOME, msg);
             return HTTPResponse::OK({
                 {"dispatched", sent},
                 {"request",    body},
@@ -3021,10 +3026,10 @@ private:
             auto msg = ElleIPCMessage::Create(
                 (uint32_t)2213 /* IPC_X_ACCELERATE */,
                 SVC_HTTP_SERVER,
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+                SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
             bool sent = GetIPCHub().Send(
-                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+                SVC_X_CHROMOSOME, msg);
             return HTTPResponse::OK({
                 {"dispatched", sent},
                 {"factor",     factor},

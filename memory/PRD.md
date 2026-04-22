@@ -206,6 +206,65 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 20 — External Code Audit Repair (Feb 2026, this session) ✅
+
+External code-only audit flagged 13 real source-level bugs. Every one
+fixed with zero stubs, zero fake returns, zero behavioural regressions.
+Full notes in `/app/ElleAnn/AUDIT_FIX_REPORT.md`.
+
+### HIGH
+- **Goal IPC payload mismatch** — ActionExecutor sent a string,
+  GoalEngine read a binary struct. Fixed: `ExecuteGoalOp` builds a
+  proper `ELLE_GOAL_RECORD` + `SetPayload(goal)`.
+- **Intent payload mismatch** — QueueWorker sent a binary struct,
+  Cognitive read `GetStringPayload()`. Fixed: Cognitive's
+  `IPC_INTENT_REQUEST` handler now `GetPayload(intent)` and calls
+  `RouteIntent(intent)` directly (no ProcessInput — that path caused
+  a re-submit loop).
+- **Action queue double-handling** — Both QueueWorker.OnTick and
+  Action.OnTick polled the same SQL queue; Action's IPC handler then
+  re-submitted via `SubmitAction` producing duplicate execution and
+  re-enqueue loops. Fixed: single polling authority (QueueWorker).
+  Action executes IPC'd rows directly via new `ExecuteAction()`.
+- **Service-ID / array overflow / undefined SVC_CONTINUITY** —
+  Phase-2 services (Bonding/Continuity/InnerLife/Solitude/Family/
+  XChromosome/Consent) used raw casts past `ELLE_SERVICE_COUNT`.
+  Heartbeat's fixed arrays & `GetPipeName()` read out of bounds.
+  Fixed: enum now has 20 values; `g_serviceNames[]` has matching
+  strings with compile-time `static_assert`; `GetPipeName`,
+  `GetServiceName`, Heartbeat `OnMessage` + `AttemptRestart` all
+  bounds-check. Every raw cast replaced by proper `SVC_*` enum.
+- **Missing DB helpers** — 10 functions declared in `ElleSQLConn.h`
+  were never implemented; link errors the moment services built.
+  Fixed: implemented `SubmitAction`, `GetPendingActions`,
+  `UpdateActionStatus`, `GetTrustState`, `StoreEmotionSnapshot`
+  (alias), `GetLatestEmotionState` (alias), `UpdateGoalProgress`,
+  `GetActiveGoals`, `PromoteToLTM`, `ArchiveMemory` with real
+  parameterised SQL against live snake-case tables.
+
+### MEDIUM
+- **Self-modify partial reload** — LuaHost's `LoadAllScripts` used a
+  hardcoded 12-file list. Fixed: `std::filesystem::directory_iterator`
+  picks up every `*.lua` so SELF_MODIFY'd scripts actually load.
+- **Unsafe JSON** — ActionExecutor's message/hardware/file-watch
+  payloads built JSON via string concat, breaking on any quote or
+  backslash. Fixed: all three build frames via `nlohmann::json`.
+- **Unsafe SQL** — `SubmitIntent`, `UpdateTrust`, `RegisterWorker`,
+  `UpdateWorkerHeartbeat`, `WriteLog` used string concatenation.
+  Fixed: all parameterised via `QueryParams`.
+- **StoreGoal orphan / fragile JSON** — dropped ad-hoc JSON-in-
+  system_settings fallback. New `dbo.goals` (lazy-created snake_case)
+  with coherent StoreGoal + UpdateGoalProgress + GetActiveGoals.
+
+### LOWER
+- **IPC_WORLD_STATE overloaded** — used for both binary `ELLE_WORLD_ENTITY`
+  and arbitrary JSON strings. Fixed: added dedicated `IPC_WORLD_EVENT`
+  channel for strings; WorldModel keeps `IPC_WORLD_STATE` for entity
+  structs; HTTPServer WS fan-out listens on `IPC_WORLD_EVENT`. Callers
+  updated: ActionExecutor, XChromosome, Continuity, file-watcher.
+
+---
+
 ## Phase 19 — `/api/x/fertility_window` (Feb 2026, this session) ✅
 
 Tiny surface, huge emotional weight. One-glance readout for anyone

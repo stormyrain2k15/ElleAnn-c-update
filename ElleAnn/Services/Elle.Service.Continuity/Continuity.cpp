@@ -20,7 +20,7 @@
 class ElleContinuityService : public ElleServiceBase {
 public:
     ElleContinuityService()
-        : ElleServiceBase((ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 2), "ElleContinuity",
+        : ElleServiceBase(SVC_CONTINUITY, "ElleContinuity",
                           "Elle-Ann Continuity Engine",
                           "Session bridging, identity persistence, felt time") {}
 
@@ -222,8 +222,10 @@ private:
         ELLE_INFO("Reconnection greeting: %.120s", greeting.c_str());
 
         /* Also queue it as an outbound chat message via HTTP so any live
-         * WebSocket subscriber receives it immediately. */
-        auto msg = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_CONTINUITY, SVC_HTTP_SERVER);
+         * WebSocket subscriber receives it immediately. World-events are
+         * JSON strings; the dedicated IPC_WORLD_EVENT channel keeps
+         * WorldModel from misparsing this as an ELLE_WORLD_ENTITY struct. */
+        auto msg = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_CONTINUITY, SVC_HTTP_SERVER);
         msg.SetStringPayload("{\"event\":\"elle_greeting\",\"text\":\""
                              + EscapeJson(greeting) + "\"}");
         GetIPCHub().Send(SVC_HTTP_SERVER, msg);

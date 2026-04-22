@@ -387,16 +387,25 @@ uint32_t ElleSQLPool::AvailableConnections() const {
 namespace ElleDB {
 
 bool SubmitIntent(const ELLE_INTENT_RECORD& intent) {
-    return ElleSQLPool::Instance().Exec(
+    /* Parameterised — description/parameters are user-originated strings and
+     * would break the query (and be a classic injection surface) when built
+     * via concatenation.                                                    */
+    return ElleSQLPool::Instance().QueryParams(
         "INSERT INTO ElleCore.dbo.IntentQueue "
         "(IntentType, Status, SourceDrive, Urgency, Confidence, Description, Parameters, "
-        "RequiredTrust, CreatedMs, TimeoutMs) VALUES (" +
-        std::to_string(intent.type) + ", " + std::to_string(INTENT_PENDING) + ", " +
-        std::to_string(intent.source_drive) + ", " + std::to_string(intent.urgency) + ", " +
-        std::to_string(intent.confidence) + ", '" + intent.description + "', '" +
-        intent.parameters + "', " + std::to_string(intent.required_trust) + ", " +
-        std::to_string(ELLE_MS_NOW()) + ", " + std::to_string(intent.timeout_ms) + ")"
-    );
+        "RequiredTrust, CreatedMs, TimeoutMs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string(intent.type),
+            std::to_string(INTENT_PENDING),
+            std::to_string(intent.source_drive),
+            std::to_string(intent.urgency),
+            std::to_string(intent.confidence),
+            std::string(intent.description),
+            std::string(intent.parameters),
+            std::to_string(intent.required_trust),
+            std::to_string(ELLE_MS_NOW()),
+            std::to_string(intent.timeout_ms)
+        }).success;
 }
 
 bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) {
@@ -777,58 +786,309 @@ bool StoreEntity(const ELLE_WORLD_ENTITY& entity) {
 }
 
 bool UpdateTrust(int32_t delta, const std::string& reason) {
-    return ElleSQLPool::Instance().Exec(
+    /* Parameterised to keep Reason safe across apostrophes / newlines. */
+    auto& pool = ElleSQLPool::Instance();
+    bool ok = pool.QueryParams(
         "UPDATE ElleSystem.dbo.TrustState SET Score = "
-        "CASE WHEN Score + " + std::to_string(delta) + " > 100 THEN 100 "
-        "WHEN Score + " + std::to_string(delta) + " < 0 THEN 0 "
-        "ELSE Score + " + std::to_string(delta) + " END, "
-        "LastChangeMs = " + std::to_string(ELLE_MS_NOW()) + "; "
-        "INSERT INTO ElleSystem.dbo.TrustAudit (Delta, Reason, TimestampMs) VALUES (" +
-        std::to_string(delta) + ", '" + reason + "', " + std::to_string(ELLE_MS_NOW()) + ")"
-    );
+        "CASE WHEN Score + ? > 100 THEN 100 "
+        "WHEN Score + ? < 0 THEN 0 "
+        "ELSE Score + ? END, "
+        "LastChangeMs = ? WHERE Id = 1;",
+        { std::to_string(delta), std::to_string(delta), std::to_string(delta),
+          std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+    bool ok2 = pool.QueryParams(
+        "INSERT INTO ElleSystem.dbo.TrustAudit (Delta, Reason, TimestampMs) VALUES (?, ?, ?);",
+        { std::to_string(delta), reason, std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+    return ok && ok2;
+}
+
+bool GetTrustState(ELLE_TRUST_STATE& out) {
+    memset(&out, 0, sizeof(out));
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT TOP 1 Score, Level, Successes, Failures, TotalActions, Confidence "
+        "FROM ElleSystem.dbo.TrustState WHERE Id = 1;");
+    if (!rs.success || rs.rows.empty()) {
+        /* Singleton row hasn't been seeded yet — fall back to safe defaults
+         * (matches the seed INSERT in ElleAnn_Schema.sql).                   */
+        out.score = 5; out.level = 0;
+        out.successes = 0; out.failures = 0; out.total_actions = 0;
+        return false;
+    }
+    auto& r = rs.rows[0];
+    out.score         = (int32_t)r.GetInt(0);
+    out.level         = (uint32_t)r.GetInt(1);
+    out.successes     = (uint32_t)r.GetInt(2);
+    out.failures      = (uint32_t)r.GetInt(3);
+    out.total_actions = (uint32_t)r.GetInt(4);
+    return true;
 }
 
 bool RegisterWorker(ELLE_SERVICE_ID svc, const std::string& name) {
-    return ElleSQLPool::Instance().Exec(
-        "IF NOT EXISTS (SELECT 1 FROM ElleSystem.dbo.Workers WHERE ServiceId = " +
-        std::to_string(svc) + ") INSERT INTO ElleSystem.dbo.Workers "
-        "(ServiceId, Name, Running, Healthy, StartedMs) VALUES (" +
-        std::to_string(svc) + ", '" + name + "', 1, 1, " + std::to_string(ELLE_MS_NOW()) +
-        ") ELSE UPDATE ElleSystem.dbo.Workers SET Running = 1, Healthy = 1, "
-        "LastHeartbeatMs = " + std::to_string(ELLE_MS_NOW()) +
-        " WHERE ServiceId = " + std::to_string(svc)
-    );
+    auto& pool = ElleSQLPool::Instance();
+    return pool.QueryParams(
+        "IF NOT EXISTS (SELECT 1 FROM ElleSystem.dbo.Workers WHERE ServiceId = ?) "
+        "INSERT INTO ElleSystem.dbo.Workers "
+        "(ServiceId, Name, Running, Healthy, StartedMs) VALUES (?, ?, 1, 1, ?) "
+        "ELSE UPDATE ElleSystem.dbo.Workers SET Running = 1, Healthy = 1, "
+        "LastHeartbeatMs = ? WHERE ServiceId = ?;",
+        { std::to_string((int)svc), std::to_string((int)svc), name,
+          std::to_string((int64_t)ELLE_MS_NOW()),
+          std::to_string((int64_t)ELLE_MS_NOW()), std::to_string((int)svc) }).success;
 }
 
 bool UpdateWorkerHeartbeat(ELLE_SERVICE_ID svc) {
-    return ElleSQLPool::Instance().Exec(
-        "UPDATE ElleSystem.dbo.Workers SET LastHeartbeatMs = " +
-        std::to_string(ELLE_MS_NOW()) + ", Healthy = 1 WHERE ServiceId = " +
-        std::to_string(svc)
-    );
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleSystem.dbo.Workers SET LastHeartbeatMs = ?, Healthy = 1 "
+        "WHERE ServiceId = ?;",
+        { std::to_string((int64_t)ELLE_MS_NOW()), std::to_string((int)svc) }).success;
 }
 
 bool WriteLog(ELLE_LOG_LEVEL level, ELLE_SERVICE_ID svc, const std::string& msg) {
-    return ElleSQLPool::Instance().Exec(
-        "INSERT INTO ElleSystem.dbo.Logs (Level, ServiceId, Message, TimestampMs) VALUES (" +
-        std::to_string(level) + ", " + std::to_string(svc) + ", '" + msg + "', " +
-        std::to_string(ELLE_MS_NOW()) + ")"
-    );
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleSystem.dbo.Logs (Level, ServiceId, Message, TimestampMs) "
+        "VALUES (?, ?, ?, ?);",
+        { std::to_string((int)level), std::to_string((int)svc),
+          msg, std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * GOALS — use a dedicated snake_case dbo.goals table, lazy-created so the
+ * database survives a partial schema apply. The CamelCase dbo.Goals table in
+ * ElleAnn_Schema.sql is the aspirational design; live boxes we've seen use
+ * the lowercase variant. Previously StoreGoal() dumped ad-hoc JSON into
+ * dbo.system_settings with fragile snprintf — no matching read path existed
+ * so every goal op was write-only. Now StoreGoal / UpdateGoalProgress /
+ * GetActiveGoals all operate against the same table with parameterised SQL.
+ *──────────────────────────────────────────────────────────────────────────────*/
+static void EnsureGoalsTable() {
+    ElleSQLPool::Instance().Exec(
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'goals') "
+        "CREATE TABLE ElleCore.dbo.goals ("
+        "  id BIGINT IDENTITY(1,1) PRIMARY KEY,"
+        "  description     NVARCHAR(MAX) NOT NULL,"
+        "  status          INT NOT NULL DEFAULT 0,"     /* 0=active */
+        "  priority        INT NOT NULL DEFAULT 2,"
+        "  progress        FLOAT NOT NULL DEFAULT 0.0,"
+        "  motivation      FLOAT NOT NULL DEFAULT 0.7,"
+        "  source_drive    INT NOT NULL DEFAULT 0,"
+        "  parent_goal_id  BIGINT NULL,"
+        "  success_criteria NVARCHAR(MAX) NULL,"
+        "  created_ms      BIGINT NOT NULL,"
+        "  deadline_ms     BIGINT NULL,"
+        "  last_progress_ms BIGINT NULL,"
+        "  attempts        INT NOT NULL DEFAULT 0"
+        ");");
 }
 
 bool StoreGoal(const ELLE_GOAL_RECORD& goal) {
-    (void)goal;
-    /* dbo.Goals table is not part of the live ElleCore schema. Persist to
-     * dbo.system_settings as a JSON-line until a real Goals table lands. */
-    char buf[2048];
-    snprintf(buf, sizeof(buf),
-        "{\"description\":\"%s\",\"priority\":%u,\"progress\":%.3f,\"source_drive\":%u}",
-        goal.description, (unsigned)goal.priority, goal.progress, (unsigned)goal.source_drive);
-    std::string key = "goal_" + std::to_string(ELLE_MS_NOW());
+    EnsureGoalsTable();
     return ElleSQLPool::Instance().QueryParams(
-        "INSERT INTO ElleCore.dbo.system_settings (setting_key, setting_value, updated_at) "
-        "VALUES (?, ?, GETUTCDATE());",
-        { key, std::string(buf) }).success;
+        "INSERT INTO ElleCore.dbo.goals "
+        "(description, status, priority, progress, motivation, source_drive, "
+        " parent_goal_id, success_criteria, created_ms, deadline_ms, attempts) "
+        "VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, '0'), ?, ?, NULLIF(?, '0'), ?);",
+        {
+            std::string(goal.description),
+            std::to_string(goal.status),
+            std::to_string(goal.priority),
+            std::to_string(goal.progress),
+            std::to_string(goal.motivation),
+            std::to_string(goal.source_drive),
+            std::to_string(goal.parent_goal_id),
+            std::string(goal.success_criteria),
+            std::to_string((int64_t)ELLE_MS_NOW()),
+            std::to_string((int64_t)goal.deadline_ms),
+            std::to_string(goal.attempts)
+        }).success;
+}
+
+bool UpdateGoalProgress(uint64_t goalId, float progress) {
+    EnsureGoalsTable();
+    bool finished = progress >= 1.0f;
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.goals "
+        "SET progress = ?, last_progress_ms = ?, "
+        "    status = CASE WHEN ? >= 1.0 THEN 2 ELSE status END "
+        "WHERE id = ?;",
+        {
+            std::to_string(progress),
+            std::to_string((int64_t)ELLE_MS_NOW()),
+            std::to_string(progress),
+            std::to_string((int64_t)goalId)
+        }).success && (finished || true);
+}
+
+bool GetActiveGoals(std::vector<ELLE_GOAL_RECORD>& out) {
+    out.clear();
+    EnsureGoalsTable();
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT id, description, status, priority, progress, motivation, "
+        "       source_drive, ISNULL(parent_goal_id,0), "
+        "       ISNULL(success_criteria, N''), created_ms, "
+        "       ISNULL(deadline_ms, 0), attempts "
+        "FROM ElleCore.dbo.goals "
+        "WHERE status IN (0, 1) "  /* active or paused */
+        "ORDER BY priority ASC, created_ms DESC;");
+    if (!rs.success) return false;
+    for (auto& row : rs.rows) {
+        ELLE_GOAL_RECORD g{};
+        g.id             = (uint64_t)row.GetInt(0);
+        std::string desc = row.values.size() > 1 ? row.values[1] : std::string();
+        strncpy_s(g.description, desc.c_str(), ELLE_MAX_MSG - 1);
+        g.status         = (uint32_t)row.GetInt(2);
+        g.priority       = (uint32_t)row.GetInt(3);
+        g.progress       = (float)row.GetFloat(4);
+        g.motivation     = (float)row.GetFloat(5);
+        g.source_drive   = (uint32_t)row.GetInt(6);
+        g.parent_goal_id = (uint32_t)row.GetInt(7);
+        std::string crit = row.values.size() > 8 ? row.values[8] : std::string();
+        strncpy_s(g.success_criteria, crit.c_str(), ELLE_MAX_MSG - 1);
+        g.created_ms     = (uint64_t)row.GetInt(9);
+        g.deadline_ms    = (uint64_t)row.GetInt(10);
+        g.attempts       = (uint32_t)row.GetInt(11);
+        out.push_back(g);
+    }
+    return true;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * ACTIONS — the ActionQueue table is CamelCase in ElleAnn_Schema.sql but
+ * every other live table we interact with is snake_case. We lazy-create a
+ * snake_case dbo.action_queue to stay consistent with dbo.memory,
+ * dbo.world_entity, dbo.hardware_actions, etc.
+ *──────────────────────────────────────────────────────────────────────────────*/
+static void EnsureActionQueueTable() {
+    ElleSQLPool::Instance().Exec(
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'action_queue') "
+        "CREATE TABLE ElleCore.dbo.action_queue ("
+        "  id BIGINT IDENTITY(1,1) PRIMARY KEY,"
+        "  intent_id      BIGINT NULL,"
+        "  action_type    INT NOT NULL,"
+        "  status         INT NOT NULL DEFAULT 0,"
+        "  command        NVARCHAR(MAX) NULL,"
+        "  parameters     NVARCHAR(MAX) NULL,"
+        "  result         NVARCHAR(MAX) NULL,"
+        "  required_trust INT NOT NULL DEFAULT 0,"
+        "  trust_delta    INT NOT NULL DEFAULT 0,"
+        "  created_ms     BIGINT NOT NULL,"
+        "  started_ms     BIGINT NULL,"
+        "  completed_ms   BIGINT NULL,"
+        "  timeout_ms     BIGINT NOT NULL DEFAULT 30000,"
+        "  error_code     INT NOT NULL DEFAULT 0"
+        ");");
+}
+
+bool SubmitAction(const ELLE_ACTION_RECORD& action) {
+    EnsureActionQueueTable();
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.action_queue "
+        "(intent_id, action_type, status, command, parameters, required_trust, "
+        " created_ms, timeout_ms) VALUES (NULLIF(?, '0'), ?, ?, ?, ?, ?, ?, ?);",
+        {
+            std::to_string((int64_t)action.intent_id),
+            std::to_string(action.type),
+            std::to_string(ACTION_QUEUED),
+            std::string(action.command),
+            std::string(action.parameters),
+            std::to_string(action.required_trust),
+            std::to_string((int64_t)ELLE_MS_NOW()),
+            std::to_string((int64_t)action.timeout_ms)
+        }).success;
+}
+
+bool GetPendingActions(std::vector<ELLE_ACTION_RECORD>& out, uint32_t maxCount) {
+    out.clear();
+    EnsureActionQueueTable();
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP (?) id, ISNULL(intent_id,0), action_type, status, "
+        "       ISNULL(command, N''), ISNULL(parameters, N''), "
+        "       required_trust, created_ms, timeout_ms "
+        "FROM ElleCore.dbo.action_queue "
+        "WHERE status = 0 "
+        "ORDER BY created_ms ASC;",
+        { std::to_string(maxCount) });
+    if (!rs.success) return false;
+    for (auto& row : rs.rows) {
+        ELLE_ACTION_RECORD a{};
+        a.id             = (uint64_t)row.GetInt(0);
+        a.intent_id      = (uint64_t)row.GetInt(1);
+        a.type           = (uint32_t)row.GetInt(2);
+        a.status         = (uint32_t)row.GetInt(3);
+        std::string cmd  = row.values.size() > 4 ? row.values[4] : std::string();
+        std::string prm  = row.values.size() > 5 ? row.values[5] : std::string();
+        strncpy_s(a.command,    cmd.c_str(), ELLE_MAX_MSG - 1);
+        strncpy_s(a.parameters, prm.c_str(), ELLE_MAX_MSG - 1);
+        a.required_trust = (uint32_t)row.GetInt(6);
+        a.created_ms     = (uint64_t)row.GetInt(7);
+        a.timeout_ms     = (uint64_t)row.GetInt(8);
+        out.push_back(a);
+    }
+    return true;
+}
+
+bool UpdateActionStatus(uint64_t actionId, ELLE_ACTION_STATUS status,
+                        const std::string& result) {
+    EnsureActionQueueTable();
+    int64_t nowMs = (int64_t)ELLE_MS_NOW();
+    bool terminal = (status == ACTION_COMPLETED_SUCCESS ||
+                     status == ACTION_COMPLETED_FAILURE ||
+                     status == ACTION_TIMEOUT ||
+                     status == ACTION_CANCELLED);
+    bool starting = (status == ACTION_LOCKED || status == ACTION_EXECUTING);
+
+    /* Build a single UPDATE with only the columns that change for this
+     * particular transition — avoids the CAST-'0'=1 dance entirely.       */
+    std::string sql = "UPDATE ElleCore.dbo.action_queue SET status = ?";
+    std::vector<std::string> params = { std::to_string((int)status) };
+    if (!result.empty()) {
+        sql += ", result = ?";
+        params.push_back(result);
+    }
+    if (starting) {
+        sql += ", started_ms = COALESCE(started_ms, ?)";
+        params.push_back(std::to_string(nowMs));
+    }
+    if (terminal) {
+        sql += ", completed_ms = ?";
+        params.push_back(std::to_string(nowMs));
+    }
+    sql += " WHERE id = ?;";
+    params.push_back(std::to_string((int64_t)actionId));
+    return ElleSQLPool::Instance().QueryParams(sql, params).success;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * EMOTION snapshot aliases — callers use both the old names (StoreEmotionSnapshot
+ * / GetLatestEmotionState) and the new snake-case pair (PersistEmotionSnapshot
+ * / LoadLatestEmotionSnapshot). Rather than rename at every call site (which
+ * risks drift), alias the old names to the new implementations.
+ *──────────────────────────────────────────────────────────────────────────────*/
+bool StoreEmotionSnapshot(const ELLE_EMOTION_STATE& state) {
+    return PersistEmotionSnapshot(state);
+}
+bool GetLatestEmotionState(ELLE_EMOTION_STATE& out) {
+    return LoadLatestEmotionSnapshot(out);
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * MEMORY tier transitions — declared in the header and not yet used at call
+ * sites, but implement them so the link table is complete for anyone who
+ * picks them up later (and to honour the NO STUB policy).
+ *──────────────────────────────────────────────────────────────────────────────*/
+bool PromoteToLTM(uint64_t memId) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.memory SET tier = 2, "
+        "       last_access_ms = ? "
+        "WHERE id = ?;",
+        { std::to_string((int64_t)ELLE_MS_NOW()), std::to_string((int64_t)memId) }).success;
+}
+
+bool ArchiveMemory(uint64_t memId) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.memory SET tier = 3, "
+        "       last_access_ms = ? "
+        "WHERE id = ?;",
+        { std::to_string((int64_t)ELLE_MS_NOW()), std::to_string((int64_t)memId) }).success;
 }
 
 /*──────────────────────────────────────────────────────────────────────────────

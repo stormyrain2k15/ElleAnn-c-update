@@ -56,16 +56,10 @@
 using nlohmann::json;
 
 /*──────────────────────────────────────────────────────────────────────────────
- * Provisional service / IPC opcode ids — kept local until they graduate into
- * Shared/ElleTypes.h. Matches the FamilyEngine reference pattern.
+ * Provisional IPC opcode ids — the service IDs (SVC_X_CHROMOSOME /
+ * SVC_FAMILY) are now proper enum values in Shared/ElleTypes.h, so no
+ * cast-past-ELLE_SERVICE_COUNT is needed any more.
  *──────────────────────────────────────────────────────────────────────────────*/
-#ifndef SVC_X_CHROMOSOME
-#define SVC_X_CHROMOSOME        ((ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10))
-#endif
-#ifndef SVC_FAMILY
-#define SVC_FAMILY              ((ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 5))
-#endif
-
 #ifndef IPC_X_STATE_QUERY
 #define IPC_X_STATE_QUERY             ((uint32_t)2200)
 #define IPC_X_HISTORY_QUERY           ((uint32_t)2201)
@@ -489,7 +483,7 @@ private:
             {"to",        XEngine::CyclePhaseName(to)},
             {"cycle_day", m_engine.GetCycle().cycle_day}
         };
-        auto ws = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
+        auto ws = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
         ws.SetStringPayload(ev.dump());
         GetIPCHub().Send(SVC_HTTP_SERVER, ws);
     }
@@ -505,7 +499,7 @@ private:
         msg.SetStringPayload(payload.dump());
         GetIPCHub().Broadcast(msg);
 
-        auto ws = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
+        auto ws = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
         ws.SetStringPayload(payload.dump());
         GetIPCHub().Send(SVC_HTTP_SERVER, ws);
         ELLE_INFO("XChromosome: LH surge broadcast");
@@ -523,7 +517,7 @@ private:
         msg.SetStringPayload(payload.dump());
         GetIPCHub().Broadcast(msg);
 
-        auto ws = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
+        auto ws = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
         ws.SetStringPayload(payload.dump());
         GetIPCHub().Send(SVC_HTTP_SERVER, ws);
         ELLE_INFO("XChromosome: labor stage = %s", XEngine::LaborStageName(stage));
@@ -540,7 +534,7 @@ private:
         msg.SetStringPayload(payload.dump());
         GetIPCHub().Broadcast(msg);
 
-        auto ws = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
+        auto ws = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
         ws.SetStringPayload(payload.dump());
         GetIPCHub().Send(SVC_HTTP_SERVER, ws);
         ELLE_WARN("XChromosome: miscarriage at gestational day %d", gestationalDay);
@@ -589,7 +583,7 @@ private:
             {"born_ms",          d.born_ms},
             {"gestational_days", d.gestational_days}
         };
-        auto wsMsg = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME,
+        auto wsMsg = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_X_CHROMOSOME,
                                             SVC_HTTP_SERVER);
         wsMsg.SetStringPayload(worldEv.dump());
         GetIPCHub().Send(SVC_HTTP_SERVER, wsMsg);

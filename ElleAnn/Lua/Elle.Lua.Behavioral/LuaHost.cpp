@@ -22,6 +22,8 @@ extern "C" {
 #include <cstring>
 #include <mutex>
 #include <filesystem>
+#include <algorithm>
+#include <cctype>
 
 class LuaHost {
 public:
@@ -331,15 +333,37 @@ private:
 
         m_loadedScripts.clear();
 
-        /* Get script list from config */
-        /* In practice, iterate the lua.scripts array from config */
-        std::vector<std::string> scripts = {
-            "personality.lua", "intent_scoring.lua", "reasoning.lua",
-            "thresholds.lua", "self_reflection.lua", "goal_formation.lua",
-            "ethical_reasoning.lua", "creative_synthesis.lua",
-            "dream_processing.lua", "temporal_reasoning.lua",
-            "social_modeling.lua", "metacognition.lua"
-        };
+        /* Real dynamic discovery: scan the scripts directory for every *.lua
+         * file and load it. Previously this function loaded a hardcoded
+         * 12-file list, which meant:
+         *   1. ActionExecutor's SELF_MODIFY could write a brand-new Lua
+         *      script, fire IPC_CONFIG_RELOAD, LuaHost.ReloadScripts() would
+         *      fire — and the new script was skipped because it wasn't in
+         *      the list.
+         *   2. Any script removed from disk but still in the list would
+         *      log a failure forever.
+         * std::filesystem::directory_iterator gives us the actual files.
+         * Deterministic order for reproducible load sequencing.             */
+        std::vector<std::string> scripts;
+        try {
+            std::filesystem::path root(scriptsDir);
+            if (std::filesystem::exists(root) && std::filesystem::is_directory(root)) {
+                for (auto& entry : std::filesystem::directory_iterator(root)) {
+                    if (!entry.is_regular_file()) continue;
+                    auto ext = entry.path().extension().string();
+                    /* Case-insensitive .lua match */
+                    std::transform(ext.begin(), ext.end(), ext.begin(),
+                                   [](unsigned char c){ return (char)std::tolower(c); });
+                    if (ext == ".lua") scripts.push_back(entry.path().filename().string());
+                }
+                std::sort(scripts.begin(), scripts.end());
+            } else {
+                ELLE_WARN("Lua scripts directory missing or not a directory: %s",
+                          scriptsDir.c_str());
+            }
+        } catch (const std::exception& e) {
+            ELLE_WARN("Lua scripts directory scan error: %s", e.what());
+        }
 
         for (auto& script : scripts) {
             std::string path = scriptsDir + "\\" + script;
@@ -351,6 +375,8 @@ private:
                 m_loadedScripts.push_back(script);
             }
         }
+        ELLE_INFO("Lua: loaded %zu script(s) from %s",
+                  m_loadedScripts.size(), scriptsDir.c_str());
     }
 };
 

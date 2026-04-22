@@ -13,6 +13,7 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include "../../Shared/ElleQueueIPC.h"
+#include "../../Shared/json.hpp"
 #include <sstream>
 #include <string>
 #include <vector>
@@ -216,7 +217,7 @@ private:
      *
      * One background thread per watched path. Uses ReadDirectoryChangesW
      * against the parent directory (with a name filter for single-file
-     * watches) and broadcasts JSON frames over IPC_WORLD_STATE so HTTPServer
+     * watches) and broadcasts JSON frames over IPC_WORLD_EVENT so HTTPServer
      * can forward them to every connected WS client:
      *
      *     { "event":"file_change",
@@ -326,22 +327,18 @@ private:
                         full += "\\";
                     full += changedName;
 
-                    /* Best-effort JSON build — path strings contain backslashes
-                     * so we have to escape them properly. */
-                    std::string json = "{\"event\":\"file_change\",\"path\":\"";
-                    for (char c : w->path) {
-                        if (c == '\\' || c == '"') json += '\\';
-                        json += c;
-                    }
-                    json += "\",\"changed\":\"";
-                    for (char c : full) {
-                        if (c == '\\' || c == '"') json += '\\';
-                        json += c;
-                    }
-                    json += "\",\"kind\":\"" + KindFromAction(info->Action) + "\"}";
+                    /* Build frame with nlohmann::json — paths contain
+                     * backslashes and can contain quotes; manual escaping
+                     * risked shipping malformed JSON. */
+                    nlohmann::json j;
+                    j["event"]   = "file_change";
+                    j["path"]    = w->path;
+                    j["changed"] = full;
+                    j["kind"]    = KindFromAction(info->Action);
+                    std::string json = j.dump();
 
                     auto msg = ElleIPCMessage::Create(
-                        IPC_WORLD_STATE, SVC_ACTION, SVC_HTTP_SERVER);
+                        IPC_WORLD_EVENT, SVC_ACTION, SVC_HTTP_SERVER);
                     msg.SetStringPayload(json);
                     SendIPC(SVC_HTTP_SERVER, msg);
                 }
@@ -417,10 +414,14 @@ private:
 
     /*──────────────────────────────────────────────────────────────────────*/
     ExecutionResult ExecuteMessage(const ELLE_ACTION_RECORD& action) {
-        /* Broadcast the message via IPC to HTTP so WebSocket subscribers get it. */
-        auto msg = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_ACTION, SVC_HTTP_SERVER);
-        msg.SetStringPayload(std::string("{\"event\":\"message\",\"payload\":\"") +
-                             std::string(action.parameters) + "\"}");
+        /* Broadcast the message via IPC to HTTP so WebSocket subscribers get it.
+         * Build the envelope with nlohmann so arbitrary user/elle content
+         * can't malform the JSON frame or inject fields. */
+        nlohmann::json j;
+        j["event"]   = "message";
+        j["payload"] = std::string(action.parameters);
+        auto msg = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_ACTION, SVC_HTTP_SERVER);
+        msg.SetStringPayload(j.dump());
         bool ok = SendIPC(SVC_HTTP_SERVER, msg);
         if (!ok) return Fail("HTTP service unreachable — message not delivered");
         return {true, std::string(action.parameters), TRUST_SUCCESS_DELTA, 0};
@@ -460,10 +461,13 @@ private:
             if (!ok.success) return Fail("Failed to queue hardware action: " + ok.error);
         }
 
-        /* Push to WebSocket subscribers via HTTP service. */
-        auto wsMsg = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_ACTION, SVC_HTTP_SERVER);
-        wsMsg.SetStringPayload("{\"event\":\"hardware\",\"command\":\"" + cmd +
-                               "\",\"payload\":\"" + payload + "\"}");
+        /* Push to WebSocket subscribers via HTTP service. Safe JSON build. */
+        nlohmann::json jw;
+        jw["event"]   = "hardware";
+        jw["command"] = cmd;
+        jw["payload"] = payload;
+        auto wsMsg = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_ACTION, SVC_HTTP_SERVER);
+        wsMsg.SetStringPayload(jw.dump());
         SendIPC(SVC_HTTP_SERVER, wsMsg);
 
         return {true, "Hardware command queued: " + cmd, TRUST_SUCCESS_DELTA, 0};
@@ -522,7 +526,7 @@ private:
                 if (p_FileExists(path.c_str()) == 0)
                     return Fail("Path does not exist: " + path, 0x1208);
                 /* Real file-change watcher — spawn a ReadDirectoryChangesW
-                 * thread that broadcasts an IPC_WORLD_STATE frame on every
+                 * thread that broadcasts an IPC_WORLD_EVENT frame on every
                  * modification. Idempotent: same path returns "already
                  * watching". See FileWatchRegistry below.                 */
                 std::string err;
@@ -679,13 +683,25 @@ private:
 
     /*──────────────────────────────────────────────────────────────────────*/
     ExecutionResult ExecuteGoalOp(const ELLE_ACTION_RECORD& action) {
-        /* Forward to the Goal service rather than pretend-success. */
+        /* Forward to the Goal service as a proper ELLE_GOAL_RECORD struct —
+         * GoalEngine handles IPC_GOAL_UPDATE via msg.GetPayload(goal) and
+         * previously the string envelope we sent was parsed as raw bytes of
+         * a binary struct, so every goal op was silently corrupted.        */
+        ELLE_GOAL_RECORD goal{};
+        /* Map action ACTION_TYPE → goal description: action.command holds the
+         * verb (create/complete/abandon/update), action.parameters holds the
+         * human-readable description and/or success criteria.              */
+        strncpy_s(goal.description, action.parameters, ELLE_MAX_MSG - 1);
+        strncpy_s(goal.success_criteria, action.command, ELLE_MAX_MSG - 1);
+        goal.status       = 0;   /* active */
+        goal.priority     = GOAL_MEDIUM;
+        goal.progress     = 0.0f;
+        goal.motivation   = 0.7f;
+        goal.source_drive = 0;
+        goal.created_ms   = ELLE_MS_NOW();
+
         auto msg = ElleIPCMessage::Create(IPC_GOAL_UPDATE, SVC_ACTION, SVC_GOAL_ENGINE);
-        /* Payload: "<type>:<command>:<parameters>" — GoalEngine parses. */
-        std::string envelope = std::to_string(action.type) + ":" +
-                               std::string(action.command) + ":" +
-                               std::string(action.parameters);
-        msg.SetStringPayload(envelope);
+        msg.SetPayload(goal);
         bool sent = SendIPC(SVC_GOAL_ENGINE, msg);
         if (!sent) return Fail("GoalEngine unreachable", 0x1600);
         return {true, "Goal op dispatched: " + std::string(action.command),
@@ -717,48 +733,18 @@ protected:
     }
 
     void OnTick() override {
-        std::vector<ELLE_ACTION_RECORD> actions;
-        ElleDB::GetPendingActions(actions, 5);
-
-        for (auto& action : actions) {
-            ElleDB::UpdateActionStatus(action.id, ACTION_LOCKED);
-            auto result = m_executor.Execute(action, m_trust);
-
-            ELLE_ACTION_STATUS status = result.success ?
-                ACTION_COMPLETED_SUCCESS : ACTION_COMPLETED_FAILURE;
-            ElleDB::UpdateActionStatus(action.id, status, result.result);
-
-            if (result.trust_delta != 0) {
-                int32_t oldScore = m_trust.score;
-                m_trust.score = ELLE_CLAMP(m_trust.score + result.trust_delta, 0, TRUST_MAX);
-
-                if (m_trust.score >= TRUST_THRESHOLD_AUTONOMOUS) m_trust.level = TRUST_AUTONOMOUS;
-                else if (m_trust.score >= TRUST_THRESHOLD_ELEVATED) m_trust.level = TRUST_ELEVATED;
-                else if (m_trust.score >= TRUST_THRESHOLD_BASIC) m_trust.level = TRUST_BASIC;
-                else m_trust.level = TRUST_SANDBOXED;
-
-                ElleDB::UpdateTrust(result.trust_delta,
-                    std::string(action.command) + " -> " + (result.success ? "OK" : "FAIL"));
-
-                if (oldScore != m_trust.score) {
-                    ELLE_INFO("Trust updated: %d -> %d (level: %d)",
-                              oldScore, m_trust.score, m_trust.level);
-                    auto msg = ElleIPCMessage::Create(IPC_TRUST_UPDATE, SVC_ACTION, (ELLE_SERVICE_ID)0);
-                    msg.SetPayload(m_trust);
-                    msg.header.flags |= ELLE_IPC_FLAG_BROADCAST;
-                    GetIPCHub().Broadcast(msg);
-                }
-            }
-        }
+        /* Action polling is owned by SVC_QUEUE_WORKER. We receive each
+         * pending row as IPC_ACTION_REQUEST and execute it in OnMessage.
+         * Previously we also polled here AND OnMessage re-submitted the
+         * action via ElleDB::SubmitAction — together producing duplicate
+         * executions, re-enqueue loops, and status rows that never closed. */
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
         switch ((ELLE_IPC_MSG_TYPE)msg.header.msg_type) {
             case IPC_ACTION_REQUEST: {
                 ELLE_ACTION_RECORD action;
-                if (msg.GetPayload(action)) {
-                    ElleDB::SubmitAction(action);
-                }
+                if (msg.GetPayload(action)) ExecuteAction(action);
                 break;
             }
             case IPC_TRUST_QUERY: {
@@ -768,6 +754,45 @@ protected:
                 break;
             }
             default: break;
+        }
+    }
+
+    /*──────────────────────────────────────────────────────────────────────
+     * Execute a single queued action end-to-end:
+     *   lock SQL row → executor runs real Win32/ASM ops → update status →
+     *   fold trust delta into the trust state (SQL + broadcast).
+     * This was previously inline in OnTick; extracted so the IPC-driven
+     * path and the recovery path (if we ever re-enable polling as a
+     * fallback) can share it.
+     *──────────────────────────────────────────────────────────────────────*/
+    void ExecuteAction(ELLE_ACTION_RECORD& action) {
+        ElleDB::UpdateActionStatus(action.id, ACTION_LOCKED);
+        auto result = m_executor.Execute(action, m_trust);
+
+        ELLE_ACTION_STATUS status = result.success ?
+            ACTION_COMPLETED_SUCCESS : ACTION_COMPLETED_FAILURE;
+        ElleDB::UpdateActionStatus(action.id, status, result.result);
+
+        if (result.trust_delta != 0) {
+            int32_t oldScore = m_trust.score;
+            m_trust.score = ELLE_CLAMP(m_trust.score + result.trust_delta, 0, TRUST_MAX);
+
+            if (m_trust.score >= TRUST_THRESHOLD_AUTONOMOUS) m_trust.level = TRUST_AUTONOMOUS;
+            else if (m_trust.score >= TRUST_THRESHOLD_ELEVATED) m_trust.level = TRUST_ELEVATED;
+            else if (m_trust.score >= TRUST_THRESHOLD_BASIC) m_trust.level = TRUST_BASIC;
+            else m_trust.level = TRUST_SANDBOXED;
+
+            ElleDB::UpdateTrust(result.trust_delta,
+                std::string(action.command) + " -> " + (result.success ? "OK" : "FAIL"));
+
+            if (oldScore != m_trust.score) {
+                ELLE_INFO("Trust updated: %d -> %d (level: %d)",
+                          oldScore, m_trust.score, m_trust.level);
+                auto tmsg = ElleIPCMessage::Create(IPC_TRUST_UPDATE, SVC_ACTION, (ELLE_SERVICE_ID)0);
+                tmsg.SetPayload(m_trust);
+                tmsg.header.flags |= ELLE_IPC_FLAG_BROADCAST;
+                GetIPCHub().Broadcast(tmsg);
+            }
         }
     }
 
