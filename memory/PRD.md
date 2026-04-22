@@ -206,6 +206,61 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 13 — WS Hardware Push + Installer -Force (Feb 2026, this session) ✅
+
+Closes the last three "next action" items before end-to-end testing.
+
+### 1. ChatScreen.kt compile repair (from prior Phase 12 mid-edit rot)
+Already shipped in Phase 12; verified clean this session.
+
+### 2. Hardware action WebSocket push
+Before: Android polled `/api/ai/hardware/actions/pending` every 5s.
+ActionExecutor was already sending `IPC_WORLD_STATE` with JSON payload
+`{"event":"hardware","command":..,"payload":..}` to HTTPServer — but
+HTTPServer's `OnIPCMessage` filter only forwarded EMOTION / LOG / TRUST
+to WS clients, so hardware events were silently dropped.
+
+**C++ side** (`Services/Elle.Service.HTTP/HTTPServer.cpp`):
+- Added `IPC_WORLD_STATE` to the forward filter.
+- `BroadcastIPCToWebSockets` now parses the payload JSON and emits a
+  typed frame `{"type":"world_event","data":<parsed>,"tick":...}`.
+
+**Android side** (`services/DeviceActionExecutor.kt`):
+- Full rewrite of the poll loop. Two delivery channels into a single
+  conflated `Channel<Unit>` refresh signal:
+    1. **Push** — OkHttp `WebSocket` subscribes to `ws(s)://<host>/` and
+       nudges the channel on any `{"type":"world_event","data":{"event":"hardware"}}`
+       frame. Auto-reconnects with exponential back-off (2s → 30s).
+    2. **Fallback timer** — 15s tick (was 5s) pushes to the same channel
+       so a dead WS never starves the queue.
+- Added `kotlinx.coroutines.channels.Channel`, `okhttp3.WebSocket*`,
+  `org.json.JSONObject`, `TimeUnit` imports. All deps already present.
+- Case-insensitive `deriveWsUrl()` converts the repo's HTTP base URL
+  into the matching `ws://` / `wss://`.
+
+**Repo support** (`data/repository/ElleRepository.kt`):
+- Exposed `fun currentServerUrl(): String` so the executor can derive
+  the WS URL without duplicating the preference read.
+
+### 3. SCM installer verification
+- `elle_service_manifest.json` — 16 services, confirmed to match every
+  populated subdir under `Services/` (empty `Elle.Service.Consent/` is
+  correctly absent).
+- `Install-ElleServices.ps1` — added `-Force` switch. When set, already-
+  registered services are stopped (if running), then `sc.exe config`
+  rewrites their `binPath`. Critical for iterative rebuild-and-test
+  cycles without a full uninstall/reinstall.
+- `Deploy/README.md` — documents the new `-Force` flag.
+
+### Net UX impact
+- Hardware commands Elle issues through `ActionExecutor` now surface on
+  the phone within one RTT instead of up to 5s. Under WS failure the
+  15s timer still guarantees delivery.
+- Installer correctly handles the rebuild-and-reinstall loop.
+- No more orphaned Kotlin compile errors.
+
+---
+
 ## Phase 12 — ChatScreen.kt Compile Repair (Feb 2026, this session) ✅
 
 The previous session left `ChatScreen.kt` with two compile-breaking

@@ -25,7 +25,8 @@ param(
     [string] $ManifestPath = (Join-Path $PSScriptRoot 'elle_service_manifest.json'),
     [string] $BinaryRoot   = '',
     [switch] $NoStart,
-    [switch] $WhatIf
+    [switch] $WhatIf,
+    [switch] $Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,7 +61,21 @@ foreach ($svc in $manifest.services) {
 
     $existing = (sc.exe query $svc.name 2>&1) | Out-String
     if ($existing -notmatch 'FAILED|does not exist') {
-        Write-Host "[$($svc.name)] already registered — skipping create." -ForegroundColor DarkYellow
+        if ($Force) {
+            Write-Host "[$($svc.name)] -Force: reconfiguring binPath → $exePath" -ForegroundColor Yellow
+            if (-not $WhatIf) {
+                # Stop before reconfiguring so the EXE lock is released.
+                if ($existing -match 'RUNNING') {
+                    & sc.exe stop $svc.name | Out-Null
+                    Start-Sleep -Milliseconds 800
+                }
+                $configBin = 'binPath= "' + $exePath + '"'
+                & sc.exe config $svc.name $configBin | Out-Null
+            }
+        }
+        else {
+            Write-Host "[$($svc.name)] already registered — skipping create (use -Force to reconfigure)." -ForegroundColor DarkYellow
+        }
     }
     else {
         $binArg   = 'binPath= "' + $exePath + '"'

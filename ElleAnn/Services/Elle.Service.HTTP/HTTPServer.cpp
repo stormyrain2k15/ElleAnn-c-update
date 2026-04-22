@@ -592,7 +592,8 @@ protected:
 
         if (msg.header.msg_type == IPC_EMOTION_UPDATE ||
             msg.header.msg_type == IPC_LOG_ENTRY ||
-            msg.header.msg_type == IPC_TRUST_UPDATE) {
+            msg.header.msg_type == IPC_TRUST_UPDATE ||
+            msg.header.msg_type == IPC_WORLD_STATE) {
             BroadcastIPCToWebSockets(msg);
         }
     }
@@ -997,6 +998,19 @@ private:
                     {"dominance", state.dominance},
                     {"tick", state.tick_count}
                 };
+            }
+        }
+        else if (msg.header.msg_type == IPC_WORLD_STATE) {
+            /* ActionExecutor publishes JSON strings describing real-world
+             * events (e.g. queued hardware commands). Parse and re-emit as
+             * a typed "world_event" frame so Android clients can dispatch
+             * on `data.event == "hardware"` without waiting on the 5s poll. */
+            payload["type"] = "world_event";
+            try {
+                std::string s = msg.GetStringPayload();
+                if (!s.empty()) payload["data"] = json::parse(s);
+            } catch (const std::exception&) {
+                payload["data"] = { {"raw", msg.GetStringPayload()} };
             }
         }
 

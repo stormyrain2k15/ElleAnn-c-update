@@ -27,6 +27,7 @@ cd .\Deploy
 .\Install-ElleServices.ps1                           # register + start
 .\Install-ElleServices.ps1 -NoStart                  # register only
 .\Install-ElleServices.ps1 -BinaryRoot "C:\Ann\bin"  # custom bin path
+.\Install-ElleServices.ps1 -Force                    # reconfigure existing services' binPath after a rebuild
 .\Install-ElleServices.ps1 -WhatIf                   # dry run
 ```
 
