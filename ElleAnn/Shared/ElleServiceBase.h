@@ -80,6 +80,11 @@ protected:
     /* Access the running flag */
     std::atomic<bool>& Running() { return m_running; }
 
+    /* Access to the currently-running service singleton. Helper classes
+     * (ActionExecutor, HTTPHandler, etc.) use this to publish IPC messages
+     * without being members of the service class themselves.              */
+    static ElleServiceBase* Current() { return s_instance; }
+
 private:
     ELLE_SERVICE_ID m_serviceId;
     std::string     m_serviceName;

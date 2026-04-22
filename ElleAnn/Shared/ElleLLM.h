@@ -165,18 +165,13 @@ private:
     llama_context*    m_ctx = nullptr;
     std::mutex        m_inferenceMutex;
 
-    /* Tokenization */
-    std::vector<int32_t> Tokenize(const std::string& text, bool addBos = false);
-    std::string Detokenize(const std::vector<int32_t>& tokens);
-
-    /* Chat template formatting */
+    /* Chat template formatting — shared by subprocess invocation. */
     std::string FormatChatPrompt(const std::vector<LLMMessage>& messages);
 
-    /* Sampling */
-    int32_t SampleToken(float temperature, float topP, float repeatPenalty,
-                        const std::vector<int32_t>& lastTokens);
-
-    /* Generation loop */
+    /* Generation loop — spawns llama-cli.exe as a subprocess (see Generate()
+     * in ElleLLM.cpp for the full protocol). In-process llama linkage was
+     * considered and rejected; the subprocess path is what Complete/Stream
+     * actually use today.                                                  */
     std::string Generate(const std::string& prompt, uint32_t maxTokens,
                          float temperature, LLMStreamCallback callback = nullptr);
 };

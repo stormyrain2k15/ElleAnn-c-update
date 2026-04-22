@@ -79,6 +79,11 @@ private:
     HANDLE              m_hPipe = INVALID_HANDLE_VALUE;
     bool                m_connected = false;
     ELLE_SERVICE_ID     m_remoteService = (ELLE_SERVICE_ID)0;
+    /* Owner discriminator — set to the ElleIPCClient* that owns this conn
+     * (nullptr for server-owned connections). The IOCP worker uses this to
+     * route read completions to the right handler. Without it the client
+     * side of a conn silently drops all inbound messages.                 */
+    void*               m_clientOwner = nullptr;
     ELLE_IOCP_OVERLAPPED m_readOvl;
     ELLE_IOCP_OVERLAPPED m_writeOvl;
     std::vector<uint8_t> m_readBuffer;
@@ -199,6 +204,7 @@ private:
     /* IOCP worker threads */
     std::vector<std::thread> m_workers;
     void WorkerThread();
+    void DispatchIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytes, DWORD err);
 
     /* Message queue */
     std::queue<ElleIPCMessage> m_incomingQueue;

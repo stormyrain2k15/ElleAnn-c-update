@@ -349,6 +349,10 @@ bool ElleIPCClient::Connect(ELLE_SERVICE_ID myService, ELLE_SERVICE_ID targetSer
         return false;
     }
 
+    /* Tag this conn as client-owned so the IOCP dispatcher routes inbound
+     * reads back to THIS client instead of defaulting to the server path. */
+    m_conn->m_clientOwner = this;
+
     /* Set message mode */
     DWORD mode = PIPE_READMODE_MESSAGE;
     SetNamedPipeHandleState(m_conn->m_hPipe, &mode, nullptr, nullptr);
@@ -367,6 +371,60 @@ bool ElleIPCClient::Connect(ELLE_SERVICE_ID myService, ELLE_SERVICE_ID targetSer
              nullptr, &m_conn->m_readOvl.overlapped);
 
     return true;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Client-side IOCP completion handler.
+ * Previously this was declared-only and the IOCP worker always routed to the
+ * server. Result: every message the server pushed to a client was silently
+ * dropped. This function deserializes the inbound frame, fires the registered
+ * handler, and re-posts the overlapped read so the pipe keeps receiving.
+ *──────────────────────────────────────────────────────────────────────────────*/
+void ElleIPCClient::OnIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytesTransferred, DWORD error) {
+    if (!m_conn) return;
+
+    if (error != 0) {
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) {
+            m_conn->m_connected = false;
+            ELLE_DEBUG("Client pipe disconnected (target=%u)", (unsigned)m_targetService);
+        } else {
+            ELLE_WARN("Client IOCP error %u on target=%u", error, (unsigned)m_targetService);
+        }
+        return;
+    }
+
+    switch (ovl->operation) {
+        case ELLE_IOCP_OP_READ: {
+            if (bytesTransferred > 0) {
+                ElleIPCMessage msg;
+                if (ElleIPCMessage::Deserialize(m_conn->m_readOvl.buffer, bytesTransferred, msg)) {
+                    if (m_handler) {
+                        m_handler(msg, (ELLE_SERVICE_ID)msg.header.source_svc);
+                    }
+                } else {
+                    ELLE_WARN("Client failed to deserialize %u bytes from target=%u",
+                              bytesTransferred, (unsigned)m_targetService);
+                }
+            }
+            /* Always re-post the read so further server→client messages land. */
+            ZeroMemory(&m_conn->m_readOvl.overlapped, sizeof(OVERLAPPED));
+            m_conn->m_readOvl.operation = ELLE_IOCP_OP_READ;
+            m_conn->m_readOvl.pipe_handle = m_conn->m_hPipe;
+            BOOL ok = ReadFile(m_conn->m_hPipe, m_conn->m_readOvl.buffer,
+                               ELLE_PIPE_BUFFER_SIZE, nullptr,
+                               &m_conn->m_readOvl.overlapped);
+            if (!ok && GetLastError() != ERROR_IO_PENDING) {
+                m_conn->m_connected = false;
+                ELLE_WARN("Client re-post ReadFile failed: %d", GetLastError());
+            }
+            break;
+        }
+        case ELLE_IOCP_OP_WRITE:
+            /* Write completed — nothing to do; Serialize buffer is owned by caller. */
+            break;
+        default:
+            break;
+    }
 }
 
 void ElleIPCClient::Disconnect() {
@@ -576,7 +634,7 @@ void ElleIPCHub::WorkerThread() {
             if (err == WAIT_TIMEOUT) continue;
             if (ovl) {
                 auto* elleOvl = reinterpret_cast<ELLE_IOCP_OVERLAPPED*>(ovl);
-                m_server.OnIOComplete(elleOvl, 0, err);
+                DispatchIOComplete(elleOvl, 0, err);
             }
             continue;
         }
@@ -584,6 +642,23 @@ void ElleIPCHub::WorkerThread() {
         if (!ovl) continue; /* Shutdown signal */
 
         auto* elleOvl = reinterpret_cast<ELLE_IOCP_OVERLAPPED*>(ovl);
-        m_server.OnIOComplete(elleOvl, bytesTransferred, 0);
+        DispatchIOComplete(elleOvl, bytesTransferred, 0);
+    }
+}
+
+/* Route the completion to whichever side owns the connection.
+ * Client-owned conns have m_clientOwner set to the ElleIPCClient*; server
+ * conns leave it nullptr. Without this dispatch every client read completion
+ * was misrouted to the server handler and silently dropped.                */
+void ElleIPCHub::DispatchIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytes, DWORD err) {
+    /* Recover the owning EllePipeConnection via the same offsetof trick the
+     * server uses. Works regardless of server/client because both sides use
+     * the same struct layout.                                              */
+    auto* conn = reinterpret_cast<EllePipeConnection*>(
+        reinterpret_cast<uint8_t*>(ovl) - offsetof(EllePipeConnection, m_readOvl));
+    if (conn->m_clientOwner) {
+        reinterpret_cast<ElleIPCClient*>(conn->m_clientOwner)->OnIOComplete(ovl, bytes, err);
+    } else {
+        m_server.OnIOComplete(ovl, bytes, err);
     }
 }

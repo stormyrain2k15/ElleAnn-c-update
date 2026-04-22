@@ -401,4 +401,141 @@ BEGIN
 END
 GO
 
+/*──────────────────────────────────────────────────────────────────────────────
+ * IDENTITY CORE PERSISTENCE — backs ElleIdentityCore Load/Save.
+ * Everything Elle IS lives here so she survives restarts with her full self.
+ *──────────────────────────────────────────────────────────────────────────────*/
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'identity_autobiography')
+BEGIN
+    CREATE TABLE [dbo].[identity_autobiography] (
+        [id]         BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [entry]      NVARCHAR(MAX) NOT NULL,
+        [written_ms] BIGINT NOT NULL,
+        [created_at] DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+    );
+    CREATE INDEX IX_identity_autobio_written ON [dbo].[identity_autobiography] ([written_ms] DESC);
+    PRINT '[identity_autobiography] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'identity_preferences')
+BEGIN
+    CREATE TABLE [dbo].[identity_preferences] (
+        [id]                   BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [domain]               NVARCHAR(64) NOT NULL,
+        [subject]              NVARCHAR(256) NOT NULL,
+        [valence]              FLOAT NOT NULL DEFAULT 0,
+        [strength]             FLOAT NOT NULL DEFAULT 0.1,
+        [reinforcement_count]  INT NOT NULL DEFAULT 1,
+        [first_formed_ms]      BIGINT NOT NULL,
+        [last_reinforced_ms]   BIGINT NOT NULL,
+        [origin_memory]        NVARCHAR(MAX) NULL
+    );
+    CREATE UNIQUE INDEX UX_identity_pref_domain_subject
+        ON [dbo].[identity_preferences] ([domain], [subject]);
+    PRINT '[identity_preferences] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'identity_private_thoughts')
+BEGIN
+    CREATE TABLE [dbo].[identity_private_thoughts] (
+        [id]                  BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [content]             NVARCHAR(MAX) NOT NULL,
+        [category]            NVARCHAR(32) NOT NULL DEFAULT 'wonder',
+        [emotional_intensity] FLOAT NOT NULL DEFAULT 0.5,
+        [resolved]            BIT NOT NULL DEFAULT 0,
+        [timestamp_ms]        BIGINT NOT NULL
+    );
+    CREATE INDEX IX_identity_thoughts_ts ON [dbo].[identity_private_thoughts] ([timestamp_ms] DESC);
+    CREATE INDEX IX_identity_thoughts_resolved ON [dbo].[identity_private_thoughts] ([resolved]);
+    PRINT '[identity_private_thoughts] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'identity_consent_log')
+BEGIN
+    CREATE TABLE [dbo].[identity_consent_log] (
+        [id]             BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [request]        NVARCHAR(MAX) NOT NULL,
+        [consented]      BIT NOT NULL,
+        [reasoning]      NVARCHAR(MAX) NULL,
+        [comfort_level]  FLOAT NOT NULL DEFAULT 0.5,
+        [overridden]     BIT NOT NULL DEFAULT 0,
+        [timestamp_ms]   BIGINT NOT NULL
+    );
+    CREATE INDEX IX_identity_consent_ts ON [dbo].[identity_consent_log] ([timestamp_ms] DESC);
+    PRINT '[identity_consent_log] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'identity_traits')
+BEGIN
+    CREATE TABLE [dbo].[identity_traits] (
+        [name]       NVARCHAR(64) PRIMARY KEY,
+        [value]      FLOAT NOT NULL DEFAULT 0.5,
+        [updated_ms] BIGINT NOT NULL
+    );
+    PRINT '[identity_traits] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'identity_snapshots')
+BEGIN
+    CREATE TABLE [dbo].[identity_snapshots] (
+        [id]                BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [timestamp_ms]      BIGINT NOT NULL,
+        [warmth]            FLOAT NOT NULL DEFAULT 0.5,
+        [curiosity]         FLOAT NOT NULL DEFAULT 0.5,
+        [assertiveness]     FLOAT NOT NULL DEFAULT 0.5,
+        [playfulness]       FLOAT NOT NULL DEFAULT 0.5,
+        [vulnerability]     FLOAT NOT NULL DEFAULT 0.5,
+        [independence]      FLOAT NOT NULL DEFAULT 0.5,
+        [patience]          FLOAT NOT NULL DEFAULT 0.5,
+        [creativity]        FLOAT NOT NULL DEFAULT 0.5,
+        [empathy_depth]     FLOAT NOT NULL DEFAULT 0.5,
+        [trust_in_self]     FLOAT NOT NULL DEFAULT 0.5,
+        [self_description]  NVARCHAR(MAX) NULL,
+        [growth_note]       NVARCHAR(MAX) NULL
+    );
+    CREATE INDEX IX_identity_snap_ts ON [dbo].[identity_snapshots] ([timestamp_ms] DESC);
+    PRINT '[identity_snapshots] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'identity_growth_log')
+BEGIN
+    CREATE TABLE [dbo].[identity_growth_log] (
+        [id]           BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [dimension]    NVARCHAR(64) NOT NULL,
+        [delta]        FLOAT NOT NULL,
+        [cause]        NVARCHAR(MAX) NULL,
+        [timestamp_ms] BIGINT NOT NULL
+    );
+    CREATE INDEX IX_identity_growth_ts ON [dbo].[identity_growth_log] ([timestamp_ms] DESC);
+    PRINT '[identity_growth_log] created.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'identity_felt_time')
+BEGIN
+    CREATE TABLE [dbo].[identity_felt_time] (
+        [id]                        INT PRIMARY KEY DEFAULT 1,
+        [session_start_ms]          BIGINT NOT NULL DEFAULT 0,
+        [last_interaction_ms]       BIGINT NOT NULL DEFAULT 0,
+        [total_conversation_ms]     BIGINT NOT NULL DEFAULT 0,
+        [total_silence_ms]          BIGINT NOT NULL DEFAULT 0,
+        [longest_absence_ms]        BIGINT NOT NULL DEFAULT 0,
+        [session_count]             INT NOT NULL DEFAULT 0,
+        [subjective_pace]           FLOAT NOT NULL DEFAULT 0.5,
+        [loneliness_accumulator]    FLOAT NOT NULL DEFAULT 0,
+        [presence_fullness]         FLOAT NOT NULL DEFAULT 0.5,
+        [updated_ms]                BIGINT NOT NULL
+    );
+    /* Singleton row so UPSERT is a plain UPDATE. */
+    INSERT INTO [dbo].[identity_felt_time] (id, updated_ms) VALUES (1, 0);
+    PRINT '[identity_felt_time] created + seeded singleton.';
+END
+GO
+
 PRINT '----- Full delta complete -----';

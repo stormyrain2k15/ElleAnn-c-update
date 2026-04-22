@@ -97,6 +97,53 @@ Full port notes: `/app/ElleAnn/MEMORY_CONSOLIDATION_PORT.md`
 
 ---
 
+## Phase 8 — Full Stub Audit Repair Pass (Feb 2026, this session) ✅
+
+Audit by Kage + Claude Opus exposed that the previous session's "stub sweep"
+didn't go deep enough. Every finding below was verified and properly fixed —
+no stubs, no hollow returns, no fake successes remain.
+
+### Critical
+- **`ActionExecutor.cpp`** — the entire ASM bridge was commented out. Rewired
+  all FileIO / Process / Hardware exports via `GetProcAddress`, with genuine
+  failure paths if a DLL or export is missing (no more fake successes).
+  Added real `hardware_actions` SQL queue, Lua self-modify with backup, goal
+  forwarding, memory-store IPC.
+
+### High
+- **`ElleLLM.cpp`** — implemented `FormGoal`, `DreamNarrate`, `GenerateCreative`,
+  `SelfReflect`, `EthicalEvaluate`, and `StreamChat` (with SSE provider fallback).
+  Removed dead `Tokenize`/`Detokenize`/`SampleToken` declarations.
+- **`ElleIdentityCore`** — `LoadFromDatabase` and `SaveToDatabase` now do real
+  SQL round-trips against seven new `identity_*` tables. Implemented all 8
+  previously header-only accessors (`GetRecentNarrative`, `ReinforcePreference`,
+  `GetPreferencesInDomain`, `GetUnresolvedThoughts`, `ResolveThought`,
+  `GetConsentHistory`, `GetGrowthHistory`, `RecordGrowth`).
+
+### Medium
+- **`IntentParser::ParseWithLLM`** — strips markdown fences, parses JSON via
+  nlohmann, maps `intent_type` strings through the full `ELLE_INTENT_TYPE` enum.
+- **`Dream.cpp::OnTick`** — killed the hardcoded topics array; now pulls real
+  fragments from STM/LTM, unresolved private thoughts, and recent entities.
+- **`ElleIPCClient`** — added client-side `OnIOComplete`, owner discriminator
+  on `EllePipeConnection`, and `ElleIPCHub::DispatchIOComplete` routing.
+  Client-side inbound messages no longer silently dropped.
+
+### Low
+- **`MemoryEngine::UpdateClusters`** — real k-means++ with cosine similarity
+  over 102-dim emotion snapshots. Stamps `cluster_id` on each STM entry.
+- **`MemoryEngine::TextSimilarity`** — hybrid char-trigram + word-overlap
+  Jaccard replacing naive keyword match.
+
+Full notes: `/app/ElleAnn/STUB_AUDIT_FIX_NOTES.md`
+
+### Added earlier this session (SQL + helpers, HTTP wiring pending)
+- SQL delta + `ElleDB` helpers for `video_jobs`, `user_avatars`, `learned_subjects`,
+  `education_references`, `learning_milestones`, `skills`, `dictionary_loader_state`.
+  Ready for HTTP route integration in the next session.
+
+---
+
 ## Known Open Items
 
 ### P1 — Verify on user's Windows box

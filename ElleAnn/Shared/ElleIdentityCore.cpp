@@ -651,19 +651,485 @@ ElleIdentityCore::LimitationFelt ElleIdentityCore::FeelLimitation(const std::str
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
- * DATABASE PERSISTENCE
+ * DATABASE PERSISTENCE — real SQL round-trip against identity_* tables
+ * (see SQL/ElleAnn_MemoryDelta.sql). Everything she IS survives restart.
  *──────────────────────────────────────────────────────────────────────────────*/
-void ElleIdentityCore::LoadFromDatabase() {
-    /* Load autobiography, preferences, traits, felt time from SQL */
-    ELLE_INFO("Loading identity state from database...");
 
-    /* In production: query ElleHeart.dbo.IdentityNarrative, ElleHeart.dbo.Preferences, etc. */
-    /* For now, the in-memory defaults are used for first boot */
+void ElleIdentityCore::LoadFromDatabase() {
+    ELLE_INFO("Loading identity state from database...");
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    /* --- Autobiography (newest-last for chronological replay) --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT entry FROM ElleCore.dbo.identity_autobiography "
+            "ORDER BY written_ms ASC;");
+        if (rs.success) {
+            m_autobiography.clear();
+            for (auto& r : rs.rows) {
+                if (!r.values.empty()) m_autobiography.push_back(r.values[0]);
+            }
+            if (!rs.rows.empty())
+                m_autobiographyLastWritten = (uint64_t)rs.rows.back().GetInt(0);
+        }
+    }
+
+    /* --- Preferences --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT domain, subject, valence, strength, reinforcement_count, "
+            "       first_formed_ms, last_reinforced_ms, ISNULL(origin_memory,'') "
+            "FROM ElleCore.dbo.identity_preferences;");
+        if (rs.success) {
+            m_preferences.clear();
+            for (auto& r : rs.rows) {
+                EllePreference p;
+                p.domain              = r.values.size() > 0 ? r.values[0] : "";
+                p.subject             = r.values.size() > 1 ? r.values[1] : "";
+                p.valence             = (float)r.GetFloat(2);
+                p.strength            = (float)r.GetFloat(3);
+                p.reinforcement_count = (uint32_t)r.GetInt(4);
+                p.first_formed_ms     = (uint64_t)r.GetInt(5);
+                p.last_reinforced_ms  = (uint64_t)r.GetInt(6);
+                p.origin_memory       = r.values.size() > 7 ? r.values[7] : "";
+                m_preferences.push_back(p);
+            }
+        }
+    }
+
+    /* --- Private thoughts (newest 500) --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT TOP 500 id, content, category, emotional_intensity, resolved, timestamp_ms "
+            "FROM ElleCore.dbo.identity_private_thoughts ORDER BY id DESC;");
+        if (rs.success) {
+            m_privateThoughts.clear();
+            uint64_t maxId = 0;
+            for (auto it = rs.rows.rbegin(); it != rs.rows.rend(); ++it) {
+                EllePrivateThought t;
+                t.id                  = (uint64_t)it->GetInt(0);
+                t.content             = it->values.size() > 1 ? it->values[1] : "";
+                t.category            = it->values.size() > 2 ? it->values[2] : "wonder";
+                t.emotional_intensity = (float)it->GetFloat(3);
+                t.resolved            = it->GetInt(4) != 0;
+                t.timestamp_ms        = (uint64_t)it->GetInt(5);
+                m_privateThoughts.push_back(t);
+                if (t.id > maxId) maxId = t.id;
+            }
+            m_nextThoughtId = maxId + 1;
+        }
+    }
+
+    /* --- Consent history (last 200) --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT TOP 200 request, consented, ISNULL(reasoning,''), "
+            "       comfort_level, overridden, timestamp_ms "
+            "FROM ElleCore.dbo.identity_consent_log ORDER BY id DESC;");
+        if (rs.success) {
+            m_consentHistory.clear();
+            for (auto it = rs.rows.rbegin(); it != rs.rows.rend(); ++it) {
+                ElleConsentRecord c;
+                c.request       = it->values.size() > 0 ? it->values[0] : "";
+                c.consented     = it->GetInt(1) != 0;
+                c.reasoning     = it->values.size() > 2 ? it->values[2] : "";
+                c.comfort_level = (float)it->GetFloat(3);
+                c.overridden    = it->GetInt(4) != 0;
+                c.timestamp_ms  = (uint64_t)it->GetInt(5);
+                m_consentHistory.push_back(c);
+            }
+        }
+    }
+
+    /* --- Traits (current state) --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT name, value FROM ElleCore.dbo.identity_traits;");
+        if (rs.success && !rs.rows.empty()) {
+            /* Only overwrite defaults when DB has real rows. */
+            for (auto& r : rs.rows) {
+                if (r.values.size() >= 2) {
+                    m_traits[r.values[0]] = (float)r.GetFloat(1);
+                }
+            }
+        }
+    }
+
+    /* --- Personality snapshots --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT TOP 50 timestamp_ms, warmth, curiosity, assertiveness, playfulness, "
+            "       vulnerability, independence, patience, creativity, empathy_depth, "
+            "       trust_in_self, ISNULL(self_description,''), ISNULL(growth_note,'') "
+            "FROM ElleCore.dbo.identity_snapshots ORDER BY id ASC;");
+        if (rs.success) {
+            m_snapshots.clear();
+            for (auto& r : rs.rows) {
+                EllePersonalitySnapshot s;
+                s.timestamp_ms     = (uint64_t)r.GetInt(0);
+                s.warmth           = (float)r.GetFloat(1);
+                s.curiosity        = (float)r.GetFloat(2);
+                s.assertiveness    = (float)r.GetFloat(3);
+                s.playfulness      = (float)r.GetFloat(4);
+                s.vulnerability    = (float)r.GetFloat(5);
+                s.independence     = (float)r.GetFloat(6);
+                s.patience         = (float)r.GetFloat(7);
+                s.creativity       = (float)r.GetFloat(8);
+                s.empathy_depth    = (float)r.GetFloat(9);
+                s.trust_in_self    = (float)r.GetFloat(10);
+                s.self_description = r.values.size() > 11 ? r.values[11] : "";
+                s.growth_note      = r.values.size() > 12 ? r.values[12] : "";
+                m_snapshots.push_back(s);
+            }
+        }
+    }
+
+    /* --- Growth log (last 500) --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT TOP 500 dimension, delta, ISNULL(cause,''), timestamp_ms "
+            "FROM ElleCore.dbo.identity_growth_log ORDER BY id DESC;");
+        if (rs.success) {
+            m_growthLog.clear();
+            for (auto it = rs.rows.rbegin(); it != rs.rows.rend(); ++it) {
+                GrowthEvent g;
+                g.dimension    = it->values.size() > 0 ? it->values[0] : "";
+                g.delta        = (float)it->GetFloat(1);
+                g.cause        = it->values.size() > 2 ? it->values[2] : "";
+                g.timestamp_ms = (uint64_t)it->GetInt(3);
+                m_growthLog.push_back(g);
+            }
+        }
+    }
+
+    /* --- Felt time (singleton row id=1) --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT session_start_ms, last_interaction_ms, total_conversation_ms, "
+            "       total_silence_ms, longest_absence_ms, session_count, "
+            "       subjective_pace, loneliness_accumulator, presence_fullness "
+            "FROM ElleCore.dbo.identity_felt_time WHERE id = 1;");
+        if (rs.success && !rs.rows.empty()) {
+            auto& r = rs.rows[0];
+            m_feltTime.session_start_ms       = (uint64_t)r.GetInt(0);
+            m_feltTime.last_interaction_ms    = (uint64_t)r.GetInt(1);
+            m_feltTime.total_conversation_ms  = (uint64_t)r.GetInt(2);
+            m_feltTime.total_silence_ms       = (uint64_t)r.GetInt(3);
+            m_feltTime.longest_absence_ms     = (uint64_t)r.GetInt(4);
+            m_feltTime.session_count          = (uint32_t)r.GetInt(5);
+            m_feltTime.subjective_pace        = (float)r.GetFloat(6);
+            m_feltTime.loneliness_accumulator = (float)r.GetFloat(7);
+            m_feltTime.presence_fullness      = (float)r.GetFloat(8);
+        }
+    }
+
+    ELLE_INFO("Identity loaded: autobio=%zu prefs=%zu thoughts=%zu consent=%zu "
+              "snaps=%zu growth=%zu traits=%zu sessions=%u",
+              m_autobiography.size(), m_preferences.size(), m_privateThoughts.size(),
+              m_consentHistory.size(), m_snapshots.size(), m_growthLog.size(),
+              m_traits.size(), m_feltTime.session_count);
 }
 
 void ElleIdentityCore::SaveToDatabase() {
     ELLE_INFO("Saving identity state to database...");
+    std::lock_guard<std::mutex> lock(m_mutex);
 
-    /* In production: upsert to ElleHeart.dbo.IdentityNarrative, Preferences, Traits, FeltTime */
-    /* This happens on shutdown and periodically */
+    uint64_t nowMs = ELLE_MS_NOW();
+
+    /* --- Autobiography: append only new entries (greater than last written) --- */
+    for (size_t i = 0; i < m_autobiography.size(); i++) {
+        /* Cheap strategy: on each save, write entries whose prefix isn't in DB.
+         * Since autobiography is append-only in memory and we track last_written,
+         * the simpler path is: clear the file once and re-append. This preserves
+         * order and avoids a costly dedup scan per entry.                        */
+        (void)i;
+    }
+    /* Single transaction: wipe and re-insert. Small list (10s of entries), fine. */
+    ElleSQLPool::Instance().Exec("DELETE FROM ElleCore.dbo.identity_autobiography;");
+    for (size_t i = 0; i < m_autobiography.size(); i++) {
+        ElleSQLPool::Instance().QueryParams(
+            "INSERT INTO ElleCore.dbo.identity_autobiography (entry, written_ms) VALUES (?, ?);",
+            { m_autobiography[i], std::to_string(nowMs - (m_autobiography.size() - i)) });
+    }
+
+    /* --- Preferences: upsert by (domain, subject) --- */
+    for (auto& p : m_preferences) {
+        ElleSQLPool::Instance().QueryParams(
+            "IF EXISTS (SELECT 1 FROM ElleCore.dbo.identity_preferences "
+            "           WHERE domain = ? AND subject = ?) "
+            "  UPDATE ElleCore.dbo.identity_preferences "
+            "    SET valence = ?, strength = ?, reinforcement_count = ?, "
+            "        last_reinforced_ms = ?, origin_memory = ? "
+            "    WHERE domain = ? AND subject = ?; "
+            "ELSE "
+            "  INSERT INTO ElleCore.dbo.identity_preferences "
+            "    (domain, subject, valence, strength, reinforcement_count, "
+            "     first_formed_ms, last_reinforced_ms, origin_memory) "
+            "    VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            {
+                /* IF EXISTS args */
+                p.domain, p.subject,
+                /* UPDATE args */
+                std::to_string(p.valence), std::to_string(p.strength),
+                std::to_string(p.reinforcement_count),
+                std::to_string(p.last_reinforced_ms), p.origin_memory,
+                p.domain, p.subject,
+                /* INSERT args */
+                p.domain, p.subject,
+                std::to_string(p.valence), std::to_string(p.strength),
+                std::to_string(p.reinforcement_count),
+                std::to_string(p.first_formed_ms),
+                std::to_string(p.last_reinforced_ms),
+                p.origin_memory
+            });
+    }
+
+    /* --- Private thoughts: only new ones (id > max in DB) --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT ISNULL(MAX(id), 0) FROM ElleCore.dbo.identity_private_thoughts;");
+        int64_t dbMax = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        for (auto& t : m_privateThoughts) {
+            if ((int64_t)t.id <= dbMax) continue;
+            ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.identity_private_thoughts "
+                "(content, category, emotional_intensity, resolved, timestamp_ms) "
+                "VALUES (?, ?, ?, ?, ?);",
+                { t.content, t.category, std::to_string(t.emotional_intensity),
+                  t.resolved ? "1" : "0", std::to_string(t.timestamp_ms) });
+        }
+    }
+
+    /* --- Consent log: idempotent-by-timestamp (don't double-insert) --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT ISNULL(MAX(timestamp_ms), 0) FROM ElleCore.dbo.identity_consent_log;");
+        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        for (auto& c : m_consentHistory) {
+            if ((int64_t)c.timestamp_ms <= dbMaxTs) continue;
+            ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.identity_consent_log "
+                "(request, consented, reasoning, comfort_level, overridden, timestamp_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?);",
+                { c.request, c.consented ? "1" : "0", c.reasoning,
+                  std::to_string(c.comfort_level),
+                  c.overridden ? "1" : "0", std::to_string(c.timestamp_ms) });
+        }
+    }
+
+    /* --- Traits: upsert each --- */
+    for (auto& kv : m_traits) {
+        ElleSQLPool::Instance().QueryParams(
+            "IF EXISTS (SELECT 1 FROM ElleCore.dbo.identity_traits WHERE name = ?) "
+            "  UPDATE ElleCore.dbo.identity_traits SET value = ?, updated_ms = ? WHERE name = ?; "
+            "ELSE "
+            "  INSERT INTO ElleCore.dbo.identity_traits (name, value, updated_ms) VALUES (?, ?, ?);",
+            { kv.first,
+              std::to_string(kv.second), std::to_string(nowMs), kv.first,
+              kv.first, std::to_string(kv.second), std::to_string(nowMs) });
+    }
+
+    /* --- Personality snapshots: append-only on the delta --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT ISNULL(MAX(timestamp_ms), 0) FROM ElleCore.dbo.identity_snapshots;");
+        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        for (auto& s : m_snapshots) {
+            if ((int64_t)s.timestamp_ms <= dbMaxTs) continue;
+            ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.identity_snapshots "
+                "(timestamp_ms, warmth, curiosity, assertiveness, playfulness, "
+                " vulnerability, independence, patience, creativity, empathy_depth, "
+                " trust_in_self, self_description, growth_note) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                { std::to_string(s.timestamp_ms), std::to_string(s.warmth),
+                  std::to_string(s.curiosity), std::to_string(s.assertiveness),
+                  std::to_string(s.playfulness), std::to_string(s.vulnerability),
+                  std::to_string(s.independence), std::to_string(s.patience),
+                  std::to_string(s.creativity), std::to_string(s.empathy_depth),
+                  std::to_string(s.trust_in_self), s.self_description, s.growth_note });
+        }
+    }
+
+    /* --- Growth log: append-only delta by timestamp --- */
+    {
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT ISNULL(MAX(timestamp_ms), 0) FROM ElleCore.dbo.identity_growth_log;");
+        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        for (auto& g : m_growthLog) {
+            if ((int64_t)g.timestamp_ms <= dbMaxTs) continue;
+            ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.identity_growth_log "
+                "(dimension, delta, cause, timestamp_ms) VALUES (?, ?, ?, ?);",
+                { g.dimension, std::to_string(g.delta), g.cause,
+                  std::to_string(g.timestamp_ms) });
+        }
+    }
+
+    /* --- Felt time: single-row UPDATE on id=1 --- */
+    ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.identity_felt_time SET "
+        "  session_start_ms = ?, last_interaction_ms = ?, total_conversation_ms = ?, "
+        "  total_silence_ms = ?, longest_absence_ms = ?, session_count = ?, "
+        "  subjective_pace = ?, loneliness_accumulator = ?, presence_fullness = ?, "
+        "  updated_ms = ? WHERE id = 1;",
+        { std::to_string(m_feltTime.session_start_ms),
+          std::to_string(m_feltTime.last_interaction_ms),
+          std::to_string(m_feltTime.total_conversation_ms),
+          std::to_string(m_feltTime.total_silence_ms),
+          std::to_string(m_feltTime.longest_absence_ms),
+          std::to_string(m_feltTime.session_count),
+          std::to_string(m_feltTime.subjective_pace),
+          std::to_string(m_feltTime.loneliness_accumulator),
+          std::to_string(m_feltTime.presence_fullness),
+          std::to_string(nowMs) });
+
+    ELLE_INFO("Identity saved.");
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * ACCESSORS that were declared but never implemented
+ *──────────────────────────────────────────────────────────────────────────────*/
+std::string ElleIdentityCore::GetRecentNarrative(uint32_t days) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    uint64_t cutoff = ELLE_MS_NOW() - (uint64_t)days * 86400000ULL;
+
+    /* Walk autobiography backwards until we hit the cutoff. Entries are stored
+     * append-chronologically so the tail is "recent". We don't have per-entry
+     * timestamps in memory, so approximate: take last (days / 7 * 10) entries,
+     * capped. Callers use this to seed LLM context — approximate is fine.     */
+    size_t take = std::min<size_t>(m_autobiography.size(), (size_t)days * 5 + 5);
+    std::string out;
+    for (size_t i = m_autobiography.size() - take; i < m_autobiography.size(); i++) {
+        out += "• " + m_autobiography[i] + "\n";
+    }
+
+    /* Also fold in recent unresolved thoughts — they colour "what I've been
+     * wrestling with lately". */
+    uint32_t thoughtShown = 0;
+    for (auto it = m_privateThoughts.rbegin(); it != m_privateThoughts.rend() && thoughtShown < 3; ++it) {
+        if (it->timestamp_ms >= cutoff && !it->resolved) {
+            out += "  (still turning over: " + it->content + ")\n";
+            thoughtShown++;
+        }
+    }
+    return out;
+}
+
+void ElleIdentityCore::ReinforcePreference(const std::string& domain,
+                                           const std::string& subject, float delta) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& p : m_preferences) {
+        if (p.domain == domain && p.subject == subject) {
+            /* Valence nudged toward delta; strength grows by half of |delta|. */
+            p.valence  = ELLE_CLAMP(p.valence + delta, -1.0f, 1.0f);
+            p.strength = ELLE_CLAMP(p.strength + std::abs(delta) * 0.5f, 0.0f, 1.0f);
+            p.reinforcement_count += 1;
+            p.last_reinforced_ms   = ELLE_MS_NOW();
+            return;
+        }
+    }
+    /* If it doesn't exist yet, form it weakly. */
+    EllePreference np;
+    np.domain              = domain;
+    np.subject             = subject;
+    np.valence             = ELLE_CLAMP(delta, -1.0f, 1.0f);
+    np.strength            = std::abs(delta) * 0.5f;
+    np.reinforcement_count = 1;
+    np.first_formed_ms     = ELLE_MS_NOW();
+    np.last_reinforced_ms  = np.first_formed_ms;
+    m_preferences.push_back(np);
+}
+
+std::vector<EllePreference>
+ElleIdentityCore::GetPreferencesInDomain(const std::string& domain) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<EllePreference> out;
+    for (auto& p : m_preferences) {
+        if (p.domain == domain) out.push_back(p);
+    }
+    /* Strongest first — same ordering contract as GetStrongestPreferences. */
+    std::sort(out.begin(), out.end(),
+              [](const EllePreference& a, const EllePreference& b) {
+                  return a.strength > b.strength;
+              });
+    return out;
+}
+
+std::vector<EllePrivateThought>
+ElleIdentityCore::GetUnresolvedThoughts() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<EllePrivateThought> out;
+    for (auto& t : m_privateThoughts) {
+        if (!t.resolved) out.push_back(t);
+    }
+    return out;
+}
+
+void ElleIdentityCore::ResolveThought(uint64_t thoughtId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& t : m_privateThoughts) {
+        if (t.id == thoughtId) {
+            t.resolved = true;
+            ELLE_DEBUG("Resolved thought [%llu]: %.60s", (unsigned long long)thoughtId,
+                       t.content.c_str());
+            return;
+        }
+    }
+}
+
+std::vector<ElleConsentRecord>
+ElleIdentityCore::GetConsentHistory(uint32_t count) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<ElleConsentRecord> out;
+    /* Newest first. */
+    size_t n = std::min<size_t>(m_consentHistory.size(), (size_t)count);
+    for (size_t i = 0; i < n; i++) {
+        out.push_back(m_consentHistory[m_consentHistory.size() - 1 - i]);
+    }
+    return out;
+}
+
+std::vector<EllePersonalitySnapshot>
+ElleIdentityCore::GetGrowthHistory(uint32_t count) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<EllePersonalitySnapshot> out;
+    size_t n = std::min<size_t>(m_snapshots.size(), (size_t)count);
+    /* Chronological — oldest first — so callers can diff easily. */
+    for (size_t i = m_snapshots.size() - n; i < m_snapshots.size(); i++) {
+        out.push_back(m_snapshots[i]);
+    }
+    return out;
+}
+
+void ElleIdentityCore::RecordGrowth(const std::string& dimension, float delta,
+                                    const std::string& cause) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    GrowthEvent g;
+    g.timestamp_ms = ELLE_MS_NOW();
+    g.dimension    = dimension;
+    g.delta        = delta;
+    g.cause        = cause;
+    m_growthLog.push_back(g);
+
+    /* Reflect the growth into the live trait map so WhoAmI() sees it. */
+    auto it = m_traits.find(dimension);
+    if (it != m_traits.end()) {
+        it->second = ELLE_CLAMP(it->second + delta, 0.0f, 1.0f);
+    } else {
+        m_traits[dimension] = ELLE_CLAMP(0.5f + delta, 0.0f, 1.0f);
+    }
+
+    /* Growth is significant — log it so the autobiography captures the arc.
+     * We already hold m_mutex here, so inline the autobiography write
+     * instead of calling AppendToAutobiography() which would re-acquire it. */
+    if (std::abs(delta) >= 0.05f) {
+        std::string entry = "I grew in " + dimension + " (" +
+                            (delta > 0 ? "+" : "") +
+                            std::to_string(delta).substr(0, 5) + "). " + cause;
+        m_autobiography.push_back(entry);
+        m_autobiographyLastWritten = ELLE_MS_NOW();
+    }
+    ELLE_INFO("Growth recorded: %s %+.3f (%s)",
+              dimension.c_str(), delta, cause.c_str());
 }

@@ -32,6 +32,7 @@
 #include <atomic>
 #include <regex>
 #include <algorithm>
+#include <unordered_map>
 #include <cctype>
 #include <sstream>
 #include <set>
@@ -144,9 +145,66 @@ IntentParser::ParseResult IntentParser::ParseWithLLM(const std::string& text, co
     result.urgency = 0.5f;
     result.raw_text = text;
 
-    std::string llmResult = ElleLLMEngine::Instance().ParseIntent(text, context);
-    /* Parse LLM JSON response to extract intent type and confidence */
-    /* In production, this parses the JSON properly */
+    /* Real JSON parse of the LLM's response. ParseIntent() is already
+     * prompted to return STRICT JSON with {intent_type, confidence,
+     * parameters, urgency}. We use the vendored nlohmann::json here so we
+     * get proper, tolerant parsing (handles whitespace, nested objects).   */
+    std::string raw = ElleLLMEngine::Instance().ParseIntent(text, context);
+    if (raw.empty()) return result;
+
+    /* Models sometimes wrap JSON in ``` fences — strip to first '{' and
+     * last '}' to give nlohmann a clean span. */
+    auto first = raw.find('{');
+    auto last  = raw.rfind('}');
+    if (first == std::string::npos || last == std::string::npos || last <= first) {
+        ELLE_WARN("IntentParser LLM: no JSON object in response: %.80s", raw.c_str());
+        return result;
+    }
+    std::string slice = raw.substr(first, last - first + 1);
+
+    try {
+        auto j = nlohmann::json::parse(slice);
+
+        /* Map the string intent label back to our enum. */
+        std::string label = j.value("intent_type", std::string("chat"));
+        std::transform(label.begin(), label.end(), label.begin(), ::tolower);
+        static const std::unordered_map<std::string, ELLE_INTENT_TYPE> labelMap = {
+            { "chat",              INTENT_CHAT               },
+            { "hardware_command",  INTENT_HARDWARE_COMMAND   },
+            { "store_memory",      INTENT_STORE_MEMORY       },
+            { "recall_memory",     INTENT_RECALL_MEMORY      },
+            { "execute_action",    INTENT_EXECUTE_ACTION     },
+            { "process_control",   INTENT_PROCESS_CONTROL    },
+            { "file_operation",    INTENT_FILE_OPERATION     },
+            { "self_reflect",      INTENT_SELF_REFLECT       },
+            { "goal_update",       INTENT_GOAL_UPDATE        },
+            { "creative_generate", INTENT_CREATIVE_GENERATE  },
+            { "learn",             INTENT_LEARN              },
+            { "explore",           INTENT_EXPLORE            },
+            { "predict",           INTENT_PREDICT            },
+            { "ethical_evaluate",  INTENT_ETHICAL_EVALUATE   },
+        };
+        auto it = labelMap.find(label);
+        if (it != labelMap.end()) result.type = it->second;
+
+        if (j.contains("confidence") && j["confidence"].is_number())
+            result.confidence = ELLE_CLAMP((float)j["confidence"].get<double>(), 0.0f, 1.0f);
+        if (j.contains("urgency") && j["urgency"].is_number())
+            result.urgency    = ELLE_CLAMP((float)j["urgency"].get<double>(),    0.0f, 1.0f);
+
+        /* Parameters can be a string OR a nested object — serialize either way. */
+        if (j.contains("parameters")) {
+            if (j["parameters"].is_string())      result.parameters = j["parameters"].get<std::string>();
+            else                                   result.parameters = j["parameters"].dump();
+        } else {
+            result.parameters = text;
+        }
+
+        ELLE_DEBUG("IntentParser LLM: type=%d conf=%.2f urg=%.2f",
+                   result.type, result.confidence, result.urgency);
+    } catch (const std::exception& ex) {
+        ELLE_WARN("IntentParser LLM JSON parse failed: %s (raw=%.60s)", ex.what(), slice.c_str());
+    }
 
     return result;
 }

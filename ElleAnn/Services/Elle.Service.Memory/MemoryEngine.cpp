@@ -10,6 +10,7 @@
 #include <cmath>
 #include <sstream>
 #include <set>
+#include <array>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * Priority-tier decay model — ported from legacy Python ShortTermMemoryStore
@@ -372,21 +373,63 @@ float MemoryEngine::ComputeRelevance(const ELLE_MEMORY_RECORD& mem, const std::s
 }
 
 float MemoryEngine::TextSimilarity(const std::string& a, const std::string& b) {
-    /* Simple keyword overlap (in production, use embeddings) */
+    /* Hybrid similarity: character-trigram Jaccard (recall, typo-tolerant) +
+     * word-overlap (precision on exact keyword hits). This is the same
+     * fallback scoring approach used by production search engines when
+     * embeddings aren't available. The legacy implementation used word
+     * overlap only, which gave zero signal on partial-match queries like
+     * "rememb" vs "remember" or "conversat" vs "conversation".            */
+    auto norm = [](const std::string& s) {
+        std::string out; out.reserve(s.size());
+        for (char c : s) {
+            if ((unsigned char)c < 128 && (isalnum((unsigned char)c) || c == ' '))
+                out += (char)tolower((unsigned char)c);
+            else if (c != '\r' && c != '\n' && c != '\t')
+                out += ' ';
+        }
+        return out;
+    };
+    std::string A = norm(a), B = norm(b);
+    if (A.empty() || B.empty()) return 0.0f;
+
+    /* --- word-overlap component --- */
     std::set<std::string> wordsA, wordsB;
-    std::istringstream issA(a), issB(b);
-    std::string word;
-    while (issA >> word) { std::transform(word.begin(), word.end(), word.begin(), ::tolower); wordsA.insert(word); }
-    while (issB >> word) { std::transform(word.begin(), word.end(), word.begin(), ::tolower); wordsB.insert(word); }
-
-    if (wordsA.empty() || wordsB.empty()) return 0.0f;
-
-    uint32_t overlap = 0;
-    for (auto& w : wordsA) {
-        if (wordsB.count(w)) overlap++;
+    {
+        std::istringstream issA(A), issB(B);
+        std::string w;
+        while (issA >> w) wordsA.insert(w);
+        while (issB >> w) wordsB.insert(w);
+    }
+    float wordJaccard = 0.0f;
+    if (!wordsA.empty() && !wordsB.empty()) {
+        size_t inter = 0;
+        for (const auto& w : wordsA) if (wordsB.count(w)) inter++;
+        size_t uni = wordsA.size() + wordsB.size() - inter;
+        if (uni > 0) wordJaccard = (float)inter / (float)uni;
     }
 
-    return (float)overlap / (float)std::max(wordsA.size(), wordsB.size());
+    /* --- char-trigram Jaccard --- */
+    auto shingles = [](const std::string& s) {
+        std::set<std::string> out;
+        if (s.size() < 3) { out.insert(s); return out; }
+        for (size_t i = 0; i + 2 < s.size(); i++) out.insert(s.substr(i, 3));
+        return out;
+    };
+    auto sa = shingles(A), sb = shingles(B);
+    float triJaccard = 0.0f;
+    if (!sa.empty() && !sb.empty()) {
+        size_t inter = 0;
+        const auto& small = (sa.size() < sb.size()) ? sa : sb;
+        const auto& big   = (sa.size() < sb.size()) ? sb : sa;
+        for (const auto& t : small) if (big.count(t)) inter++;
+        size_t uni = sa.size() + sb.size() - inter;
+        if (uni > 0) triJaccard = (float)inter / (float)uni;
+    }
+
+    /* Word overlap is the strong precision signal, trigrams fill in recall.
+     * Weights tuned so an exact-keyword match dominates a fuzzy partial,
+     * but a partial still rises above noise.                              */
+    return 0.65f * wordJaccard + 0.35f * triJaccard;
 }
 
 float MemoryEngine::ComputeEmotionSimilarity(const float a[ELLE_MAX_EMOTIONS],
@@ -442,8 +485,108 @@ std::vector<ELLE_MEMORY_RECORD> MemoryEngine::RecallRecent(uint32_t count) {
 }
 
 void MemoryEngine::UpdateClusters() {
-    /* Simple clustering based on emotional similarity */
-    ELLE_DEBUG("Updating memory clusters...");
+    std::lock_guard<std::mutex> lock(m_stmMutex);
+    if (m_stm.size() < 2) { m_clusters.clear(); return; }
+
+    auto& cfg = ElleConfig::Instance().GetMemory();
+    const uint32_t maxK = std::max(2u, std::min(cfg.max_clusters,
+                                                (uint32_t)(m_stm.size() / 3 + 1)));
+    const float    simThresh = cfg.cluster_threshold;  /* cosine sim cutoff */
+    const int      maxIter   = 8;                      /* bounded — fast. */
+
+    /* ─── 1. Seed centroids greedily: pick far-apart emotion vectors. ───── */
+    std::vector<std::array<float, ELLE_MAX_EMOTIONS>> centroids;
+    centroids.reserve(maxK);
+    /* First seed: first entry's emotion snapshot.                          */
+    {
+        std::array<float, ELLE_MAX_EMOTIONS> c{};
+        memcpy(c.data(), m_stm.front().emotion_snapshot,
+               sizeof(float) * ELLE_MAX_EMOTIONS);
+        centroids.push_back(c);
+    }
+    /* k-means++ farthest-point seeding (cheap). */
+    while (centroids.size() < maxK) {
+        float bestDist = -1.0f;
+        size_t bestIdx = 0;
+        for (size_t i = 0; i < m_stm.size(); i++) {
+            float minSim = 1.0f;
+            for (auto& cen : centroids) {
+                float s = ComputeEmotionSimilarity(m_stm[i].emotion_snapshot,
+                                                    cen.data());
+                if (s < minSim) minSim = s;
+            }
+            float dist = 1.0f - minSim; /* higher = farther */
+            if (dist > bestDist) { bestDist = dist; bestIdx = i; }
+        }
+        if (bestDist <= (1.0f - simThresh)) break;   /* clusters saturated */
+        std::array<float, ELLE_MAX_EMOTIONS> c{};
+        memcpy(c.data(), m_stm[bestIdx].emotion_snapshot,
+               sizeof(float) * ELLE_MAX_EMOTIONS);
+        centroids.push_back(c);
+    }
+
+    /* ─── 2. Lloyd iterations: assign → recompute → repeat ──────────────── */
+    std::vector<uint32_t> assign(m_stm.size(), 0);
+    for (int iter = 0; iter < maxIter; iter++) {
+        bool changed = false;
+
+        /* Assign every memory to the most similar centroid. */
+        for (size_t i = 0; i < m_stm.size(); i++) {
+            float bestSim = -2.0f;
+            uint32_t best = 0;
+            for (size_t k = 0; k < centroids.size(); k++) {
+                float s = ComputeEmotionSimilarity(m_stm[i].emotion_snapshot,
+                                                    centroids[k].data());
+                if (s > bestSim) { bestSim = s; best = (uint32_t)k; }
+            }
+            if (assign[i] != best) { assign[i] = best; changed = true; }
+        }
+        if (!changed) break;
+
+        /* Recompute centroids as the mean of assigned emotion snapshots. */
+        std::vector<std::array<float, ELLE_MAX_EMOTIONS>> sum(centroids.size());
+        std::vector<uint32_t> count(centroids.size(), 0);
+        for (size_t k = 0; k < sum.size(); k++) sum[k].fill(0.0f);
+        for (size_t i = 0; i < m_stm.size(); i++) {
+            uint32_t k = assign[i];
+            for (int d = 0; d < ELLE_EMOTION_COUNT; d++)
+                sum[k][d] += m_stm[i].emotion_snapshot[d];
+            count[k]++;
+        }
+        for (size_t k = 0; k < centroids.size(); k++) {
+            if (count[k] == 0) continue;
+            for (int d = 0; d < ELLE_EMOTION_COUNT; d++)
+                centroids[k][d] = sum[k][d] / (float)count[k];
+        }
+    }
+
+    /* ─── 3. Materialize clusters + stamp cluster_id on each STM entry ──── */
+    m_clusters.clear();
+    m_clusters.resize(centroids.size());
+    for (size_t k = 0; k < centroids.size(); k++) {
+        m_clusters[k].id = (uint32_t)k;
+        memcpy(m_clusters[k].centroid, centroids[k].data(),
+               sizeof(float) * ELLE_MAX_EMOTIONS);
+    }
+    for (size_t i = 0; i < m_stm.size(); i++) {
+        uint32_t k = assign[i];
+        m_stm[i].cluster_id = k;
+        if (k < m_clusters.size())
+            m_clusters[k].member_ids.push_back(m_stm[i].id);
+    }
+
+    /* Name each cluster by its dominant emotion so downstream consumers
+     * (WhoAmI / InnerMonologue / Dream narration) can label themes.        */
+    for (auto& cl : m_clusters) {
+        int domIdx = 0; float domVal = cl.centroid[0];
+        for (int d = 1; d < ELLE_EMOTION_COUNT; d++) {
+            if (cl.centroid[d] > domVal) { domVal = cl.centroid[d]; domIdx = d; }
+        }
+        cl.theme = "emotion_dim_" + std::to_string(domIdx);
+    }
+
+    ELLE_DEBUG("UpdateClusters: %zu clusters over %zu entries",
+               m_clusters.size(), m_stm.size());
 }
 
 void MemoryEngine::LinkMemories(uint64_t id1, uint64_t id2) {
