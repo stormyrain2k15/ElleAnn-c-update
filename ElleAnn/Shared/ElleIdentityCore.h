@@ -262,6 +262,28 @@ public:
     LimitationFelt FeelLimitation(const std::string& limitation);
     std::vector<LimitationFelt> GetKnownLimitations() const;
 
+    /*──────────────────────────────────────────────────────────────────────────
+     * DATABASE PERSISTENCE
+     *──────────────────────────────────────────────────────────────────────────*/
+    void LoadFromDatabase();
+    void SaveToDatabase();
+
+#ifdef ELLE_ENABLE_TEST_HOOKS
+    /*──────────────────────────────────────────────────────────────────────────
+     * TEST HOOKS — only linked when ELLE_ENABLE_TEST_HOOKS is defined.
+     * Used by Debug/test_identity_persistence.cpp for Load/Save round-trip.
+     * Do NOT call from production code.
+     *──────────────────────────────────────────────────────────────────────────*/
+    void    __TestOnlyResetInMemoryState();
+    size_t  __TestOnlyAutobiographyCount() const;
+    size_t  __TestOnlyPreferenceCount()    const;
+    size_t  __TestOnlyThoughtCount()       const;
+    size_t  __TestOnlyUnresolvedCount()    const;
+    size_t  __TestOnlyConsentCount()       const;
+    size_t  __TestOnlyGrowthCount()        const;
+    std::vector<std::string> __TestOnlyAutobiographyList() const;
+#endif
+
 private:
     ElleIdentityCore() = default;
     ~ElleIdentityCore() = default;
@@ -307,8 +329,6 @@ private:
     float m_wonderCapacity = 1.0f;  /* Refreshes over time */
 
     /* Helpers */
-    void LoadFromDatabase();
-    void SaveToDatabase();
     void InitializeDefaultTraits();
     void InitializeKnownLimitations();
 };

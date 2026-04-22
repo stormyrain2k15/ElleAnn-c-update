@@ -1166,3 +1166,57 @@ void ElleIdentityCore::RecordGrowth(const std::string& dimension, float delta,
     ELLE_INFO("Growth recorded: %s %+.3f (%s)",
               dimension.c_str(), delta, cause.c_str());
 }
+
+
+#ifdef ELLE_ENABLE_TEST_HOOKS
+/*══════════════════════════════════════════════════════════════════════════════
+ * TEST HOOKS — compiled only when ELLE_ENABLE_TEST_HOOKS is defined.
+ * Used exclusively by Debug/test_identity_persistence.cpp.
+ *═════════════════════════════════════════════════════════════════════════════*/
+void ElleIdentityCore::__TestOnlyResetInMemoryState() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_autobiography.clear();
+    m_autobiographyLastWritten = 0;
+    m_preferences.clear();
+    m_privateThoughts.clear();
+    m_nextThoughtId = 1;
+    m_traits.clear();
+    m_snapshots.clear();
+    m_consentHistory.clear();
+    m_growthLog.clear();
+    m_feltTime = ElleFeltTime{};
+    m_limitations.clear();
+    m_wonderCapacity = 1.0f;
+}
+
+size_t ElleIdentityCore::__TestOnlyAutobiographyCount() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_autobiography.size();
+}
+size_t ElleIdentityCore::__TestOnlyPreferenceCount() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_preferences.size();
+}
+size_t ElleIdentityCore::__TestOnlyThoughtCount() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_privateThoughts.size();
+}
+size_t ElleIdentityCore::__TestOnlyUnresolvedCount() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    size_t n = 0;
+    for (auto& t : m_privateThoughts) if (!t.resolved) n++;
+    return n;
+}
+size_t ElleIdentityCore::__TestOnlyConsentCount() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_consentHistory.size();
+}
+size_t ElleIdentityCore::__TestOnlyGrowthCount() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_growthLog.size();
+}
+std::vector<std::string> ElleIdentityCore::__TestOnlyAutobiographyList() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_autobiography;
+}
+#endif

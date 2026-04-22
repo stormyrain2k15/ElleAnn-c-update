@@ -1,0 +1,14 @@
+requests>=2.28
+edge-tts>=6.1
+# pyttsx3 — uncomment if you prefer local offline TTS over edge-tts
+# pyttsx3>=2.90
+#
+# The following are required by Wav2Lip's inference.py itself and must
+# match the versions in your Wav2Lip checkout. Install them inside the
+# SAME python env as this worker so subprocess inheritance works.
+#
+# torch>=1.13
+# numpy
+# opencv-python
+# librosa==0.10.1
+# tqdm

@@ -1682,4 +1682,47 @@ bool LoadLatestEmotionSnapshot(ELLE_EMOTION_STATE& out) {
     return true;
 }
 
+bool GetEmotionHistory(uint32_t hours,
+                       std::vector<EmotionHistoryPoint>& out,
+                       uint32_t maxPoints) {
+    out.clear();
+    int64_t cutoff = (int64_t)ELLE_MS_NOW() - (int64_t)hours * 3600000LL;
+    /* Sampled pull: if the table has 10 000 rows and you asked for 500 points,
+     * we want a roughly-even trajectory, not the first 500. SQL TOP + ORDER
+     * gives us ORDER first; we stride in C++ to avoid a complex CTE.        */
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'emotion_snapshots') "
+        "  SELECT valence, arousal, dominance, taken_ms "
+        "  FROM ElleCore.dbo.emotion_snapshots "
+        "  WHERE taken_ms >= ? "
+        "  ORDER BY taken_ms ASC;",
+        { std::to_string(cutoff) });
+    if (!rs.success) return false;
+    size_t total = rs.rows.size();
+    if (total == 0) return true;
+    size_t stride = (total > maxPoints) ? (total / maxPoints) : 1;
+    for (size_t i = 0; i < total; i += stride) {
+        auto& r = rs.rows[i];
+        EmotionHistoryPoint p;
+        p.valence   = (float)r.GetFloat(0);
+        p.arousal   = (float)r.GetFloat(1);
+        p.dominance = (float)r.GetFloat(2);
+        p.taken_ms  = r.GetInt(3);
+        out.push_back(p);
+    }
+    /* Always include the most recent point even if stride skipped it. */
+    if (!rs.rows.empty()) {
+        auto& last = rs.rows.back();
+        if (out.empty() || out.back().taken_ms != last.GetInt(3)) {
+            EmotionHistoryPoint p;
+            p.valence   = (float)last.GetFloat(0);
+            p.arousal   = (float)last.GetFloat(1);
+            p.dominance = (float)last.GetFloat(2);
+            p.taken_ms  = last.GetInt(3);
+            out.push_back(p);
+        }
+    }
+    return true;
+}
+
 } /* namespace ElleDB */

@@ -179,6 +179,33 @@ Full port notes appended to `/app/ElleAnn/STUB_AUDIT_FIX_NOTES.md`.
 
 ---
 
+## Phase 10 — Verification Harness, Video Worker, Emotional Timeline (Feb 2026, this session) ✅
+
+All three Next Action Items from Phase 9 shipped:
+
+### 1. Identity Persistence Regression Harness
+- `/app/ElleAnn/Debug/test_identity_persistence.cpp` — seeds state, flushes
+  via `SaveToDatabase()`, wipes singleton, calls `LoadFromDatabase()`,
+  asserts round-trip counts + content + trait values.
+- Added `#ifdef ELLE_ENABLE_TEST_HOOKS` accessors in `ElleIdentityCore`.
+- `LoadFromDatabase`/`SaveToDatabase` moved to public.
+- Build with `/D BUILD_IDENTITY_PERSISTENCE_TEST` + `/D ELLE_ENABLE_TEST_HOOKS`.
+
+### 2. External Video Worker
+- `/app/ElleAnn/Deploy/video_worker/elle_video_worker.py` + requirements.txt
+  + README.
+- TTS → Wav2Lip → optional GFPGAN → ffmpeg mux → posts progress/complete
+  via the existing `/api/video/worker/*` endpoints.
+- Fails early with clear diagnostics if tooling is missing.
+
+### 3. Emotional Timeline
+- `GET /api/emotional-context/history?hours=24&points=500` returns V/A/D
+  trajectory from `emotion_snapshots`.
+- `ElleDB::GetEmotionHistory()` with stride sampling keeps the payload flat
+  regardless of row count.
+
+---
+
 ## Known Open Items
 
 ### P1 — Verify on user's Windows box

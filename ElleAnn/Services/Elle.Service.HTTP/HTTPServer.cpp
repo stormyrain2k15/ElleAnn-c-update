@@ -2196,6 +2196,32 @@ private:
             }
             return HTTPResponse::OK(arr);
         });
+        m_router.Register("GET", "/api/emotional-context/history", [](const HTTPRequest& req) {
+            /* Time-series of the V/A/D trajectory. Default last 24 h. */
+            uint32_t hours = (uint32_t)std::atoi(req.QueryParam("hours", "24").c_str());
+            if (hours == 0 || hours > 24 * 30) hours = 24;
+            uint32_t maxPoints = (uint32_t)std::atoi(req.QueryParam("points", "500").c_str());
+            if (maxPoints == 0 || maxPoints > 5000) maxPoints = 500;
+
+            std::vector<ElleDB::EmotionHistoryPoint> pts;
+            if (!ElleDB::GetEmotionHistory(hours, pts, maxPoints))
+                return HTTPResponse::Err(500, "emotion_snapshots query failed");
+
+            json series = json::array();
+            for (auto& p : pts) {
+                series.push_back({
+                    {"t",         p.taken_ms},
+                    {"valence",   p.valence},
+                    {"arousal",   p.arousal},
+                    {"dominance", p.dominance}
+                });
+            }
+            return HTTPResponse::OK({
+                {"hours",  hours},
+                {"points", (int64_t)series.size()},
+                {"series", series}
+            });
+        });
         m_router.Register("GET", "/api/emotional-context/growth", [](const HTTPRequest&) {
             auto rs = ElleSQLPool::Instance().Query(
                 "SELECT TOP 50 reflection_id, ISNULL(reflection_text,''), "

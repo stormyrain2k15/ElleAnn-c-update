@@ -391,6 +391,17 @@ namespace ElleDB {
      * restored on next boot instead of resetting to baseline.             */
     bool PersistEmotionSnapshot(const ELLE_EMOTION_STATE& state);
     bool LoadLatestEmotionSnapshot(ELLE_EMOTION_STATE& out);
+
+    struct EmotionHistoryPoint {
+        int64_t     taken_ms = 0;
+        float       valence  = 0.0f;
+        float       arousal  = 0.0f;
+        float       dominance= 0.0f;
+    };
+    /* Reads snapshots newer than (now - hours). Chronological order. */
+    bool GetEmotionHistory(uint32_t hours,
+                           std::vector<EmotionHistoryPoint>& out,
+                           uint32_t maxPoints = 500);
 }
 
 #endif /* ELLE_SQL_CONN_H */
