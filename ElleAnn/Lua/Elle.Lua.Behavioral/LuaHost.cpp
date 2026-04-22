@@ -257,6 +257,24 @@ protected:
             resp.SetStringPayload(result);
             GetIPCHub().Send(sender, resp);
         }
+        else if (msg.header.msg_type == IPC_CONFIG_RELOAD) {
+            /* Triggered by ActionExecutor after a SELF_MODIFY write.
+             * Payload (optional): the basename of the modified script,
+             * purely for diagnostic logging — we rebuild the whole
+             * script table either way so a new include chain can be
+             * picked up cleanly.                                        */
+            std::string script = msg.GetStringPayload();
+            if (!script.empty()) {
+                ELLE_INFO("Lua: reload requested by %d (script=%s)",
+                          (int)sender, script.c_str());
+            } else {
+                ELLE_INFO("Lua: reload requested by %d", (int)sender);
+            }
+            /* Pick up any edits to lua.scripts_directory / lua.scripts
+             * that may have landed at the same time. */
+            ElleConfig::Instance().Reload();
+            m_host.ReloadScripts();
+        }
     }
 
     std::vector<ELLE_SERVICE_ID> GetDependencies() override {

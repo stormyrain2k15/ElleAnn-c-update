@@ -17,6 +17,11 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <memory>
+#include <unordered_map>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * IPC shim — ActionExecutor is a helper class (not the service). Route to
@@ -45,7 +50,6 @@ typedef int  (__stdcall *fn_KillProc_t)   (DWORD pid);
 typedef int  (__stdcall *fn_EnumProc_t)   (DWORD* pids, DWORD maxCount, DWORD* actualCount);
 typedef int  (__stdcall *fn_ProcName_t)   (DWORD pid, char* name, DWORD maxLen);
 typedef int  (__stdcall *fn_ProcRunning_t)(DWORD pid);
-typedef int  (__stdcall *fn_SetPrio_t)    (DWORD pid, DWORD priorityClass);
 
 typedef int  (__stdcall *fn_CPUUsage_t)   (DWORD* outPercent);
 typedef int  (__stdcall *fn_MemInfo_t)    (ULONGLONG* total, ULONGLONG* freeBytes);
@@ -87,7 +91,8 @@ public:
             p_EnumProc    = (fn_EnumProc_t)   GetProcAddress(m_hProcess, "ASM_EnumProcesses");
             p_ProcName    = (fn_ProcName_t)   GetProcAddress(m_hProcess, "ASM_GetProcessName");
             p_ProcRunning = (fn_ProcRunning_t)GetProcAddress(m_hProcess, "ASM_IsProcessRunning");
-            p_SetPrio     = (fn_SetPrio_t)    GetProcAddress(m_hProcess, "ASM_SetProcessPriority");
+            /* NOTE: ASM_SetProcessPriority intentionally lives in Hardware.dll,
+             * not Process.dll — resolve it in the hardware block below. */
         }
         if (m_hHardware) {
             p_CPUUsage    = (fn_CPUUsage_t)   GetProcAddress(m_hHardware, "ASM_GetCPUUsage");
@@ -103,6 +108,7 @@ public:
     }
 
     void Shutdown() {
+        StopAllWatches();
         if (m_hHardware) FreeLibrary(m_hHardware);
         if (m_hProcess)  FreeLibrary(m_hProcess);
         if (m_hFileIO)   FreeLibrary(m_hFileIO);
@@ -197,7 +203,6 @@ private:
     fn_EnumProc_t    p_EnumProc    = nullptr;
     fn_ProcName_t    p_ProcName    = nullptr;
     fn_ProcRunning_t p_ProcRunning = nullptr;
-    fn_SetPrio_t     p_SetPrio     = nullptr;
 
     /* Hardware exports */
     fn_CPUUsage_t    p_CPUUsage    = nullptr;
@@ -205,6 +210,206 @@ private:
     fn_CPUAffinity_t p_CPUAffinity = nullptr;
     fn_PowerStatus_t p_PowerStatus = nullptr;
     fn_CPUID_t       p_CPUID       = nullptr;
+
+    /*──────────────────────────────────────────────────────────────────────
+     * FILE WATCH REGISTRY
+     *
+     * One background thread per watched path. Uses ReadDirectoryChangesW
+     * against the parent directory (with a name filter for single-file
+     * watches) and broadcasts JSON frames over IPC_WORLD_STATE so HTTPServer
+     * can forward them to every connected WS client:
+     *
+     *     { "event":"file_change",
+     *       "path":  "<watched path>",
+     *       "changed":"<absolute path that changed>",
+     *       "kind":  "created" | "modified" | "deleted" | "renamed" }
+     *
+     * Shutdown() cancels pending I/O (CancelIoEx) and joins every thread,
+     * so the registry is safe to tear down while the service exits.
+     *──────────────────────────────────────────────────────────────────────*/
+    struct WatchEntry {
+        std::string         path;      /* original requested path (file or dir) */
+        std::string         dirPath;   /* directory actually opened              */
+        std::string         fileName;  /* basename filter, empty if dir-watch    */
+        HANDLE              hDir = INVALID_HANDLE_VALUE;
+        std::atomic<bool>   cancel{false};
+        std::thread         worker;
+    };
+
+    std::mutex m_watchMutex;
+    std::unordered_map<std::string, std::shared_ptr<WatchEntry>> m_watches;
+
+    static std::string SplitDir(const std::string& full,
+                                std::string& dirOut, std::string& fileOut) {
+        DWORD attrs = GetFileAttributesA(full.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            dirOut = full; fileOut.clear();
+            return {};
+        }
+        auto slash = full.find_last_of("\\/");
+        if (slash == std::string::npos) {
+            dirOut = "."; fileOut = full;
+        } else {
+            dirOut  = full.substr(0, slash);
+            fileOut = full.substr(slash + 1);
+            if (dirOut.empty()) dirOut = "\\";
+        }
+        return {};
+    }
+
+    static std::string KindFromAction(DWORD action) {
+        switch (action) {
+            case FILE_ACTION_ADDED:            return "created";
+            case FILE_ACTION_REMOVED:          return "deleted";
+            case FILE_ACTION_MODIFIED:         return "modified";
+            case FILE_ACTION_RENAMED_OLD_NAME: return "renamed_from";
+            case FILE_ACTION_RENAMED_NEW_NAME: return "renamed_to";
+            default:                           return "unknown";
+        }
+    }
+
+    static std::string Utf16LeToUtf8(const wchar_t* wsrc, size_t wlen) {
+        if (wlen == 0) return {};
+        int need = WideCharToMultiByte(CP_UTF8, 0, wsrc, (int)wlen,
+                                       nullptr, 0, nullptr, nullptr);
+        if (need <= 0) return {};
+        std::string out((size_t)need, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wsrc, (int)wlen,
+                            out.data(), need, nullptr, nullptr);
+        return out;
+    }
+
+    void WatchLoop(std::shared_ptr<WatchEntry> w) {
+        const DWORD filter = FILE_NOTIFY_CHANGE_FILE_NAME |
+                             FILE_NOTIFY_CHANGE_DIR_NAME  |
+                             FILE_NOTIFY_CHANGE_LAST_WRITE|
+                             FILE_NOTIFY_CHANGE_SIZE      |
+                             FILE_NOTIFY_CHANGE_CREATION;
+
+        /* Buffer must be DWORD-aligned; 64 KiB covers hundreds of events. */
+        std::vector<BYTE> buffer(64 * 1024);
+
+        while (!w->cancel.load()) {
+            DWORD bytesReturned = 0;
+            BOOL ok = ReadDirectoryChangesW(
+                w->hDir, buffer.data(), (DWORD)buffer.size(),
+                /*watchSubtree*/ FALSE, filter,
+                &bytesReturned, /*overlapped*/ nullptr, /*completion*/ nullptr);
+
+            if (w->cancel.load()) break;
+            if (!ok || bytesReturned == 0) {
+                /* ERROR_NOTIFY_ENUM_DIR means too many changes — just retry.
+                 * ERROR_OPERATION_ABORTED means CancelIoEx fired.              */
+                DWORD err = GetLastError();
+                if (err == ERROR_OPERATION_ABORTED) break;
+                if (err == ERROR_NOTIFY_ENUM_DIR) continue;
+                ELLE_WARN("FileWatcher ReadDirectoryChangesW err=%lu path=%s",
+                          err, w->path.c_str());
+                Sleep(500);
+                continue;
+            }
+
+            /* Walk the FILE_NOTIFY_INFORMATION linked list. */
+            BYTE* p = buffer.data();
+            for (;;) {
+                auto* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(p);
+                std::string changedName = Utf16LeToUtf8(
+                    info->FileName, info->FileNameLength / sizeof(WCHAR));
+
+                /* If we were asked to watch a single file, filter on basename. */
+                bool relevant = w->fileName.empty() ||
+                                _stricmp(changedName.c_str(), w->fileName.c_str()) == 0;
+
+                if (relevant) {
+                    std::string full = w->dirPath;
+                    if (!full.empty() && full.back() != '\\' && full.back() != '/')
+                        full += "\\";
+                    full += changedName;
+
+                    /* Best-effort JSON build — path strings contain backslashes
+                     * so we have to escape them properly. */
+                    std::string json = "{\"event\":\"file_change\",\"path\":\"";
+                    for (char c : w->path) {
+                        if (c == '\\' || c == '"') json += '\\';
+                        json += c;
+                    }
+                    json += "\",\"changed\":\"";
+                    for (char c : full) {
+                        if (c == '\\' || c == '"') json += '\\';
+                        json += c;
+                    }
+                    json += "\",\"kind\":\"" + KindFromAction(info->Action) + "\"}";
+
+                    auto msg = ElleIPCMessage::Create(
+                        IPC_WORLD_STATE, SVC_ACTION, SVC_HTTP_SERVER);
+                    msg.SetStringPayload(json);
+                    SendIPC(SVC_HTTP_SERVER, msg);
+                }
+
+                if (info->NextEntryOffset == 0) break;
+                p += info->NextEntryOffset;
+            }
+        }
+
+        if (w->hDir != INVALID_HANDLE_VALUE) {
+            CloseHandle(w->hDir);
+            w->hDir = INVALID_HANDLE_VALUE;
+        }
+    }
+
+    bool StartWatch(const std::string& requested, std::string& errOut) {
+        std::lock_guard<std::mutex> lock(m_watchMutex);
+        auto it = m_watches.find(requested);
+        if (it != m_watches.end() && !it->second->cancel.load()) {
+            errOut = "already watching";
+            return true; /* idempotent */
+        }
+
+        auto entry = std::make_shared<WatchEntry>();
+        entry->path = requested;
+        SplitDir(requested, entry->dirPath, entry->fileName);
+
+        entry->hDir = CreateFileA(
+            entry->dirPath.c_str(),
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            nullptr);
+        if (entry->hDir == INVALID_HANDLE_VALUE) {
+            errOut = "CreateFile dir=" + entry->dirPath +
+                     " err=" + std::to_string(GetLastError());
+            return false;
+        }
+
+        std::weak_ptr<WatchEntry> weakEntry = entry;
+        entry->worker = std::thread([this, weakEntry]() {
+            auto e = weakEntry.lock();
+            if (e) this->WatchLoop(e);
+        });
+
+        m_watches[requested] = entry;
+        ELLE_INFO("FileWatcher started: %s (dir=%s file=%s)",
+                  requested.c_str(), entry->dirPath.c_str(), entry->fileName.c_str());
+        return true;
+    }
+
+    void StopAllWatches() {
+        std::vector<std::shared_ptr<WatchEntry>> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(m_watchMutex);
+            for (auto& kv : m_watches) snapshot.push_back(kv.second);
+            m_watches.clear();
+        }
+        for (auto& w : snapshot) {
+            w->cancel.store(true);
+            if (w->hDir != INVALID_HANDLE_VALUE) CancelIoEx(w->hDir, nullptr);
+        }
+        for (auto& w : snapshot) {
+            if (w->worker.joinable()) w->worker.join();
+        }
+    }
 
     static ExecutionResult Fail(const std::string& msg, uint32_t code = 0x1100) {
         return {false, msg, TRUST_FAILURE_DELTA, code};
@@ -313,17 +518,17 @@ private:
                 return {true, "Deleted: " + path, TRUST_SUCCESS_DELTA, 0};
             }
             case ACTION_WATCH_FILE: {
-                /* ASM_WatchDirectory expects a callback pointer — we don't wire
-                 * that here (would need a persistent async thread). Use a
-                 * ReadDirectoryChangesW-based helper once WatchService exists. */
-                if (!p_FileExists || !p_GetFileSize)
-                    return Fail("ASM file-stat exports missing", 0x1207);
+                if (!p_FileExists) return Fail("ASM_FileExists export missing", 0x1207);
                 if (p_FileExists(path.c_str()) == 0)
                     return Fail("Path does not exist: " + path, 0x1208);
-                ULONGLONG sz = 0;
-                p_GetFileSize(path.c_str(), &sz);
-                return {true, "Watching " + path + " (size=" + std::to_string(sz) + ")",
-                        TRUST_SUCCESS_DELTA, 0};
+                /* Real file-change watcher — spawn a ReadDirectoryChangesW
+                 * thread that broadcasts an IPC_WORLD_STATE frame on every
+                 * modification. Idempotent: same path returns "already
+                 * watching". See FileWatchRegistry below.                 */
+                std::string err;
+                if (!StartWatch(path, err))
+                    return Fail("WatchFile failed: " + err, 0x1208);
+                return {true, "Watching " + path, TRUST_SUCCESS_DELTA, 0};
             }
             default:
                 return Fail("Unknown file op type", 0x1209);
@@ -418,7 +623,9 @@ private:
          * file-watcher fires, so this bridge is genuinely modifying behaviour.
          *
          * parameters format: "<script_name>.lua | <lua source>" (same ' | ' split
-         * convention used elsewhere). Writes into cfg.lua.scripts_dir.          */
+         * convention used elsewhere). Writes into cfg.lua.scripts_directory —
+         * the SAME key LuaHost reads from, so self-modify + IPC_CONFIG_RELOAD
+         * actually affects live behaviour.                                   */
         std::string raw = action.parameters;
         auto sep = raw.find(" | ");
         if (sep == std::string::npos)
@@ -432,8 +639,11 @@ private:
             name.find('\\') != std::string::npos)
             return Fail("SELF_MODIFY script name invalid (no paths)", 0x1502);
 
-        std::string dir = ElleConfig::Instance().GetString("lua.scripts_dir", "Lua");
-        if (dir.empty()) dir = "Lua";
+        /* IMPORTANT — must match LuaHost's key verbatim or the file lands in
+         * a directory the host never scans. See LuaHost.cpp::LoadAllScripts. */
+        std::string dir = ElleConfig::Instance().GetString(
+            "lua.scripts_directory", "Lua\\Elle.Lua.Behavioral\\scripts");
+        if (dir.empty()) dir = "Lua\\Elle.Lua.Behavioral\\scripts";
         std::string path = dir + "\\" + name;
 
         /* Back up the old version so we can audit/revert. */

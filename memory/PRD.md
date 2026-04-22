@@ -206,6 +206,52 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 14 — Real File Watcher + Wrong-DLL / Config / Reload Audit Repairs (Feb 2026, this session) ✅
+
+User audit caught four issues that survived Phase 8's stub sweep. All four
+are now fixed with no mock/fallback paths.
+
+### 1. `ASM_SetProcessPriority` was resolved from the wrong DLL
+The export lives in **Hardware.dll** per `ASM/Elle.ASM.Hardware/Hardware.def`,
+but ActionExecutor was calling `GetProcAddress(m_hProcess, …)`. The pointer
+was also never used anywhere in the switch. Removed the typedef, member
+variable, and GetProcAddress call entirely; added a code comment noting
+the export's actual home if the feature is ever re-added.
+
+### 2. `ACTION_WATCH_FILE` is now a real watcher
+Old: verified existence + returned "Watching …" string. Not a watcher.
+New: `FileWatchRegistry` inside `ActionExecutor` —
+- One background thread per watched path using `ReadDirectoryChangesW`
+  against the parent directory (with a basename filter for file-watches,
+  or the whole dir for directory-watches).
+- Broadcasts `{"event":"file_change","path":..,"changed":..,"kind":
+  created|modified|deleted|renamed_from|renamed_to}` via `IPC_WORLD_STATE`
+  → HTTPServer's forward filter (wired in Phase 13) → every connected
+  WebSocket client.
+- Idempotent: re-watching the same path is a no-op.
+- `CancelIoEx` + thread-join on `Shutdown()`. Cleanly tears down.
+
+### 3. SELF_MODIFY wrote to the wrong config key
+`ActionExecutor` read `lua.scripts_dir` default `"Lua"`.
+`LuaHost` reads `lua.scripts_directory` default `"Lua\Elle.Lua.Behavioral\scripts"`
+— which is also what `elle_master_config.json` defines.
+Fixed: ActionExecutor now reads the **same key** with the **same default**.
+Self-modify files now land where LuaHost will actually scan them.
+
+### 4. `IPC_CONFIG_RELOAD` is now handled by LuaHost
+Old: ActionExecutor sent it, LuaHost's `OnMessage` dropped it (only
+`IPC_LUA_EVAL` was handled). Reload relied on the 30-second periodic tick.
+New: LuaHost `OnMessage` explicitly handles `IPC_CONFIG_RELOAD`:
+- Logs the sender + optional script basename from payload.
+- Calls `ElleConfig::Instance().Reload()` so the scripts list itself can
+  be edited alongside the source.
+- Calls `m_host.ReloadScripts()` for an immediate hot-reload.
+
+End-to-end result: SELF_MODIFY writes a script → IPC_CONFIG_RELOAD fires
+→ LuaHost picks it up within one IPC RTT, not 30 seconds.
+
+---
+
 ## Phase 13 — WS Hardware Push + Installer -Force (Feb 2026, this session) ✅
 
 Closes the last three "next action" items before end-to-end testing.
