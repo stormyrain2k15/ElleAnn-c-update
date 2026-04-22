@@ -206,7 +206,32 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
-## Phase 11 — Mood UI + Dictionary Seed (Feb 2026, this session) ✅
+## Phase 12 — ChatScreen.kt Compile Repair (Feb 2026, this session) ✅
+
+The previous session left `ChatScreen.kt` with two compile-breaking
+fragments from a mid-edit context loss:
+
+1. An orphaned `EmotionalStateBar` function body (lines 703-737) with
+   no signature and a dangling reference to an undefined `emotionColors`
+   map. Reconstructed as a proper `@Composable fun EmotionalStateBar(
+   emotionalState: Map<String, Double>)` that uses the existing
+   `getEmotionColor()` function for each of the top-4 emotions.
+
+2. Garbage pseudo-code injected inside `WelcomeMessage`'s second
+   `SuggestionChip` (a duplicate `fun ChatScreen(...)` placeholder
+   calling a non-existent `AvatarView`). Removed — `SuggestionChip`
+   block is now clean and properly closed.
+
+File now has 7 top-level `}` (ChatScreen, ChatBubble, TypingIndicator,
+getEmotionColor, EmotionalStateBar, ActionBubble, WelcomeMessage) —
+all brace-balanced. Repository/API surface untouched; relies on
+already-existing `getSessionGreeting()`, `ackSessionGreeting(id)`,
+`getEmotionDimensionsAt(ts, top)`, and the
+`ReconnectionGreetingResponse` / `EmotionDimensionsResponse` models.
+
+---
+
+## Phase 11 — Mood UI + Dictionary Seed (Feb 2026, earlier this session) ✅
 
 ### Android Mood Timeline screen
 - `data/models/ApiModels.kt` — `EmotionHistoryPoint` + `EmotionHistoryResponse`.

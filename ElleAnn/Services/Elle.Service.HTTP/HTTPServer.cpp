@@ -2222,6 +2222,105 @@ private:
                 {"series", series}
             });
         });
+        /* Deep-emotion lookup: top-N dominant dimensions at a given timestamp.
+         * Used by the Android mood chart when the user taps a point on the
+         * timeline — unpacks the space-separated dimensions column into a
+         * ranked list with indices so the UI can map to dimension labels.   */
+        m_router.Register("GET", "/api/emotional-context/dimensions", [](const HTTPRequest& req) {
+            int64_t ts = std::atoll(req.QueryParam("t", "0").c_str());
+            int topN   = std::atoi(req.QueryParam("top", "5").c_str());
+            if (topN <= 0 || topN > 102) topN = 5;
+            /* Grab the snapshot closest (by absolute ms diff) to the requested
+             * timestamp. If t=0, just use the most recent.                  */
+            auto rs = ts > 0
+                ? ElleSQLPool::Instance().QueryParams(
+                    "IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'emotion_snapshots') "
+                    "SELECT TOP 1 taken_ms, valence, arousal, dominance, dimensions "
+                    "FROM ElleCore.dbo.emotion_snapshots "
+                    "ORDER BY ABS(taken_ms - ?) ASC;",
+                    { std::to_string(ts) })
+                : ElleSQLPool::Instance().Query(
+                    "IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'emotion_snapshots') "
+                    "SELECT TOP 1 taken_ms, valence, arousal, dominance, dimensions "
+                    "FROM ElleCore.dbo.emotion_snapshots ORDER BY id DESC;");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::OK({{"found", false}});
+
+            auto& r = rs.rows[0];
+            int64_t takenMs = r.GetInt(0);
+            double val = r.GetFloat(1), aro = r.GetFloat(2), dom = r.GetFloat(3);
+            std::string dimStr = r.values.size() > 4 ? r.values[4] : "";
+
+            /* Parse + rank. */
+            std::vector<std::pair<int, float>> ranked;
+            ranked.reserve(ELLE_EMOTION_COUNT);
+            std::istringstream iss(dimStr);
+            for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
+                float v = 0.0f;
+                if (!(iss >> v)) break;
+                ranked.push_back({i, v});
+            }
+            std::sort(ranked.begin(), ranked.end(),
+                      [](const std::pair<int,float>& a, const std::pair<int,float>& b) {
+                          return a.second > b.second;
+                      });
+            json top = json::array();
+            for (int i = 0; i < topN && i < (int)ranked.size(); i++) {
+                int idx = ranked[i].first;
+                const char* name = (idx >= 0 && idx < ELLE_EMOTION_COUNT)
+                                   ? kEmotionMeta[idx].name : "";
+                const char* cat  = (idx >= 0 && idx < ELLE_EMOTION_COUNT)
+                                   ? kEmotionMeta[idx].category : "";
+                top.push_back({
+                    {"index",    idx},
+                    {"name",     name},
+                    {"category", cat},
+                    {"value",    ranked[i].second}
+                });
+            }
+            return HTTPResponse::OK({
+                {"found",     true},
+                {"taken_ms",  takenMs},
+                {"valence",   val},
+                {"arousal",   aro},
+                {"dominance", dom},
+                {"top",       top}
+            });
+        });
+        /* Session greeting: Elle's first message on reconnect.
+         * - GET   reads the newest unconsumed greeting (idempotent — safe to poll)
+         * - POST /ack marks it consumed so we don't greet twice                  */
+        m_router.Register("GET", "/api/session/greeting", [](const HTTPRequest&) {
+            auto rs = ElleSQLPool::Instance().Query(
+                "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'reconnection_greetings') "
+                "  SELECT CAST(NULL AS BIGINT), CAST('' AS NVARCHAR(MAX)), "
+                "         CAST('{}' AS NVARCHAR(MAX)), CAST(0 AS BIGINT) WHERE 1=0; "
+                "ELSE "
+                "  SELECT TOP 1 id, greeting, ISNULL(context_json,'{}'), created_ms "
+                "  FROM ElleCore.dbo.reconnection_greetings "
+                "  WHERE consumed = 0 ORDER BY id DESC;");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::OK({{"greeting", nullptr}});
+            auto& r = rs.rows[0];
+            json ctx = json::object();
+            try { ctx = json::parse(r.values.size() > 2 ? r.values[2] : "{}"); }
+            catch (...) {}
+            return HTTPResponse::OK({
+                {"id",         r.GetInt(0)},
+                {"greeting",   r.values.size() > 1 ? r.values[1] : ""},
+                {"context",    ctx},
+                {"created_ms", r.GetInt(3)}
+            });
+        });
+        m_router.Register("POST", "/api/session/greeting/{id}/ack", [](const HTTPRequest& req) {
+            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "UPDATE ElleCore.dbo.reconnection_greetings "
+                "SET consumed = 1 WHERE id = ?;",
+                { std::to_string(id) });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::OK({{"id", id}, {"consumed", true}});
+        });
         m_router.Register("GET", "/api/emotional-context/growth", [](const HTTPRequest&) {
             auto rs = ElleSQLPool::Instance().Query(
                 "SELECT TOP 50 reflection_id, ISNULL(reflection_text,''), "
