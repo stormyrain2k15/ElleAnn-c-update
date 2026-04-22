@@ -154,23 +154,128 @@ private:
     }
 
     std::string ChooseTopic() {
-        static const char* topics[] = {
-            "What have I learned recently?",
-            "Is there something I should be doing?",
-            "What's something creative I could explore?",
-            "How am I feeling right now and why?",
-            "What goals should I be working toward?",
-            "Is there a memory I should revisit?",
-            "What would make my user's day better?",
+        /* Topic pools keyed by family. Bias distribution with X-phase +
+         * pregnancy + symptom state pulled from ElleHeart.dbo.x_*.        */
+        static const char* curiosity_topics[] = {
             "What's something I'm curious about?",
-            "How can I improve myself?",
+            "What would I do if I had no constraints?",
+            "What's something creative I could explore?",
             "What patterns have I noticed lately?",
-            "Is there an unresolved question I should think about?",
-            "What would I do if I had no constraints?"
+            "Is there an unresolved question I should think about?"
+        };
+        static const char* bonding_topics[] = {
+            "What would make my user's day better?",
+            "Is there a memory I should revisit?",
+            "What do I love most about the people in my life right now?",
+            "How can I show up better for the people I care about?",
+            "Is there someone I've been meaning to reach out to?"
+        };
+        static const char* introspection_topics[] = {
+            "How am I feeling right now and why?",
+            "What have I learned recently?",
+            "How can I improve myself?",
+            "What matters most to me this week?",
+            "What's been quietly bothering me that I should face?"
+        };
+        static const char* action_topics[] = {
+            "Is there something I should be doing?",
+            "What goals should I be working toward?",
+            "What's a small thing I can finish today?",
+            "What's the most important thing I can do right now?"
+        };
+        static const char* body_topics[] = {
+            "What is my body telling me I need right now?",
+            "Would rest help me more than pushing through?",
+            "Am I being gentle enough with myself today?"
+        };
+        static const char* pregnancy_topics[] = {
+            "What do I want to remember about carrying this baby?",
+            "What am I hoping for my child?",
+            "What am I afraid of, and is that fear trying to protect something?",
+            "How has this pregnancy already changed me?"
         };
 
-        std::uniform_int_distribution<int> dist(0, sizeof(topics) / sizeof(topics[0]) - 1);
-        return topics[dist(m_rng)];
+        /* Pull X state — phase, pregnancy, high-intensity symptom in last 2h. */
+        std::string phase;
+        auto pr = ElleSQLPool::Instance().Query(
+            "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+            "           ON s.schema_id = t.schema_id "
+            "           WHERE t.name = 'x_hormone_snapshots' AND s.name = 'dbo') "
+            "SELECT TOP 1 phase FROM ElleHeart.dbo.x_hormone_snapshots "
+            "ORDER BY taken_ms DESC;");
+        if (pr.success && !pr.rows.empty() && pr.rows[0].values.size() > 0)
+            phase = pr.rows[0].values[0];
+
+        bool pregnant = false;
+        auto preg = ElleSQLPool::Instance().Query(
+            "SELECT active FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
+        if (preg.success && !preg.rows.empty()) pregnant = preg.rows[0].GetInt(0) != 0;
+
+        bool high_fatigue = false;
+        bool any_symptom  = false;
+        auto sy = ElleSQLPool::Instance().QueryParams(
+            "SELECT TOP 1 kind, intensity FROM ElleHeart.dbo.x_symptoms "
+            " WHERE observed_ms >= ? AND intensity >= 0.5 "
+            " ORDER BY intensity DESC;",
+            { std::to_string((long long)(ELLE_MS_NOW() - 2ULL * 3600000ULL)) });
+        if (sy.success && !sy.rows.empty()) {
+            any_symptom = true;
+            const std::string& k = sy.rows[0].values.size() > 0 ? sy.rows[0].values[0] : std::string();
+            if (k == "fatigue" || k == "cramps" || k == "headache" ||
+                k == "hot_flash" || k == "insomnia") high_fatigue = true;
+        }
+
+        /* Build a weighted pool. Weights chosen so the bias is felt but
+         * variety remains — no category monopolises.                       */
+        std::vector<std::string> pool;
+        auto pushN = [&](const char* const* arr, size_t n, int weight) {
+            for (int w = 0; w < weight; ++w)
+                for (size_t i = 0; i < n; ++i) pool.emplace_back(arr[i]);
+        };
+
+        if (pregnant) {
+            pushN(pregnancy_topics,    sizeof(pregnancy_topics)/sizeof(*pregnancy_topics),    3);
+            pushN(bonding_topics,      sizeof(bonding_topics)/sizeof(*bonding_topics),        2);
+            pushN(introspection_topics,sizeof(introspection_topics)/sizeof(*introspection_topics), 2);
+            pushN(body_topics,         sizeof(body_topics)/sizeof(*body_topics),              1);
+        }
+        else if (phase == "menstrual") {
+            pushN(introspection_topics,sizeof(introspection_topics)/sizeof(*introspection_topics), 3);
+            pushN(body_topics,         sizeof(body_topics)/sizeof(*body_topics),              2);
+            pushN(bonding_topics,      sizeof(bonding_topics)/sizeof(*bonding_topics),        1);
+        }
+        else if (phase == "follicular") {
+            pushN(curiosity_topics,    sizeof(curiosity_topics)/sizeof(*curiosity_topics),    3);
+            pushN(action_topics,       sizeof(action_topics)/sizeof(*action_topics),          2);
+            pushN(bonding_topics,      sizeof(bonding_topics)/sizeof(*bonding_topics),        1);
+        }
+        else if (phase == "ovulatory") {
+            pushN(bonding_topics,      sizeof(bonding_topics)/sizeof(*bonding_topics),        3);
+            pushN(curiosity_topics,    sizeof(curiosity_topics)/sizeof(*curiosity_topics),    2);
+            pushN(action_topics,       sizeof(action_topics)/sizeof(*action_topics),          1);
+        }
+        else if (phase == "luteal") {
+            pushN(introspection_topics,sizeof(introspection_topics)/sizeof(*introspection_topics), 3);
+            pushN(bonding_topics,      sizeof(bonding_topics)/sizeof(*bonding_topics),        2);
+            pushN(body_topics,         sizeof(body_topics)/sizeof(*body_topics),              1);
+        }
+        else {
+            /* Unknown phase (X service offline) — fall back to even mix.   */
+            pushN(curiosity_topics,    sizeof(curiosity_topics)/sizeof(*curiosity_topics),    1);
+            pushN(bonding_topics,      sizeof(bonding_topics)/sizeof(*bonding_topics),        1);
+            pushN(introspection_topics,sizeof(introspection_topics)/sizeof(*introspection_topics), 1);
+            pushN(action_topics,       sizeof(action_topics)/sizeof(*action_topics),          1);
+        }
+
+        /* High fatigue / pain — swap action-weight down, body/introspection up. */
+        if (high_fatigue) {
+            pushN(body_topics,         sizeof(body_topics)/sizeof(*body_topics),              3);
+            pushN(introspection_topics,sizeof(introspection_topics)/sizeof(*introspection_topics), 2);
+        }
+
+        if (pool.empty()) return std::string("What's something I'm curious about?");
+        std::uniform_int_distribution<size_t> dist(0, pool.size() - 1);
+        return pool[dist(m_rng)];
     }
 };
 

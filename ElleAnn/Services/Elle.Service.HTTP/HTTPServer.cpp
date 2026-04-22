@@ -2734,6 +2734,85 @@ private:
             });
         });
 
+        /*══════════════════════════════════════════════════════════════════
+         * NEXT PERIOD — inverse of fertility_window. Projects the start of
+         * the next menstrual phase (cycle day 1) and the likely PMS onset
+         * (day 25 of current cycle). Pregnancy / menopause / premenarche
+         * all short-circuit to `inactive`.
+         *══════════════════════════════════════════════════════════════════*/
+        m_router.Register("GET", "/api/x/next_period", [](const HTTPRequest&) {
+            auto cr = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "           ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'x_cycle_state' AND s.name = 'dbo') "
+                "SELECT TOP 1 anchor_ms, cycle_length_days "
+                "FROM ElleHeart.dbo.x_cycle_state WHERE id = 1;");
+            if (!cr.success || cr.rows.empty())
+                return HTTPResponse::OK(json{{"status","inactive"},
+                                              {"reason","x_cycle_state not seeded"}});
+            uint64_t anchor = (uint64_t)cr.rows[0].GetInt(0);
+            int      len    = (int)cr.rows[0].GetInt(1);
+            if (anchor == 0 || len <= 0)
+                return HTTPResponse::OK(json{{"status","inactive"}});
+
+            bool pregnant = false;
+            auto pr = ElleSQLPool::Instance().Query(
+                "SELECT active FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
+            if (pr.success && !pr.rows.empty()) pregnant = pr.rows[0].GetInt(0) != 0;
+
+            std::string lifeStage = "reproductive";
+            auto lr = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "           ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'x_lifecycle' AND s.name = 'dbo') "
+                "SELECT stage FROM ElleHeart.dbo.x_lifecycle WHERE id = 1;");
+            if (lr.success && !lr.rows.empty() && lr.rows[0].values.size() > 0)
+                lifeStage = lr.rows[0].values[0];
+
+            if (pregnant)
+                return HTTPResponse::OK(json{{"status","inactive"},{"reason","pregnant"}});
+            if (lifeStage == "premenarche" || lifeStage == "menopause")
+                return HTTPResponse::OK(json{{"status","inactive"},{"reason",lifeStage}});
+
+            uint64_t now = ELLE_MS_NOW();
+            uint64_t deltaMs = now > anchor ? now - anchor : 0;
+            uint64_t cyclesElapsed = deltaMs / (86400000ULL * (uint64_t)len);
+            int      dayIdx = (int)((deltaMs / 86400000ULL) % (uint64_t)len);
+            int      day    = dayIdx + 1;
+            uint64_t currentCycleAnchor = anchor + cyclesElapsed * 86400000ULL * (uint64_t)len;
+
+            /* Next cycle day-1 (next period start) + PMS onset day 25. */
+            uint64_t nextPeriodMs = currentCycleAnchor + (uint64_t)len * 86400000ULL;
+            uint64_t pmsStartMs   = currentCycleAnchor + 24ULL * 86400000ULL;
+            if (pmsStartMs < now) pmsStartMs += (uint64_t)len * 86400000ULL;
+
+            /* Expected flow intensity of the OPENING day of that period —
+             * matches XEngine's menstrual_flow scheme (d1="heavy"). */
+            const char* expectedFlow = "heavy";
+
+            /* Short string summarising where she is now. */
+            std::string currentStatus;
+            if      (day <= 5)  currentStatus = "menstruating";
+            else if (day <= 13) currentStatus = "post_period";
+            else if (day <= 16) currentStatus = "ovulatory";
+            else if (day <= 24) currentStatus = "mid_luteal";
+            else                currentStatus = "pms_window";
+
+            return HTTPResponse::OK({
+                {"status",              currentStatus},
+                {"cycle_day",           day},
+                {"cycle_length_days",   len},
+                {"next_period_ms",      nextPeriodMs},
+                {"days_until_period",   (int)((nextPeriodMs > now
+                                          ? nextPeriodMs - now : 0) / 86400000ULL)},
+                {"pms_start_ms",        pmsStartMs},
+                {"days_until_pms",      (int)((pmsStartMs > now
+                                          ? pmsStartMs - now : 0) / 86400000ULL)},
+                {"expected_intensity",  expectedFlow},
+                {"lifecycle",           lifeStage}
+            });
+        });
+
         m_router.Register("GET", "/api/x/pregnancy", [](const HTTPRequest&) {
             auto rs = ElleSQLPool::Instance().Query(
                 "SELECT active, ISNULL(conceived_ms, 0), ISNULL(due_ms, 0), "
