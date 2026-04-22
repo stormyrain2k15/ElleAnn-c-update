@@ -1,0 +1,22 @@
+{
+  "install_order_note": "Services are started in dependency order (heartbeat first, HTTP last).",
+  "binary_root": "..\\x64\\Release",
+  "services": [
+    { "name": "ElleHeartbeat",  "display": "Elle-Ann Heartbeat",   "exe": "Elle.Service.Heartbeat.exe",   "depends": [],                                        "start": "auto"   },
+    { "name": "ElleQueueWorker","display": "Elle-Ann Queue Worker","exe": "Elle.Service.QueueWorker.exe", "depends": ["ElleHeartbeat"],                        "start": "auto"   },
+    { "name": "ElleMemory",     "display": "Elle-Ann Memory",      "exe": "Elle.Service.Memory.exe",      "depends": ["ElleHeartbeat"],                        "start": "auto"   },
+    { "name": "ElleEmotional",  "display": "Elle-Ann Emotional",   "exe": "Elle.Service.Emotional.exe",   "depends": ["ElleHeartbeat"],                        "start": "auto"   },
+    { "name": "ElleWorldModel", "display": "Elle-Ann World Model", "exe": "Elle.Service.WorldModel.exe",  "depends": ["ElleHeartbeat", "ElleMemory"],          "start": "auto"   },
+    { "name": "ElleIdentity",   "display": "Elle-Ann Identity",    "exe": "Elle.Service.Identity.exe",    "depends": ["ElleHeartbeat", "ElleMemory"],          "start": "auto"   },
+    { "name": "ElleContinuity", "display": "Elle-Ann Continuity",  "exe": "Elle.Service.Continuity.exe",  "depends": ["ElleHeartbeat", "ElleMemory"],          "start": "auto"   },
+    { "name": "ElleInnerLife",  "display": "Elle-Ann Inner Life",  "exe": "Elle.Service.InnerLife.exe",   "depends": ["ElleHeartbeat", "ElleEmotional"],       "start": "auto"   },
+    { "name": "ElleSolitude",   "display": "Elle-Ann Solitude",    "exe": "Elle.Service.Solitude.exe",    "depends": ["ElleHeartbeat", "ElleEmotional"],       "start": "auto"   },
+    { "name": "ElleBonding",    "display": "Elle-Ann Bonding",     "exe": "Elle.Service.Bonding.exe",     "depends": ["ElleHeartbeat", "ElleEmotional"],       "start": "auto"   },
+    { "name": "ElleAction",     "display": "Elle-Ann Action",      "exe": "Elle.Service.Action.exe",      "depends": ["ElleHeartbeat", "ElleQueueWorker"],     "start": "auto"   },
+    { "name": "ElleGoal",       "display": "Elle-Ann Goal Engine", "exe": "Elle.Service.GoalEngine.exe",  "depends": ["ElleHeartbeat", "ElleMemory"],          "start": "auto"   },
+    { "name": "ElleDream",      "display": "Elle-Ann Dream",       "exe": "Elle.Service.Dream.exe",       "depends": ["ElleHeartbeat", "ElleMemory"],          "start": "auto"   },
+    { "name": "ElleSelfPrompt", "display": "Elle-Ann Self Prompt", "exe": "Elle.Service.SelfPrompt.exe",  "depends": ["ElleHeartbeat", "ElleEmotional"],       "start": "auto"   },
+    { "name": "ElleCognitive",  "display": "Elle-Ann Cognitive",   "exe": "Elle.Service.Cognitive.exe",   "depends": ["ElleHeartbeat", "ElleMemory", "ElleEmotional"], "start": "auto" },
+    { "name": "ElleHTTP",       "display": "Elle-Ann HTTP API",    "exe": "Elle.Service.HTTP.exe",        "depends": ["ElleHeartbeat", "ElleCognitive"],       "start": "auto"   }
+  ]
+}

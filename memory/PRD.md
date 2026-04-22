@@ -144,6 +144,41 @@ Full notes: `/app/ElleAnn/STUB_AUDIT_FIX_NOTES.md`
 
 ---
 
+## Phase 9 — Post-Audit Wiring Complete (Feb 2026, this session) ✅
+
+All three deferred items from the audit-fix session are now real:
+
+### 1. Video / Education / Dictionary HTTP routes
+- **Video** (was `501 not_implemented`): `/api/video/generate` enqueues to
+  `video_jobs`, `/status/{id}` reads progress, avatar upload accepts file_path
+  or base64, four worker-facing endpoints let an external Wav2Lip/ffmpeg
+  subprocess claim/progress/complete/fail jobs.
+- **Education**: expanded from 3 shallow endpoints to 9 matching the full
+  Python router shape — subjects CRUD + references + milestones + skills CRUD
+  + skill-use recording.
+- **Dictionary**: new `Shared/DictionaryLoader.{h,cpp}` using WinHTTP + nlohmann
+  against api.dictionaryapi.dev. `POST /api/dictionary/load` kicks off a
+  background load of ~200 CORE_WORDS; `GET /api/dictionary/load/status`
+  polls progress (falls back to DB state across restarts).
+
+### 2. Android hardware-action push
+`GET /api/ai/hardware/actions/pending` now merges the legacy trust-gated
+action queue with the new `hardware_actions` table ActionExecutor writes to.
+Uses atomic `UPDATE ... OUTPUT` so concurrent polls can't double-dispatch.
+New `POST /api/ai/hardware/actions/{id}/ack` closes the loop
+(`pending → dispatched → consumed`).
+
+### 3. Double-click SCM installer — `/app/ElleAnn/Deploy/`
+- `elle_service_manifest.json` — 16 services in dependency order
+- `Install-ElleServices.ps1` / `Uninstall-ElleServices.ps1` — registers /
+  removes every service via `sc.exe`, sets crash-recovery, idempotent
+- `Install.bat` / `Uninstall.bat` — auto-elevate wrappers for double-click
+- `Deploy/README.md` — prerequisites + dependency graph
+
+Full port notes appended to `/app/ElleAnn/STUB_AUDIT_FIX_NOTES.md`.
+
+---
+
 ## Known Open Items
 
 ### P1 — Verify on user's Windows box

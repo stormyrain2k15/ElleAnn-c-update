@@ -215,3 +215,74 @@ still the end-state but this is a real similarity function, not a toy.
 
 If any of those log lines are absent, the corresponding subsystem failed —
 check the preceding `ELLE_WARN` / `ELLE_ERROR` entry for the real cause.
+
+---
+
+## Post-Audit Wiring — Video / Education / Dictionary / Android / Installer
+
+With every audit stub killed, the deferred port work is now complete:
+
+### `/api/video/*` — real queue, no more 501
+- `POST /api/video/generate`          — enqueues a row in `video_jobs`, returns job_uuid
+- `GET  /api/video/status/{job_id}`   — reads progress/output_path/error
+- `POST /api/video/avatar/upload`     — accepts file_path OR base64 payload;
+  writes to `cfg video.avatar_dir`, registers in `user_avatars`
+- `GET  /api/video/avatar?user_id=N`  — default avatar for user
+- `GET  /api/video/avatars?user_id=N` — all avatars
+- Worker-facing (for the Wav2Lip/ffmpeg subprocess to call back):
+  - `POST /api/video/worker/claim`
+  - `POST /api/video/worker/progress/{id}`
+  - `POST /api/video/worker/complete/{id}`
+  - `POST /api/video/worker/fail/{id}`
+
+### `/api/education/*` — full Python router shape
+- `GET    /api/education/subjects?category=&limit=`
+- `GET    /api/education/subjects/{id}` — includes references + milestones
+- `POST   /api/education/subjects`
+- `PUT    /api/education/subjects/{id}`    (whitelisted field patch)
+- `POST   /api/education/subjects/{id}/references`
+- `POST   /api/education/subjects/{id}/milestones`
+- `GET    /api/education/skills?category=`
+- `POST   /api/education/skills`           (409 on dup skill_name)
+- `PUT    /api/education/skills/{name}/use` — bumps times_used + last_used
+
+### `/api/dictionary/*` — real API-backed loader
+- `POST /api/dictionary/load`         — background load from api.dictionaryapi.dev
+- `GET  /api/dictionary/load/status`  — progress poll (falls back to DB state)
+- New module `Shared/DictionaryLoader.{h,cpp}` uses WinHTTP + nlohmann::json,
+  rate-limited to 120 ms/word, safe to re-run (InsertDictionaryWord is
+  idempotent on word+part_of_speech).
+- CORE_WORDS starter list (~200 curated words). Add more in one place.
+
+### Android hardware-action push — dual-source pending endpoint
+`GET /api/ai/hardware/actions/pending` now returns BOTH:
+- legacy trust-gated actions from the action queue, AND
+- device-facing `hardware_actions` (vibrate/flash/notify) written by
+  `ActionExecutor::ExecuteHardwareCommand`. Uses `UPDATE ... OUTPUT` to
+  atomically flip `pending → dispatched` so two concurrent polls can't
+  double-dispatch. New `POST /api/ai/hardware/actions/{id}/ack` moves
+  `dispatched → consumed` once the device confirms delivery.
+
+### SCM double-click installer — `/app/ElleAnn/Deploy/`
+- `elle_service_manifest.json` — all 16 services with dependencies ordered
+  (Heartbeat → QueueWorker → Memory/Emotional/… → Cognitive → HTTP).
+- `Install-ElleServices.ps1` — registers + starts each via `sc.exe`, sets
+  crash-recovery (restart 3× at 60 s), idempotent (skips already-registered).
+- `Uninstall-ElleServices.ps1` — stops + deletes in reverse order; preserves
+  SQL data unless `-KeepData:$false`.
+- `Install.bat` / `Uninstall.bat` — auto-elevate via `Start-Process -Verb RunAs`
+  so you can literally double-click.
+- `Deploy/README.md` — build prereqs + service dependency graph.
+
+### Build notes for this pass
+Add to your Shared static lib (or Elle.Service.HTTP source list if you don't
+have a Shared lib):
+```
+Shared/DictionaryLoader.cpp
+Shared/DictionaryLoader.h
+```
+
+Apply the updated `SQL/ElleAnn_MemoryDelta.sql` — it adds
+`hardware_actions` (on-demand in ActionExecutor), plus the identity_*,
+learned_subjects, education_references, learning_milestones, skills,
+video_jobs, user_avatars, dictionary_loader_state tables.

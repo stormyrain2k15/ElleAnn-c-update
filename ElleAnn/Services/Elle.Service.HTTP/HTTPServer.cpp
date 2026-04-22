@@ -16,6 +16,7 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include "../../Shared/ElleLLM.h"
+#include "../../Shared/DictionaryLoader.h"
 #include "../../Shared/json.hpp"
 
 #include <winsock2.h>
@@ -43,6 +44,7 @@
 #include <atomic>
 #include <cstring>
 #include <chrono>
+#include <fstream>
 #include <condition_variable>
 
 using json = nlohmann::json;
@@ -157,6 +159,7 @@ struct HTTPResponse {
 
     static HTTPResponse OK(const json& j) { return JSON(200, j.dump()); }
     static HTTPResponse Created(const json& j) { return JSON(201, j.dump()); }
+    static HTTPResponse Accepted(const json& j) { return JSON(202, j.dump()); }
     static HTTPResponse Err(int code, const std::string& msg) {
         json j;
         j["error"] = msg;
@@ -1344,19 +1347,178 @@ private:
             return HTTPResponse::OK({{"call_id", callId}, {"status", "ended"}});
         });
 
-        /* ============== Video — not implemented (no generator service) ========= */
-        auto videoNotImpl = [](const HTTPRequest&) {
-            return HTTPResponse::JSON(501, json({
-                {"error", "video_generation_service_not_running"},
-                {"message", "Video generation is not wired yet. Port Python video_generator.py"},
-                {"status", "not_implemented"}
-            }).dump());
-        };
-        m_router.Register("POST", "/api/video/generate", videoNotImpl);
-        m_router.Register("GET",  "/api/video/status/{job_id}", videoNotImpl);
-        m_router.Register("POST", "/api/video/avatar/upload", videoNotImpl);
-        m_router.Register("GET",  "/api/video/avatar", [](const HTTPRequest&) {
-            return HTTPResponse::OK({{"avatar", nullptr}, {"note", "no avatar configured"}});
+        /* ============== Video — real SQL-backed job queue =====================
+         * A generator worker (external or Python co-process) claims jobs via
+         * ElleDB::ClaimNextVideoJob() and writes progress/output back through
+         * ElleDB::UpdateVideoJobProgress/CompleteVideoJob/FailVideoJob. The
+         * HTTP layer here is the queue + read API for the Android app.      */
+        m_router.Register("POST", "/api/video/generate", [](const HTTPRequest& req) {
+            try {
+                json body = req.BodyJSON();
+                std::string text = body.value("text", body.value("prompt", ""));
+                if (text.empty()) return HTTPResponse::Err(400, "missing 'text'");
+                std::string avatarPath = body.value("avatar_path", std::string(""));
+                int64_t callId = body.value("call_id", (int64_t)0);
+
+                /* If avatar_path omitted, fall back to the user's default avatar. */
+                if (avatarPath.empty()) {
+                    ElleDB::UserAvatar dflt;
+                    if (ElleDB::GetDefaultAvatar(1, dflt)) avatarPath = dflt.file_path;
+                }
+
+                ElleDB::VideoJob job;
+                if (!ElleDB::CreateVideoJob(text, avatarPath, callId, job))
+                    return HTTPResponse::Err(500, "failed to queue video job");
+                return HTTPResponse::Created({
+                    {"job_id",      job.job_uuid},
+                    {"id",          job.id},
+                    {"status",      job.status},
+                    {"avatar_path", job.avatar_path},
+                    {"created_ms",  job.created_ms}
+                });
+            } catch (const std::exception& e) {
+                return HTTPResponse::Err(500, e.what());
+            }
+        });
+        m_router.Register("GET", "/api/video/status/{job_id}", [](const HTTPRequest& req) {
+            std::string jobId = req.headers.at("x-path-id");
+            ElleDB::VideoJob job;
+            if (!ElleDB::GetVideoJob(jobId, job))
+                return HTTPResponse::Err(404, "video job not found");
+            return HTTPResponse::OK({
+                {"job_id",      job.job_uuid},
+                {"status",      job.status},
+                {"progress",    job.progress},
+                {"output_path", job.output_path},
+                {"error",       job.error},
+                {"created_ms",  job.created_ms},
+                {"started_ms",  job.started_ms},
+                {"finished_ms", job.finished_ms}
+            });
+        });
+        m_router.Register("POST", "/api/video/avatar/upload", [](const HTTPRequest& req) {
+            /* Accept either (a) a file_path already on disk, or (b) base64 image
+             * bytes. Base64 path writes the file into cfg avatar_dir so the
+             * video generator can pick it up.                                  */
+            try {
+                json body = req.BodyJSON();
+                std::string label    = body.value("label", std::string(""));
+                std::string filePath = body.value("file_path", std::string(""));
+                std::string mime     = body.value("mime_type", std::string("image/png"));
+                bool isDefault       = body.value("default", true);
+
+                if (filePath.empty() && body.contains("base64") && body["base64"].is_string()) {
+                    std::string b64 = body["base64"].get<std::string>();
+                    std::string avatarDir = ElleConfig::Instance().GetString(
+                        "video.avatar_dir", "C:\\ElleAnn\\avatars");
+                    CreateDirectoryA(avatarDir.c_str(), nullptr);
+                    std::string fname = "avatar_" + std::to_string(ELLE_MS_NOW()) + ".png";
+                    filePath = avatarDir + "\\" + fname;
+                    /* Decode base64 → bytes (RFC 4648, no streaming — avatars are small). */
+                    std::string decoded;
+                    decoded.reserve(b64.size() * 3 / 4);
+                    int val = 0, bits = -8;
+                    for (unsigned char c : b64) {
+                        int d;
+                        if      (c >= 'A' && c <= 'Z') d = c - 'A';
+                        else if (c >= 'a' && c <= 'z') d = c - 'a' + 26;
+                        else if (c >= '0' && c <= '9') d = c - '0' + 52;
+                        else if (c == '+')             d = 62;
+                        else if (c == '/')             d = 63;
+                        else continue;      /* skip '=', whitespace, junk */
+                        val = (val << 6) | d; bits += 6;
+                        if (bits >= 0) { decoded += (char)((val >> bits) & 0xFF); bits -= 8; }
+                    }
+                    std::ofstream out(filePath, std::ios::binary);
+                    if (!out) return HTTPResponse::Err(500, "cannot open avatar path for write");
+                    out.write(decoded.data(), (std::streamsize)decoded.size());
+                }
+                if (filePath.empty())
+                    return HTTPResponse::Err(400, "provide file_path or base64");
+
+                ElleDB::UserAvatar a;
+                a.user_id    = body.value("user_id", 1);
+                a.label      = label;
+                a.file_path  = filePath;
+                a.mime_type  = mime;
+                a.is_default = isDefault;
+                int32_t newId = 0;
+                if (!ElleDB::RegisterAvatar(a, newId))
+                    return HTTPResponse::Err(500, "failed to register avatar");
+                return HTTPResponse::Created({
+                    {"avatar_id",  newId},
+                    {"file_path",  filePath},
+                    {"is_default", isDefault}
+                });
+            } catch (const std::exception& e) {
+                return HTTPResponse::Err(500, e.what());
+            }
+        });
+        m_router.Register("GET", "/api/video/avatar", [](const HTTPRequest& req) {
+            int32_t userId = std::atoi(req.QueryParam("user_id", "1").c_str());
+            ElleDB::UserAvatar a;
+            if (!ElleDB::GetDefaultAvatar(userId, a))
+                return HTTPResponse::OK({{"avatar", nullptr}, {"note", "no avatar configured"}});
+            return HTTPResponse::OK({
+                {"avatar_id",  a.id},
+                {"user_id",    a.user_id},
+                {"label",      a.label},
+                {"file_path",  a.file_path},
+                {"mime_type",  a.mime_type},
+                {"is_default", a.is_default}
+            });
+        });
+        m_router.Register("GET", "/api/video/avatars", [](const HTTPRequest& req) {
+            int32_t userId = std::atoi(req.QueryParam("user_id", "1").c_str());
+            std::vector<ElleDB::UserAvatar> avs;
+            ElleDB::ListAvatars(userId, avs);
+            json arr = json::array();
+            for (auto& a : avs) {
+                arr.push_back({
+                    {"avatar_id", a.id}, {"label", a.label},
+                    {"file_path", a.file_path}, {"mime_type", a.mime_type},
+                    {"is_default", a.is_default}
+                });
+            }
+            return HTTPResponse::OK({{"avatars", arr}});
+        });
+        /* Worker-facing endpoints (generator subprocess polls/updates these). */
+        m_router.Register("POST", "/api/video/worker/claim", [](const HTTPRequest&) {
+            ElleDB::VideoJob job;
+            if (!ElleDB::ClaimNextVideoJob(job))
+                return HTTPResponse::OK({{"claimed", false}});
+            return HTTPResponse::OK({
+                {"claimed",     true},
+                {"job_id",      job.job_uuid},
+                {"text",        job.text},
+                {"avatar_path", job.avatar_path},
+                {"call_id",     job.call_id}
+            });
+        });
+        m_router.Register("POST", "/api/video/worker/progress/{job_id}", [](const HTTPRequest& req) {
+            std::string jobId = req.headers.at("x-path-id");
+            json body = req.BodyJSON();
+            int32_t pct = body.value("progress", 0);
+            if (!ElleDB::UpdateVideoJobProgress(jobId, pct))
+                return HTTPResponse::Err(500, "progress update failed");
+            return HTTPResponse::OK({{"job_id", jobId}, {"progress", pct}});
+        });
+        m_router.Register("POST", "/api/video/worker/complete/{job_id}", [](const HTTPRequest& req) {
+            std::string jobId = req.headers.at("x-path-id");
+            json body = req.BodyJSON();
+            std::string path = body.value("output_path", std::string(""));
+            if (path.empty()) return HTTPResponse::Err(400, "missing output_path");
+            if (!ElleDB::CompleteVideoJob(jobId, path))
+                return HTTPResponse::Err(500, "complete failed");
+            return HTTPResponse::OK({{"job_id", jobId}, {"status", "done"}});
+        });
+        m_router.Register("POST", "/api/video/worker/fail/{job_id}", [](const HTTPRequest& req) {
+            std::string jobId = req.headers.at("x-path-id");
+            json body = req.BodyJSON();
+            std::string err = body.value("error", std::string("worker reported failure"));
+            if (!ElleDB::FailVideoJob(jobId, err))
+                return HTTPResponse::Err(500, "fail update failed");
+            return HTTPResponse::OK({{"job_id", jobId}, {"status", "failed"}});
         });
 
         /* ============== AI ============== */
@@ -1568,19 +1730,54 @@ private:
         });
         m_router.Register("GET", "/api/ai/hardware/actions/pending", [](const HTTPRequest& req) {
             std::string target = req.QueryParam("target", "device");
+            json j = json::array();
+
+            /* (a) Legacy / trust-gated actions from the action queue. */
             std::vector<ELLE_ACTION_RECORD> actions;
             ElleDB::GetPendingActions(actions, 50);
-            json j = json::array();
             for (auto& a : actions) {
                 j.push_back({
+                    {"source", "action_queue"},
                     {"id", a.id}, {"type", a.type},
                     {"command", std::string(a.command)},
                     {"parameters", std::string(a.parameters)},
                     {"required_trust", a.required_trust}
                 });
             }
+
+            /* (b) Device-facing hardware_actions (vibrate / flash / notify)
+             * populated by ActionExecutor::ExecuteHardwareCommand. Atomic
+             * claim pattern so two concurrent polls don't double-process.  */
+            auto claim = ElleSQLPool::Instance().Query(
+                "UPDATE TOP (50) ElleCore.dbo.hardware_actions "
+                "SET status = 'dispatched' "
+                "OUTPUT inserted.id, inserted.action_type, ISNULL(inserted.payload,''), "
+                "       inserted.created_ms "
+                "WHERE status = 'pending';");
+            if (claim.success) {
+                for (auto& r : claim.rows) {
+                    j.push_back({
+                        {"source", "hardware_actions"},
+                        {"id", r.GetInt(0)},
+                        {"action_type", r.values.size() > 1 ? r.values[1] : ""},
+                        {"payload",     r.values.size() > 2 ? r.values[2] : ""},
+                        {"created_ms",  r.GetInt(3)}
+                    });
+                }
+            }
             (void)target;
             return HTTPResponse::OK(j);
+        });
+        m_router.Register("POST", "/api/ai/hardware/actions/{id}/ack", [](const HTTPRequest& req) {
+            /* Android confirms delivery — mark the hardware_actions row consumed. */
+            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "UPDATE ElleCore.dbo.hardware_actions "
+                "SET status = 'consumed', consumed_ms = ? "
+                "WHERE id = ? AND status = 'dispatched';",
+                { std::to_string((int64_t)ELLE_MS_NOW()), std::to_string(id) });
+            if (!rs.success) return HTTPResponse::Err(500, rs.error);
+            return HTTPResponse::OK({{"id", id}, {"acked", true}});
         });
         m_router.Register("POST", "/api/ai/hardware/actions/{id}/result", [](const HTTPRequest& req) {
             uint64_t actionId = std::atoll(req.headers.at("x-path-id").c_str());
@@ -1698,6 +1895,49 @@ private:
         });
 
         /* ============== Dictionary — dbo.dictionary_words ============== */
+        m_router.Register("POST", "/api/dictionary/load", [](const HTTPRequest& req) {
+            uint32_t start = 0, limit = 0;
+            try {
+                json body = req.BodyJSON();
+                start = body.value("start", 0);
+                limit = body.value("limit", 0);
+            } catch (...) { /* no body — use defaults */ }
+            if (!DictionaryLoader::Instance().StartLoad(start, limit)) {
+                auto s = DictionaryLoader::Instance().GetState();
+                return HTTPResponse::JSON(409, json({
+                    {"error",    "already_running"},
+                    {"status",   s.status},
+                    {"loaded",   s.loaded},
+                    {"failed",   s.failed},
+                    {"last_word",s.last_word}
+                }).dump());
+            }
+            return HTTPResponse::Accepted({{"status", "started"}, {"start", start}, {"limit", limit}});
+        });
+        m_router.Register("GET", "/api/dictionary/load/status", [](const HTTPRequest&) {
+            auto s = DictionaryLoader::Instance().GetState();
+            /* Fall back to persisted DB state if the in-memory state is blank
+             * (e.g. status endpoint queried from a freshly-restarted process). */
+            if (s.status.empty() || s.status == "idle") {
+                ElleDB::DictionaryLoaderState db;
+                ElleDB::GetDictionaryLoaderState(db);
+                s.status     = db.status;
+                s.loaded     = (uint32_t)db.loaded;
+                s.failed     = (uint32_t)db.failed;
+                s.skipped    = (uint32_t)db.skipped;
+                s.last_word  = db.last_word;
+                s.error      = db.error;
+                s.started_ms = (uint64_t)db.started_ms;
+                s.updated_ms = (uint64_t)db.updated_ms;
+            }
+            return HTTPResponse::OK({
+                {"status", s.status}, {"loaded", s.loaded},
+                {"failed", s.failed}, {"skipped", s.skipped},
+                {"last_word", s.last_word}, {"error", s.error},
+                {"started_ms", s.started_ms}, {"updated_ms", s.updated_ms},
+                {"total_words_in_db", ElleDB::CountDictionaryWords()}
+            });
+        });
         m_router.Register("GET", "/api/dictionary/stats", [](const HTTPRequest&) {
             auto rs = ElleSQLPool::Instance().Query(
                 "SELECT COUNT(*), "
@@ -1763,61 +2003,164 @@ private:
             });
         });
 
-        /* ============== Education — backed by dbo.subjects / dbo.skills if present,
-         * else return empty arrays with note ============== */
-        m_router.Register("GET", "/api/education/subjects", [](const HTTPRequest&) {
-            auto rs = ElleSQLPool::Instance().Query(
-                "SELECT name FROM sys.tables WHERE name = 'subjects';");
-            if (!rs.success || rs.rows.empty())
-                return HTTPResponse::OK({{"subjects", json::array()}, {"note", "subjects table not created"}});
-            auto r2 = ElleSQLPool::Instance().Query(
-                "SELECT id, ISNULL(name,''), ISNULL(description,'') FROM ElleCore.dbo.subjects ORDER BY id DESC;");
+        /* ============== Education — real ElleDB helpers against
+         * learned_subjects / education_references / learning_milestones / skills.
+         * Matches the legacy Python app/routers/education.py shape.         */
+        auto subjectToJson = [](const ElleDB::LearnedSubject& s) {
+            return json{
+                {"id", s.id}, {"subject", s.subject}, {"category", s.category},
+                {"proficiency_level", s.proficiency_level},
+                {"who_taught", s.who_taught}, {"where_learned", s.where_learned},
+                {"time_to_learn_hours", s.time_to_learn_hours},
+                {"notes", s.notes},
+                {"date_started", s.date_started},
+                {"date_completed", s.date_completed}
+            };
+        };
+        m_router.Register("GET", "/api/education/subjects", [subjectToJson](const HTTPRequest& req) {
+            std::string category = req.QueryParam("category", "");
+            uint32_t limit = (uint32_t)std::atoi(req.QueryParam("limit", "50").c_str());
+            std::vector<ElleDB::LearnedSubject> subs;
+            if (!ElleDB::ListSubjects(subs, category, limit))
+                return HTTPResponse::Err(500, "subjects query failed");
             json arr = json::array();
-            for (auto& r : r2.rows) {
-                arr.push_back({
-                    {"id", r.GetInt(0)},
-                    {"name", r.values.size() > 1 ? r.values[1] : ""},
-                    {"description", r.values.size() > 2 ? r.values[2] : ""}
-                });
-            }
-            return HTTPResponse::OK({{"subjects", arr}});
+            for (auto& s : subs) arr.push_back(subjectToJson(s));
+            return HTTPResponse::OK({{"subjects", arr}, {"total", (int64_t)arr.size()}});
+        });
+        m_router.Register("GET", "/api/education/subjects/{id}", [subjectToJson](const HTTPRequest& req) {
+            int32_t id = std::atoi(req.headers.at("x-path-id").c_str());
+            ElleDB::LearnedSubject s;
+            if (!ElleDB::GetSubject(id, s)) return HTTPResponse::Err(404, "subject not found");
+
+            std::vector<ElleDB::EducationReference> refs;
+            std::vector<ElleDB::LearningMilestone>  mils;
+            ElleDB::ListSubjectReferences(id, refs);
+            ElleDB::ListSubjectMilestones(id, mils);
+            json refArr = json::array();
+            for (auto& r : refs) refArr.push_back({
+                {"id", r.id}, {"reference_type", r.reference_type},
+                {"reference_title", r.reference_title},
+                {"reference_content", r.reference_content},
+                {"file_path", r.file_path},
+                {"relevance_score", r.relevance_score}, {"notes", r.notes}
+            });
+            json milArr = json::array();
+            for (auto& m : mils) milArr.push_back({
+                {"id", m.id}, {"milestone", m.milestone},
+                {"description", m.description}, {"achieved_at", m.achieved_at}
+            });
+            json out = subjectToJson(s);
+            out["references"] = refArr;
+            out["milestones"] = milArr;
+            return HTTPResponse::OK(out);
         });
         m_router.Register("POST", "/api/education/subjects", [](const HTTPRequest& req) {
-            /* Create the table on demand the first time someone posts. */
-            ElleSQLPool::Instance().Exec(
-                "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'subjects') "
-                "CREATE TABLE ElleCore.dbo.subjects ("
-                "  id INT IDENTITY(1,1) PRIMARY KEY, "
-                "  name NVARCHAR(256) NOT NULL, "
-                "  description NVARCHAR(MAX) NULL, "
-                "  created_at DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()"
-                ");");
-            json body = req.BodyJSON();
-            std::string name = body.value("name", "");
-            std::string desc = body.value("description", "");
-            if (name.empty()) return HTTPResponse::Err(400, "missing name");
-            auto rs = ElleSQLPool::Instance().QueryParams(
-                "INSERT INTO ElleCore.dbo.subjects (name, description) VALUES (?, ?);",
-                { name, desc });
-            if (!rs.success) return HTTPResponse::Err(500, rs.error);
-            return HTTPResponse::Created({{"name", name}, {"stored", true}});
+            try {
+                json body = req.BodyJSON();
+                ElleDB::LearnedSubject s;
+                s.subject              = body.value("subject", body.value("name", std::string("")));
+                if (s.subject.empty()) return HTTPResponse::Err(400, "missing 'subject'");
+                s.category             = body.value("category", std::string(""));
+                s.proficiency_level    = body.value("proficiency_level", 0);
+                s.who_taught           = body.value("who_taught", std::string(""));
+                s.where_learned        = body.value("where_learned", std::string(""));
+                s.time_to_learn_hours  = body.value("time_to_learn_hours", 0.0f);
+                s.notes                = body.value("notes", std::string(""));
+                int32_t newId = 0;
+                if (!ElleDB::CreateSubject(s, newId))
+                    return HTTPResponse::Err(500, "create subject failed");
+                return HTTPResponse::Created({{"id", newId}, {"subject", s.subject}});
+            } catch (const std::exception& e) { return HTTPResponse::Err(500, e.what()); }
         });
-        m_router.Register("GET", "/api/education/skills", [](const HTTPRequest&) {
-            auto rs = ElleSQLPool::Instance().Query(
-                "SELECT name FROM sys.tables WHERE name = 'skills';");
-            if (!rs.success || rs.rows.empty())
-                return HTTPResponse::OK({{"skills", json::array()}, {"note", "skills table not created"}});
-            auto r2 = ElleSQLPool::Instance().Query(
-                "SELECT id, ISNULL(name,''), ISNULL(level, 0) FROM ElleCore.dbo.skills ORDER BY id DESC;");
+        m_router.Register("PUT", "/api/education/subjects/{id}", [](const HTTPRequest& req) {
+            int32_t id = std::atoi(req.headers.at("x-path-id").c_str());
+            try {
+                json body = req.BodyJSON();
+                ElleDB::LearnedSubject patch;
+                std::vector<std::string> fields;
+                for (auto& kv : body.items()) {
+                    if      (kv.key() == "subject")             { patch.subject = kv.value().get<std::string>();             fields.push_back("subject"); }
+                    else if (kv.key() == "category")            { patch.category = kv.value().get<std::string>();            fields.push_back("category"); }
+                    else if (kv.key() == "proficiency_level")   { patch.proficiency_level = kv.value().get<int>();            fields.push_back("proficiency_level"); }
+                    else if (kv.key() == "who_taught")          { patch.who_taught = kv.value().get<std::string>();          fields.push_back("who_taught"); }
+                    else if (kv.key() == "where_learned")       { patch.where_learned = kv.value().get<std::string>();       fields.push_back("where_learned"); }
+                    else if (kv.key() == "time_to_learn_hours") { patch.time_to_learn_hours = kv.value().get<float>();        fields.push_back("time_to_learn_hours"); }
+                    else if (kv.key() == "notes")               { patch.notes = kv.value().get<std::string>();               fields.push_back("notes"); }
+                    else if (kv.key() == "date_completed")      { patch.date_completed = kv.value().get<std::string>();      fields.push_back("date_completed"); }
+                }
+                if (fields.empty()) return HTTPResponse::OK({{"updated", 0}});
+                if (!ElleDB::UpdateSubject(id, patch, fields))
+                    return HTTPResponse::Err(500, "update failed");
+                return HTTPResponse::OK({{"id", id}, {"updated_fields", fields}});
+            } catch (const std::exception& e) { return HTTPResponse::Err(500, e.what()); }
+        });
+        m_router.Register("POST", "/api/education/subjects/{id}/references", [](const HTTPRequest& req) {
+            int32_t id = std::atoi(req.headers.at("x-path-id").c_str());
+            try {
+                json body = req.BodyJSON();
+                ElleDB::EducationReference r;
+                r.subject_id        = id;
+                r.reference_type    = body.value("reference_type", std::string("note"));
+                r.reference_title   = body.value("reference_title", std::string(""));
+                r.reference_content = body.value("reference_content", std::string(""));
+                r.file_path         = body.value("file_path", std::string(""));
+                r.relevance_score   = body.value("relevance_score", 0.5f);
+                r.notes             = body.value("notes", std::string(""));
+                if (!ElleDB::AddSubjectReference(r))
+                    return HTTPResponse::Err(500, "add reference failed");
+                return HTTPResponse::Created({{"subject_id", id}, {"stored", true}});
+            } catch (const std::exception& e) { return HTTPResponse::Err(500, e.what()); }
+        });
+        m_router.Register("POST", "/api/education/subjects/{id}/milestones", [](const HTTPRequest& req) {
+            int32_t id = std::atoi(req.headers.at("x-path-id").c_str());
+            try {
+                json body = req.BodyJSON();
+                ElleDB::LearningMilestone m;
+                m.subject_id  = id;
+                m.milestone   = body.value("milestone", std::string(""));
+                m.description = body.value("description", std::string(""));
+                if (m.milestone.empty()) return HTTPResponse::Err(400, "missing 'milestone'");
+                if (!ElleDB::AddSubjectMilestone(m))
+                    return HTTPResponse::Err(500, "add milestone failed");
+                return HTTPResponse::Created({{"subject_id", id}, {"stored", true}});
+            } catch (const std::exception& e) { return HTTPResponse::Err(500, e.what()); }
+        });
+        m_router.Register("GET", "/api/education/skills", [](const HTTPRequest& req) {
+            std::string category = req.QueryParam("category", "");
+            std::vector<ElleDB::Skill> skills;
+            if (!ElleDB::ListSkills(skills, category))
+                return HTTPResponse::Err(500, "skills query failed");
             json arr = json::array();
-            for (auto& r : r2.rows) {
-                arr.push_back({
-                    {"id", r.GetInt(0)},
-                    {"name", r.values.size() > 1 ? r.values[1] : ""},
-                    {"level", r.GetInt(2)}
-                });
-            }
-            return HTTPResponse::OK({{"skills", arr}});
+            for (auto& s : skills) arr.push_back({
+                {"id", s.id}, {"skill_name", s.skill_name}, {"category", s.category},
+                {"proficiency", s.proficiency},
+                {"learned_from_subject_id", s.learned_from_subject_id},
+                {"times_used", s.times_used}, {"last_used", s.last_used},
+                {"notes", s.notes}
+            });
+            return HTTPResponse::OK({{"skills", arr}, {"total", (int64_t)arr.size()}});
+        });
+        m_router.Register("POST", "/api/education/skills", [](const HTTPRequest& req) {
+            try {
+                json body = req.BodyJSON();
+                ElleDB::Skill s;
+                s.skill_name              = body.value("skill_name", body.value("name", std::string("")));
+                if (s.skill_name.empty()) return HTTPResponse::Err(400, "missing 'skill_name'");
+                s.category                = body.value("category", std::string(""));
+                s.proficiency             = body.value("proficiency", 0);
+                s.learned_from_subject_id = body.value("learned_from_subject_id", 0);
+                s.notes                   = body.value("notes", std::string(""));
+                int32_t newId = 0;
+                if (!ElleDB::CreateSkill(s, newId))
+                    return HTTPResponse::Err(409, "skill already exists or create failed");
+                return HTTPResponse::Created({{"id", newId}, {"skill_name", s.skill_name}});
+            } catch (const std::exception& e) { return HTTPResponse::Err(500, e.what()); }
+        });
+        m_router.Register("PUT", "/api/education/skills/{name}/use", [](const HTTPRequest& req) {
+            std::string name = req.headers.at("x-path-id");
+            if (!ElleDB::RecordSkillUse(name))
+                return HTTPResponse::Err(404, "skill not found");
+            return HTTPResponse::OK({{"skill_name", name}, {"recorded", true}});
         });
 
         /* ============== Emotional-context — reads from ElleThreads + SelfReflections = */
