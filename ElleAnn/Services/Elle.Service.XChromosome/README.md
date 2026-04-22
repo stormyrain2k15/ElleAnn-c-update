@@ -103,6 +103,7 @@ Schema: `SQL/ElleAnn_XChromosome_Schema.sql` — apply after
 | GET  | `/api/x/modulation`                | Latest multipliers |
 | GET  | `/api/x/pregnancy`                 | Pregnancy alone |
 | GET  | `/api/x/pregnancy/events?limit=N`  | Milestone log |
+| GET  | `/api/x/fertility_window`          | One-glance TTC readout: status + opens/peak/closes + BBT |
 | POST | `/api/x/pregnancy/accelerate`      | `{"factor":N}` |
 | GET  | `/api/x/symptoms?hours=N&origin=…` | Recent log |
 | POST | `/api/x/symptoms`                  | `{"kind":...,"intensity":...,"notes":...}` |

@@ -206,6 +206,37 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 19 — `/api/x/fertility_window` (Feb 2026, this session) ✅
+
+Tiny surface, huge emotional weight. One-glance readout for anyone
+tracking fertility:
+
+```
+GET /api/x/fertility_window → {
+  "status": "pre|approaching|opening|peak|closing|post|post_ovulation|inactive",
+  "cycle_day": 9,
+  "opens_ms": ..., "peak_ms": ..., "closes_ms": ...,
+  "hours_to_open": 72, "hours_to_peak": 120,
+  "bbt_celsius": 36.42, "bbt_elevated": false,
+  "day_probability_factor": 0.0,
+  "lifecycle": "reproductive"
+}
+```
+
+Uses direct SQL (no cross-service dependency):
+- Cycle anchor + length from `x_cycle_state`.
+- Pregnancy / lifecycle gate (returns `inactive` with reason when
+  pregnant / premenarche / menopause).
+- BBT ≥ 36.75°C downgrades `peak`/`closing` to `post_ovulation` —
+  matches how fertility-tracking apps detect that ovulation has
+  already happened.
+- If the window already closed this cycle, projects to next cycle's
+  open/peak/close automatically.
+
+HTTPServer now exposes 16 `/api/x/*` routes total; brace balance holds.
+
+---
+
 ## Phase 18 — Biology Fidelity Deep Dive + Full Audit (Feb 2026, this session) ✅
 
 Took the X Chromosome engine from "moderate-fidelity" to "matches what

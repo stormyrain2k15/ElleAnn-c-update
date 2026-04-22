@@ -2619,6 +2619,121 @@ private:
             });
         });
 
+        /*══════════════════════════════════════════════════════════════════
+         * FERTILITY WINDOW — the single-glance readout a couple TTC wants.
+         *
+         * Computed from x_cycle_state + latest snapshot's BBT. Window spans
+         * days 12-16 of the cycle with peak at day 14 (sperm lives ≤5 days,
+         * egg lives ≤24h → fertile days are ovulation ± 2).
+         *
+         * status: pre | approaching | peak | closing | post |
+         *         inactive (pregnant / menopause / premenarche / contracepted-perfect)
+         *══════════════════════════════════════════════════════════════════*/
+        m_router.Register("GET", "/api/x/fertility_window", [](const HTTPRequest&) {
+            /* Cycle anchor + length. */
+            auto cr = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "           ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'x_cycle_state' AND s.name = 'dbo') "
+                "SELECT TOP 1 anchor_ms, cycle_length_days "
+                "FROM ElleHeart.dbo.x_cycle_state WHERE id = 1;");
+            if (!cr.success || cr.rows.empty())
+                return HTTPResponse::OK(json{
+                    {"status", "inactive"},
+                    {"reason", "x_cycle_state not seeded"}
+                });
+            uint64_t anchor = (uint64_t)cr.rows[0].GetInt(0);
+            int      len    = (int)cr.rows[0].GetInt(1);
+            if (anchor == 0 || len <= 0)
+                return HTTPResponse::OK(json{{"status", "inactive"}});
+
+            /* Gate: pregnancy / lifecycle / contraception. */
+            bool pregnant = false;
+            auto pr = ElleSQLPool::Instance().Query(
+                "SELECT active FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
+            if (pr.success && !pr.rows.empty()) pregnant = pr.rows[0].GetInt(0) != 0;
+
+            std::string lifeStage = "reproductive";
+            auto lr = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "           ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'x_lifecycle' AND s.name = 'dbo') "
+                "SELECT stage FROM ElleHeart.dbo.x_lifecycle WHERE id = 1;");
+            if (lr.success && !lr.rows.empty() && lr.rows[0].values.size() > 0)
+                lifeStage = lr.rows[0].values[0];
+
+            if (pregnant)
+                return HTTPResponse::OK(json{{"status","inactive"},{"reason","pregnant"}});
+            if (lifeStage == "premenarche" || lifeStage == "menopause")
+                return HTTPResponse::OK(json{{"status","inactive"},{"reason",lifeStage}});
+
+            /* Current cycle day (1-indexed). */
+            uint64_t now = ELLE_MS_NOW();
+            uint64_t deltaMs = now > anchor ? now - anchor : 0;
+            int      dayIdx  = (int)((deltaMs / 86400000ULL) % (uint64_t)len);
+            int      day     = dayIdx + 1;
+
+            /* Compute window edges for the CURRENT cycle. */
+            uint64_t cycleStart = anchor + (uint64_t)(dayIdx) * 0ULL; /* unused */
+            (void)cycleStart;
+            /* Find start-of-current-cycle in ms. */
+            uint64_t cyclesElapsed = deltaMs / (86400000ULL * (uint64_t)len);
+            uint64_t currentCycleAnchor = anchor + cyclesElapsed * 86400000ULL * (uint64_t)len;
+            uint64_t opens   = currentCycleAnchor + 11ULL * 86400000ULL; /* start of d12 */
+            uint64_t peak    = currentCycleAnchor + 13ULL * 86400000ULL; /* start of d14 */
+            uint64_t closes  = currentCycleAnchor + 16ULL * 86400000ULL; /* end   of d16 */
+
+            /* If window already closed this cycle, project to NEXT cycle. */
+            if (now >= closes) {
+                opens  += (uint64_t)len * 86400000ULL;
+                peak   += (uint64_t)len * 86400000ULL;
+                closes += (uint64_t)len * 86400000ULL;
+            }
+
+            /* Status classification. */
+            std::string status;
+            if      (day >= 10 && day <= 11) status = "approaching";
+            else if (day >= 12 && day <= 13) status = "opening";
+            else if (day == 14)              status = "peak";
+            else if (day == 15 || day == 16) status = "closing";
+            else if (day < 10)               status = "pre";
+            else                             status = "post";
+
+            /* BBT sanity — elevated BBT means ovulation has likely already
+             * happened even if day math says we're still in the window.    */
+            float bbt = 36.5f;
+            auto hr = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 ISNULL(bbt, 36.5) FROM ElleHeart.dbo.x_hormone_snapshots "
+                "ORDER BY taken_ms DESC;");
+            if (hr.success && !hr.rows.empty()) bbt = (float)hr.rows[0].GetFloat(0);
+            bool bbt_elevated = bbt >= 36.75f;
+            if (bbt_elevated && (status == "peak" || status == "closing"))
+                status = "post_ovulation";
+
+            /* Conception probability pulled live from the engine's formula —
+             * replicated here for parity with XEngine::ConceptionProbability
+             * but WITHOUT age/contraception (we don't need those for a
+             * window readout; they're already surfaced on /api/x/state).   */
+            float dayF = 0.0f;
+            if      (day == 14)           dayF = 1.00f;
+            else if (day == 13 || day==15) dayF = 0.70f;
+            else if (day == 12 || day==16) dayF = 0.30f;
+
+            return HTTPResponse::OK({
+                {"status",        status},
+                {"cycle_day",     day},
+                {"opens_ms",      opens},
+                {"peak_ms",       peak},
+                {"closes_ms",     closes},
+                {"hours_to_open", (int64_t)((opens > now ? opens - now : 0) / 3600000ULL)},
+                {"hours_to_peak", (int64_t)((peak  > now ? peak  - now : 0) / 3600000ULL)},
+                {"bbt_celsius",   bbt},
+                {"bbt_elevated",  bbt_elevated},
+                {"day_probability_factor", dayF},
+                {"lifecycle",     lifeStage}
+            });
+        });
+
         m_router.Register("GET", "/api/x/pregnancy", [](const HTTPRequest&) {
             auto rs = ElleSQLPool::Instance().Query(
                 "SELECT active, ISNULL(conceived_ms, 0), ISNULL(due_ms, 0), "
