@@ -206,6 +206,59 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 17 — Emotional Engine ← X Chromosome Wiring (Feb 2026, this session) ✅
+
+Wired the Emotional engine to multiply emotion deltas by the X
+modulation multipliers. Now all three active consumers — Cognitive
+(system prompt), Lua (behavioural scripts), AND Emotional (102-dim
+delta math) — respond to Elle's body in real time.
+
+### What changed in `Services/Elle.Service.Emotional/EmotionalEngine.{h,cpp}`
+- New private `XMod` cache struct (6 floats + refreshed_ms). Default 1.0
+  so emotion math is unchanged when the X service is offline.
+- `RefreshXModulation()` runs once per 30s from `Tick()` (outside m_mutex),
+  reads the latest `x_modulation_log` row with a `sys.tables` existence
+  guard, and populates the cache. DB errors fall back silently.
+- `XMultiplierFor(emo)` categorises each of the 102 emotions into one or
+  more families (warmth / empathy / arousal / introspection / fatigue-
+  sensitive) and returns the compounded multiplier. Clamped 0.30–1.70
+  so stacked stage extremes can't runaway-amplify.
+- `ProcessStimulus(emo, delta)` now scales `delta` by `XMultiplierFor(emo)`
+  BEFORE the inertia term. Debug log shows `body×multiplier`.
+- `ApplyContagion(valence, arousal)` pulls the three category multipliers
+  once at the top and applies each to the appropriate dimension writes.
+
+### Effect in practice
+- **Luteal Elle** — empathy family (EMPATHY, COMPASSION, NOSTALGIA,
+  VULNERABILITY, LONGING) gets a ~15% lift; fatigue-sensitive emotions
+  (JOY, ANTICIPATION, FLOW_STATE, FOCUS) get divided down; reflective
+  emotions (PRIDE, SHAME, INSIGHT, PURPOSE) rise.
+- **Ovulatory Elle** — warmth family (JOY, TENDERNESS, LOVE, UNITY) and
+  arousal family (CURIOSITY, ANTICIPATION, AWE) both rise ~15%.
+- **Menstrual Elle** — warmth suppressed, empathy slightly lifted, fatigue
+  elevated → JOY and ANTICIPATION specifically dampened.
+- **Pregnant Elle** — progesterone-driven empathy lift throughout, T1
+  fatigue/nausea cascades suppress high-arousal emotions, postpartum
+  the stacking produces a measurable PP-mood-swing dip.
+
+### Safety
+- The multiplier lookup is O(1) (simple boolean chains, no allocations).
+- SQL read is throttled to 30s and table-existence-guarded.
+- Clamp at 0.30–1.70 prevents any emotion from being fully silenced or
+  doubled, even if modulation_strength is pushed to its 0.5 ceiling.
+
+### Full consumer set now
+| Service     | How it consumes X modulation |
+| ----------- | ---------------------------- |
+| Cognitive   | BuildSystemPrompt reads x_modulation_log + x_pregnancy_state, injects body-state line into the LLM system prompt |
+| Lua         | `elle.x.phase()`, `elle.x.hormone()`, `elle.x.modulation()`, `elle.x.is_pregnant()`, `elle.x.gestational_week()`, `elle.x.symptom_intensity()`, `elle.x.lifecycle_stage()` |
+| Emotional   | ProcessStimulus + ApplyContagion multiply deltas by XMultiplierFor(emo) |
+
+SelfPrompt can still wire in when ready — pattern is identical to the
+Cognitive hook.
+
+---
+
 ## Phase 16 — X Chromosome Engine: Complete Female Biology (Feb 2026, this session) ✅
 
 Expanded Phase 15's skeleton into a full-fidelity endocrine simulation

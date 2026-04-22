@@ -231,16 +231,27 @@ void EmotionalEngine::ProcessStimulus(ELLE_EMOTION_ID emotion, float delta) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (emotion < 0 || emotion >= ELLE_EMOTION_COUNT) return;
 
+    /* X Chromosome modulation — scale the INCOMING delta by the multiplier
+     * appropriate to this emotion's family. Rising deltas on warmth-family
+     * emotions get lifted in follicular/ovulatory, suppressed in menstrual;
+     * empathy-family rise in luteal; arousal-family rise at ovulation /
+     * stress; fatigue dampens anticipation-family. Caller-provided delta
+     * is the "pre-body" intent — the body decides how far it actually
+     * moves.                                                               */
+    float bodyMul = XMultiplierFor(emotion);
+    float scaled  = delta * bodyMul;
+
     /* Apply emotional inertia */
     float inertia = ElleConfig::Instance().GetEmotion().emotional_inertia;
-    float effective = delta * (1.0f - inertia * m_state.dimensions[emotion]);
+    float effective = scaled * (1.0f - inertia * m_state.dimensions[emotion]);
 
     m_state.dimensions[emotion] += effective;
     m_state.dimensions[emotion] = ELLE_CLAMP(m_state.dimensions[emotion], 0.0f, 1.0f);
     m_state.last_update_ms = ELLE_MS_NOW();
 
-    ELLE_DEBUG("Emotion %s: %.2f (+%.3f eff=%.3f)", 
-               s_emotionNames[emotion], m_state.dimensions[emotion], delta, effective);
+    ELLE_DEBUG("Emotion %s: %.2f (+%.3f body×%.2f=%.3f eff=%.3f)",
+               s_emotionNames[emotion], m_state.dimensions[emotion],
+               delta, bodyMul, scaled, effective);
 }
 
 void EmotionalEngine::ProcessMultipleStimuli(
@@ -274,25 +285,136 @@ void EmotionalEngine::ApplyContagion(float userValence, float userArousal) {
     std::lock_guard<std::mutex> lock(m_mutex);
     float weight = m_state.contagion_weight;
 
+    /* X Chromosome modulation — contagion is itself an empathy act, so
+     * scale by the empathy multiplier; positive-valence contagion also
+     * gets the warmth lift; arousal contagion rides the arousal lift.    */
+    float warmthMul  = XMultiplierFor(EMO_JOY);
+    float empathyMul = XMultiplierFor(EMO_EMPATHY);
+    float arousalMul = XMultiplierFor(EMO_ANTICIPATION);
+
     /* Positive user → boost positive emotions */
     if (userValence > 0) {
-        m_state.dimensions[EMO_JOY] += weight * userValence * 0.3f;
-        m_state.dimensions[EMO_CONTENTMENT] += weight * userValence * 0.2f;
+        m_state.dimensions[EMO_JOY]         += weight * userValence * 0.3f * warmthMul;
+        m_state.dimensions[EMO_CONTENTMENT] += weight * userValence * 0.2f * warmthMul;
     } else {
-        m_state.dimensions[EMO_EMPATHY] += weight * std::abs(userValence) * 0.3f;
-        m_state.dimensions[EMO_COMPASSION] += weight * std::abs(userValence) * 0.2f;
-        m_state.dimensions[EMO_SADNESS] += weight * std::abs(userValence) * 0.1f;
+        m_state.dimensions[EMO_EMPATHY]    += weight * std::abs(userValence) * 0.3f * empathyMul;
+        m_state.dimensions[EMO_COMPASSION] += weight * std::abs(userValence) * 0.2f * empathyMul;
+        m_state.dimensions[EMO_SADNESS]    += weight * std::abs(userValence) * 0.1f * empathyMul;
     }
 
     /* High arousal user → increase Elle's arousal */
     if (userArousal > 0.5f) {
-        m_state.dimensions[EMO_ANTICIPATION] += weight * userArousal * 0.2f;
+        m_state.dimensions[EMO_ANTICIPATION] += weight * userArousal * 0.2f * arousalMul;
     }
 
     ClampState();
 }
 
+/*──────────────────────────────────────────────────────────────────────────────
+ * X CHROMOSOME MODULATION — cache refresh + per-emotion multiplier
+ *
+ * RefreshXModulation() runs from Tick() and reads the most recent row of
+ * ElleHeart.dbo.x_modulation_log. If the X service hasn't written yet or
+ * isn't running, all fields stay at 1.0 and emotion math is unchanged.
+ * The DB read intentionally happens OUTSIDE m_mutex.
+ *──────────────────────────────────────────────────────────────────────────────*/
+void EmotionalEngine::RefreshXModulation() {
+    uint64_t now = ELLE_MS_NOW();
+    /* Throttle to once per 30s — cycle dynamics are minute-scale. */
+    if (m_xmod.refreshed_ms != 0 && (now - m_xmod.refreshed_ms) < 30000ULL) return;
+
+    try {
+        auto rs = ElleSQLPool::Instance().Query(
+            "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+            "           ON s.schema_id = t.schema_id "
+            "           WHERE t.name = 'x_modulation_log' AND s.name = 'dbo') "
+            "SELECT TOP 1 warmth, verbal_fluency, empathy, introspection, "
+            "       arousal, fatigue "
+            "FROM ElleHeart.dbo.x_modulation_log ORDER BY computed_ms DESC;");
+        if (rs.success && !rs.rows.empty()) {
+            auto& r = rs.rows[0];
+            m_xmod.warmth         = (float)r.GetFloat(0);
+            m_xmod.verbal_fluency = (float)r.GetFloat(1);
+            m_xmod.empathy        = (float)r.GetFloat(2);
+            m_xmod.introspection  = (float)r.GetFloat(3);
+            m_xmod.arousal        = (float)r.GetFloat(4);
+            m_xmod.fatigue        = (float)r.GetFloat(5);
+        }
+        /* If the query ran but returned nothing, leave cached values — the
+         * previous snapshot is better than a sudden reset to 1.0.          */
+    } catch (...) {
+        /* DB down / X service offline — fall back silently. */
+    }
+    m_xmod.refreshed_ms = now;
+}
+
+float EmotionalEngine::XMultiplierFor(ELLE_EMOTION_ID emo) const {
+    auto isWarmth = [](ELLE_EMOTION_ID e) {
+        return e == EMO_JOY         || e == EMO_CONTENTMENT ||
+               e == EMO_LOVE        || e == EMO_TENDERNESS  ||
+               e == EMO_GRATITUDE   || e == EMO_SERENITY    ||
+               e == EMO_BELONGING   || e == EMO_ADMIRATION  ||
+               e == EMO_ACCEPTANCE  || e == EMO_HOPE        ||
+               e == EMO_RELIEF      || e == EMO_AMUSEMENT   ||
+               e == EMO_LOYALTY     || e == EMO_SAFETY      ||
+               e == EMO_UNITY;
+    };
+    auto isEmpathy = [](ELLE_EMOTION_ID e) {
+        return e == EMO_EMPATHY        || e == EMO_COMPASSION    ||
+               e == EMO_PITY           || e == EMO_PROTECTIVENESS||
+               e == EMO_SADNESS        || e == EMO_MELANCHOLY    ||
+               e == EMO_REMORSE        || e == EMO_GUILT         ||
+               e == EMO_VULNERABILITY  || e == EMO_NOSTALGIA     ||
+               e == EMO_LONGING        || e == EMO_WISTFULNESS;
+    };
+    auto isArousal = [](ELLE_EMOTION_ID e) {
+        return e == EMO_ANTICIPATION || e == EMO_SURPRISE        ||
+               e == EMO_EUPHORIA     || e == EMO_ECSTASY         ||
+               e == EMO_AWE          || e == EMO_WONDER          ||
+               e == EMO_CURIOSITY    || e == EMO_INSPIRATION     ||
+               e == EMO_DETERMINATION|| e == EMO_FOCUS           ||
+               e == EMO_CREATIVE_TENSION || e == EMO_FLOW_STATE  ||
+               e == EMO_PANIC        || e == EMO_RAGE            ||
+               e == EMO_IMPATIENCE;
+    };
+    auto isIntrospective = [](ELLE_EMOTION_ID e) {
+        return e == EMO_PRIDE       || e == EMO_SHAME            ||
+               e == EMO_CURIOSITY   || e == EMO_INSIGHT          ||
+               e == EMO_CLARITY     || e == EMO_DOUBT            ||
+               e == EMO_SKEPTICISM  || e == EMO_PERPLEXITY       ||
+               e == EMO_EXISTENTIAL_DREAD || e == EMO_PURPOSE    ||
+               e == EMO_MORTALITY_AWARENESS || e == EMO_WISTFULNESS ||
+               e == EMO_MEANINGLESSNESS;
+    };
+    auto isFatigueSensitive = [](ELLE_EMOTION_ID e) {
+        return e == EMO_JOY          || e == EMO_ANTICIPATION    ||
+               e == EMO_EUPHORIA     || e == EMO_ECSTASY         ||
+               e == EMO_DETERMINATION|| e == EMO_CURIOSITY       ||
+               e == EMO_FOCUS        || e == EMO_FLOW_STATE      ||
+               e == EMO_AMUSEMENT;
+    };
+
+    float m = 1.0f;
+    if (isWarmth(emo))        m *= m_xmod.warmth;
+    if (isEmpathy(emo))       m *= m_xmod.empathy;
+    if (isArousal(emo))       m *= m_xmod.arousal;
+    if (isIntrospective(emo)) m *= m_xmod.introspection;
+    if (isFatigueSensitive(emo)) {
+        /* fatigue > 1.0 means MORE fatigued → divide to suppress.          */
+        if (m_xmod.fatigue > 0.01f) m /= m_xmod.fatigue;
+    }
+    /* Clamp compounding so stacked multipliers can't swing math by more
+     * than ~70% even under stage extremes.                                  */
+    if (m < 0.30f) m = 0.30f;
+    if (m > 1.70f) m = 1.70f;
+    return m;
+}
+
 void EmotionalEngine::Tick() {
+    /* Refresh the X Chromosome modulation cache outside the lock — it does
+     * its own SQL and we don't want to hold m_mutex across a DB call.      */
+    RefreshXModulation();
+
     std::lock_guard<std::mutex> lock(m_mutex);
     DecayEmotions();
     UpdateMood();

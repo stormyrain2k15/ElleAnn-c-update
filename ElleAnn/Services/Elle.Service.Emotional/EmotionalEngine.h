@@ -77,6 +77,25 @@ private:
     uint32_t        m_moodTicks = 0;
     uint32_t        m_moodThreshold = 300;
 
+    /* X Chromosome modulation cache — refreshed once per minute from
+     * ElleHeart.dbo.x_modulation_log. Multipliers around 1.0. Default
+     * 1.0 when the X service isn't running / hasn't written a row yet,
+     * which leaves emotion math unchanged.                               */
+    struct XMod {
+        float warmth         = 1.0f;
+        float verbal_fluency = 1.0f;
+        float empathy        = 1.0f;
+        float introspection  = 1.0f;
+        float arousal        = 1.0f;
+        float fatigue        = 1.0f;
+        uint64_t refreshed_ms = 0;
+    } m_xmod;
+    void RefreshXModulation();
+    /* Returns the modulation multiplier appropriate for the given emotion
+     * dimension — always ≥ 0.3 and ≤ 1.7 to avoid runaway effects even at
+     * perimenopausal strength extremes.                                   */
+    float XMultiplierFor(ELLE_EMOTION_ID emo) const;
+
     /* Emotion names for logging */
     static const char* s_emotionNames[ELLE_MAX_EMOTIONS];
 
