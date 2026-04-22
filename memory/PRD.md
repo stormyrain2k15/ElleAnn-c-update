@@ -206,6 +206,52 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 21 — Queue reaper + /api/diag/queues observability (Feb 2026, this session) ✅
+
+Follow-up to Phase 20's atomic claim-on-select. The atomic claim
+closed the TOCTOU race, but a consumer that crashed mid-work left
+its rows stuck in PROCESSING / LOCKED forever. Also added live
+observability so the Android app can watch the worker breathe.
+
+### 1. Timeout reaper (`Shared/ElleSQLConn.cpp`)
+- `ReapStaleIntents(defaultTimeoutMs, maxRetries)` — intents in
+  PROCESSING past `max(TimeoutMs, default)` are re-queued
+  (RetryCount += 1) or, past maxRetries, terminal-FAILED with
+  response "timeout_max_retries".
+- `ReapStaleActions(defaultTimeoutMs, maxAttempts)` — actions in
+  LOCKED/EXECUTING past `max(timeout_ms, default)` are re-queued
+  with attempts += 1 and started_ms cleared, or terminal-TIMEOUT
+  past maxAttempts. Lazy-adds an `attempts` column to
+  `action_queue` on first run.
+- `QueueWorker.OnTick` fires the reaper every 10 ticks (~5s) using
+  config keys `cognitive.intent_timeout_ms`, `action.default_timeout_ms`,
+  `queues.max_retries`, `queues.max_action_attempts`.
+
+### 2. Queue diagnostics (`/api/diag/queues`)
+Single cheap GET that returns:
+```
+{
+  "intents":  { pending, processing, completed_last_hour,
+                failed_last_hour, stale_processing },
+  "actions":  { queued, locked, executing,
+                completed_success_last_hour,
+                completed_failure_last_hour,
+                timed_out_last_hour, stale_locked },
+  "hardware_actions": { pending, dispatched },
+  "taken_ms": <server now>
+}
+```
+Three SQL calls with `SUM(CASE WHEN ...)` aggregates — one round
+trip each. Safe to poll at 1Hz.
+
+### 3. Android plumbing
+- `ApiModels.kt`: `QueueDiagnosticsResponse` + nested stat classes.
+- `ElleApiService.kt`: `@GET("/api/diag/queues")`.
+- `ElleRepository.kt`: `suspend fun getQueueDiagnostics()`.
+(No UI screen yet — can land whenever you want to surface it.)
+
+---
+
 ## Phase 20 — External Code Audit Repair (Feb 2026, this session) ✅
 
 External code-only audit flagged 13 real source-level bugs. Every one

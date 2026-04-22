@@ -50,8 +50,29 @@ protected:
         /* Periodic stats */
         m_pollCount++;
         if (m_pollCount % 120 == 0) { /* Every ~60 seconds */
-            ELLE_INFO("Queue stats: %llu intents, %llu actions routed", 
+            ELLE_INFO("Queue stats: %llu intents, %llu actions routed",
                       m_intentsRouted, m_actionsRouted);
+        }
+
+        /* TIMEOUT REAPER — runs every 10 ticks (~5s). The atomic claim
+         * flips rows to PROCESSING/LOCKED; if a consumer crashes or
+         * wedges, rows would otherwise sit there forever. The reaper
+         * re-queues rows past their TimeoutMs (up to max retries /
+         * attempts) or marks them FAILED/TIMEOUT terminal.             */
+        if (m_pollCount % 10 == 0) {
+            auto& cfg = ElleConfig::Instance();
+            uint32_t intentTimeout = (uint32_t)cfg.GetInt("cognitive.intent_timeout_ms", 120000);
+            uint32_t actionTimeout = (uint32_t)cfg.GetInt("action.default_timeout_ms", 60000);
+            uint32_t maxRetries    = (uint32_t)cfg.GetInt("queues.max_retries", 3);
+            uint32_t maxAttempts   = (uint32_t)cfg.GetInt("queues.max_action_attempts", 3);
+            uint32_t reapedI = ElleDB::ReapStaleIntents(intentTimeout, maxRetries);
+            uint32_t reapedA = ElleDB::ReapStaleActions(actionTimeout, maxAttempts);
+            if (reapedI > 0 || reapedA > 0) {
+                ELLE_WARN("Queue reaper: re-queued/failed %u intents + %u actions",
+                          reapedI, reapedA);
+                m_intentsReaped += reapedI;
+                m_actionsReaped += reapedA;
+            }
         }
     }
 
@@ -78,6 +99,8 @@ protected:
 private:
     uint64_t m_intentsRouted = 0;
     uint64_t m_actionsRouted = 0;
+    uint64_t m_intentsReaped = 0;
+    uint64_t m_actionsReaped = 0;
     uint32_t m_pollCount = 0;
 };
 

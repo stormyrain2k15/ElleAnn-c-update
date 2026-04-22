@@ -1057,6 +1057,45 @@ private:
             return HTTPResponse::OK(j);
         });
 
+        /* ============== Diagnostics — live queue depth + orphan counts ==
+         * One-shot observability for the intent / action / hardware_actions
+         * queues. Useful for:
+         *   - Catching worker stalls ("why are pending counts growing?")
+         *   - Spotting orphaned PROCESSING/LOCKED rows before the reaper
+         *     has caught them (stale_processing > 0 for more than one tick)
+         *   - Sanity-checking WS hardware push liveness
+         * Read-only; safe to poll at 1Hz from the Android app.              */
+        m_router.Register("GET", "/api/diag/queues", [](const HTTPRequest&) {
+            ElleDB::QueueSnapshot s;
+            if (!ElleDB::GetQueueSnapshot(s)) {
+                return HTTPResponse::Err(500, "queue snapshot failed");
+            }
+            json j = {
+                {"intents", {
+                    {"pending",              s.intent_pending},
+                    {"processing",           s.intent_processing},
+                    {"completed_last_hour",  s.intent_completed_1h},
+                    {"failed_last_hour",     s.intent_failed_1h},
+                    {"stale_processing",     s.intent_stale_processing}
+                }},
+                {"actions", {
+                    {"queued",                      s.action_queued},
+                    {"locked",                      s.action_locked},
+                    {"executing",                   s.action_executing},
+                    {"completed_success_last_hour", s.action_success_1h},
+                    {"completed_failure_last_hour", s.action_failure_1h},
+                    {"timed_out_last_hour",         s.action_timeout_1h},
+                    {"stale_locked",                s.action_stale_locked}
+                }},
+                {"hardware_actions", {
+                    {"pending",    s.hardware_pending},
+                    {"dispatched", s.hardware_dispatched}
+                }},
+                {"taken_ms", (int64_t)ELLE_MS_NOW()}
+            };
+            return HTTPResponse::OK(j);
+        });
+
         /* ============== Memory — backed by dbo.memory ============== */
         m_router.Register("GET", "/api/memory/", [](const HTTPRequest& req) {
             std::string type = req.QueryParam("memory_type");

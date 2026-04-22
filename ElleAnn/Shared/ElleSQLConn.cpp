@@ -466,6 +466,219 @@ bool UpdateIntentStatus(uint64_t intentId, ELLE_INTENT_STATUS status, const std:
         {std::to_string(intentId), std::to_string(status), response}).success;
 }
 
+/* Forward declaration — EnsureActionQueueTable is defined further down the
+ * file alongside the other action-queue helpers; the reaper + snapshot code
+ * below needs it available early.                                          */
+static void EnsureActionQueueTable();
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * TIMEOUT REAPER — intents stuck in PROCESSING past their TimeoutMs.
+ *
+ * The atomic claim-on-select flipped their Status from PENDING to
+ * PROCESSING; if the consumer never closed the loop (crash, hang,
+ * lost IPC), the row stayed there forever. We re-queue rows whose
+ * effective deadline (CreatedMs + max(TimeoutMs, defaultTimeoutMs))
+ * has passed, with a hard cap on RetryCount that routes them to
+ * INTENT_FAILED instead of an infinite retry loop.
+ *
+ * Returns the number of rows reaped (re-queued + failed).
+ *──────────────────────────────────────────────────────────────────────────────*/
+uint32_t ReapStaleIntents(uint32_t defaultTimeoutMs, uint32_t maxRetries) {
+    int64_t now = (int64_t)ELLE_MS_NOW();
+    auto& pool = ElleSQLPool::Instance();
+
+    /* Step 1 — push rows past max_retries straight to FAILED so we
+     * don't churn them forever. */
+    auto rs1 = pool.QueryParams(
+        "UPDATE ElleCore.dbo.IntentQueue WITH (ROWLOCK) "
+        "SET Status = ?, CompletedMs = ?, Response = N'timeout_max_retries' "
+        "WHERE Status = ? "
+        "  AND RetryCount >= ? "
+        "  AND ? - CreatedMs > CASE WHEN TimeoutMs > 0 THEN TimeoutMs ELSE ? END;",
+        {
+            std::to_string((int)INTENT_FAILED),
+            std::to_string(now),
+            std::to_string((int)INTENT_PROCESSING),
+            std::to_string(maxRetries),
+            std::to_string(now),
+            std::to_string(defaultTimeoutMs)
+        });
+    uint32_t failed = rs1.success ? (uint32_t)rs1.rows_affected : 0;
+
+    /* Step 2 — requeue everyone else back to PENDING and bump RetryCount. */
+    auto rs2 = pool.QueryParams(
+        "UPDATE ElleCore.dbo.IntentQueue WITH (ROWLOCK) "
+        "SET Status = ?, RetryCount = RetryCount + 1 "
+        "WHERE Status = ? "
+        "  AND RetryCount < ? "
+        "  AND ? - CreatedMs > CASE WHEN TimeoutMs > 0 THEN TimeoutMs ELSE ? END;",
+        {
+            std::to_string((int)INTENT_PENDING),
+            std::to_string((int)INTENT_PROCESSING),
+            std::to_string(maxRetries),
+            std::to_string(now),
+            std::to_string(defaultTimeoutMs)
+        });
+    uint32_t requeued = rs2.success ? (uint32_t)rs2.rows_affected : 0;
+
+    return failed + requeued;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * TIMEOUT REAPER — actions stuck in LOCKED / EXECUTING past timeout_ms.
+ *
+ * Same pattern as intents: rows past max attempts go to ACTION_TIMEOUT
+ * (terminal); otherwise they're re-queued with attempts += 1.
+ * started_ms is what the atomic claim set; we measure from there.
+ *──────────────────────────────────────────────────────────────────────────────*/
+uint32_t ReapStaleActions(uint32_t defaultTimeoutMs, uint32_t maxAttempts) {
+    int64_t now = (int64_t)ELLE_MS_NOW();
+    auto& pool = ElleSQLPool::Instance();
+    EnsureActionQueueTable();
+
+    /* action_queue schema we lazy-create doesn't have an 'attempts'
+     * column today — add it on demand so this reaper can enforce caps. */
+    pool.Exec(
+        "IF NOT EXISTS ("
+        "  SELECT 1 FROM sys.columns "
+        "  WHERE object_id = OBJECT_ID(N'ElleCore.dbo.action_queue') "
+        "    AND name = N'attempts') "
+        "ALTER TABLE ElleCore.dbo.action_queue "
+        "  ADD attempts INT NOT NULL DEFAULT 0;");
+
+    /* Terminal-timeout pass. */
+    auto rs1 = pool.QueryParams(
+        "UPDATE ElleCore.dbo.action_queue WITH (ROWLOCK) "
+        "SET status = ?, completed_ms = ?, "
+        "    result = N'timeout_max_attempts' "
+        "WHERE status IN (?, ?) "
+        "  AND attempts >= ? "
+        "  AND ISNULL(started_ms, created_ms) IS NOT NULL "
+        "  AND ? - ISNULL(started_ms, created_ms) > "
+        "      CASE WHEN timeout_ms > 0 THEN timeout_ms ELSE ? END;",
+        {
+            std::to_string((int)ACTION_TIMEOUT),
+            std::to_string(now),
+            std::to_string((int)ACTION_LOCKED),
+            std::to_string((int)ACTION_EXECUTING),
+            std::to_string(maxAttempts),
+            std::to_string(now),
+            std::to_string(defaultTimeoutMs)
+        });
+    uint32_t failed = rs1.success ? (uint32_t)rs1.rows_affected : 0;
+
+    /* Re-queue pass. */
+    auto rs2 = pool.QueryParams(
+        "UPDATE ElleCore.dbo.action_queue WITH (ROWLOCK) "
+        "SET status = ?, attempts = attempts + 1, started_ms = NULL "
+        "WHERE status IN (?, ?) "
+        "  AND attempts < ? "
+        "  AND ISNULL(started_ms, created_ms) IS NOT NULL "
+        "  AND ? - ISNULL(started_ms, created_ms) > "
+        "      CASE WHEN timeout_ms > 0 THEN timeout_ms ELSE ? END;",
+        {
+            std::to_string((int)ACTION_QUEUED),
+            std::to_string((int)ACTION_LOCKED),
+            std::to_string((int)ACTION_EXECUTING),
+            std::to_string(maxAttempts),
+            std::to_string(now),
+            std::to_string(defaultTimeoutMs)
+        });
+    uint32_t requeued = rs2.success ? (uint32_t)rs2.rows_affected : 0;
+
+    return failed + requeued;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * QUEUE DIAGNOSTICS — cheap COUNT(*) / windowed COUNT(*) reads for the
+ * /api/diag/queues endpoint. One connection, one batched query each for
+ * intents, actions, hardware_actions.
+ *──────────────────────────────────────────────────────────────────────────────*/
+bool GetQueueSnapshot(QueueSnapshot& out) {
+    out = {};
+    int64_t now      = (int64_t)ELLE_MS_NOW();
+    int64_t hourAgo  = now - 3600000LL;
+    auto& pool = ElleSQLPool::Instance();
+
+    /* Intents ---------------------------------------------------------- */
+    auto ri = pool.QueryParams(
+        "SELECT "
+        "  SUM(CASE WHEN Status = ? THEN 1 ELSE 0 END) AS pending, "
+        "  SUM(CASE WHEN Status = ? THEN 1 ELSE 0 END) AS processing, "
+        "  SUM(CASE WHEN Status = ? AND CompletedMs >= ? THEN 1 ELSE 0 END) AS done_1h, "
+        "  SUM(CASE WHEN Status = ? AND CompletedMs >= ? THEN 1 ELSE 0 END) AS fail_1h, "
+        "  SUM(CASE WHEN Status = ? AND ? - CreatedMs > "
+        "           CASE WHEN TimeoutMs > 0 THEN TimeoutMs ELSE 120000 END "
+        "        THEN 1 ELSE 0 END) AS stale "
+        "FROM ElleCore.dbo.IntentQueue;",
+        {
+            std::to_string((int)INTENT_PENDING),
+            std::to_string((int)INTENT_PROCESSING),
+            std::to_string((int)INTENT_COMPLETED), std::to_string(hourAgo),
+            std::to_string((int)INTENT_FAILED),    std::to_string(hourAgo),
+            std::to_string((int)INTENT_PROCESSING), std::to_string(now)
+        });
+    if (ri.success && !ri.rows.empty()) {
+        auto& r = ri.rows[0];
+        out.intent_pending          = (uint32_t)r.GetInt(0);
+        out.intent_processing       = (uint32_t)r.GetInt(1);
+        out.intent_completed_1h     = (uint32_t)r.GetInt(2);
+        out.intent_failed_1h        = (uint32_t)r.GetInt(3);
+        out.intent_stale_processing = (uint32_t)r.GetInt(4);
+    }
+
+    /* Actions ---------------------------------------------------------- */
+    EnsureActionQueueTable();
+    auto ra = pool.QueryParams(
+        "SELECT "
+        "  SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS queued, "
+        "  SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS locked, "
+        "  SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS executing, "
+        "  SUM(CASE WHEN status = ? AND completed_ms >= ? THEN 1 ELSE 0 END) AS ok_1h, "
+        "  SUM(CASE WHEN status = ? AND completed_ms >= ? THEN 1 ELSE 0 END) AS fail_1h, "
+        "  SUM(CASE WHEN status = ? AND completed_ms >= ? THEN 1 ELSE 0 END) AS to_1h, "
+        "  SUM(CASE WHEN status IN (?, ?) "
+        "            AND ? - ISNULL(started_ms, created_ms) > "
+        "                CASE WHEN timeout_ms > 0 THEN timeout_ms ELSE 60000 END "
+        "        THEN 1 ELSE 0 END) AS stale "
+        "FROM ElleCore.dbo.action_queue;",
+        {
+            std::to_string((int)ACTION_QUEUED),
+            std::to_string((int)ACTION_LOCKED),
+            std::to_string((int)ACTION_EXECUTING),
+            std::to_string((int)ACTION_COMPLETED_SUCCESS), std::to_string(hourAgo),
+            std::to_string((int)ACTION_COMPLETED_FAILURE), std::to_string(hourAgo),
+            std::to_string((int)ACTION_TIMEOUT),           std::to_string(hourAgo),
+            std::to_string((int)ACTION_LOCKED),
+            std::to_string((int)ACTION_EXECUTING),
+            std::to_string(now)
+        });
+    if (ra.success && !ra.rows.empty()) {
+        auto& r = ra.rows[0];
+        out.action_queued       = (uint32_t)r.GetInt(0);
+        out.action_locked       = (uint32_t)r.GetInt(1);
+        out.action_executing    = (uint32_t)r.GetInt(2);
+        out.action_success_1h   = (uint32_t)r.GetInt(3);
+        out.action_failure_1h   = (uint32_t)r.GetInt(4);
+        out.action_timeout_1h   = (uint32_t)r.GetInt(5);
+        out.action_stale_locked = (uint32_t)r.GetInt(6);
+    }
+
+    /* Hardware actions (pending vs dispatched) ------------------------- */
+    auto rh = pool.Query(
+        "IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'hardware_actions') "
+        "  SELECT "
+        "    SUM(CASE WHEN status = 'pending'    THEN 1 ELSE 0 END), "
+        "    SUM(CASE WHEN status = 'dispatched' THEN 1 ELSE 0 END) "
+        "  FROM ElleCore.dbo.hardware_actions;");
+    if (rh.success && !rh.rows.empty()) {
+        out.hardware_pending    = (uint32_t)rh.rows[0].GetInt(0);
+        out.hardware_dispatched = (uint32_t)rh.rows[0].GetInt(1);
+    }
+
+    return true;
+}
+
 /* ---------------------------------------------------------------------------
  * SCHEMA NOTE (Feb 2026):
  *   The live ElleCore database uses snake_case / lowercase tables created by

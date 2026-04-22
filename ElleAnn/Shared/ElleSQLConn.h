@@ -146,11 +146,37 @@ namespace ElleDB {
     bool SubmitIntent(const ELLE_INTENT_RECORD& intent);
     bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount = 10);
     bool UpdateIntentStatus(uint64_t intentId, ELLE_INTENT_STATUS status, const std::string& response = "");
+    /* Timeout reaper — re-queue intents stuck in PROCESSING past their
+     * TimeoutMs. Returns how many rows were reaped. Rows whose retry_count
+     * exceeds max_retries are marked FAILED instead.                       */
+    uint32_t ReapStaleIntents(uint32_t defaultTimeoutMs = 120000, uint32_t maxRetries = 3);
 
     /* Action Queue */
     bool SubmitAction(const ELLE_ACTION_RECORD& action);
     bool GetPendingActions(std::vector<ELLE_ACTION_RECORD>& out, uint32_t maxCount = 10);
     bool UpdateActionStatus(uint64_t actionId, ELLE_ACTION_STATUS status, const std::string& result = "");
+    /* Timeout reaper — re-queue actions stuck in LOCKED/EXECUTING past
+     * their timeout_ms. Rows past max attempts are marked ACTION_TIMEOUT.  */
+    uint32_t ReapStaleActions(uint32_t defaultTimeoutMs = 60000, uint32_t maxAttempts = 3);
+
+    /* Queue diagnostics — cheap COUNT-style reads for /api/diag/queues.    */
+    struct QueueSnapshot {
+        uint32_t intent_pending        = 0;
+        uint32_t intent_processing     = 0;
+        uint32_t intent_completed_1h   = 0;
+        uint32_t intent_failed_1h      = 0;
+        uint32_t intent_stale_processing = 0;
+        uint32_t action_queued         = 0;
+        uint32_t action_locked         = 0;
+        uint32_t action_executing      = 0;
+        uint32_t action_success_1h     = 0;
+        uint32_t action_failure_1h     = 0;
+        uint32_t action_timeout_1h     = 0;
+        uint32_t action_stale_locked   = 0;
+        uint32_t hardware_pending      = 0;
+        uint32_t hardware_dispatched   = 0;
+    };
+    bool GetQueueSnapshot(QueueSnapshot& out);
 
     /* Messages */
     bool StoreMessage(uint64_t convoId, uint32_t role, const std::string& content, 
