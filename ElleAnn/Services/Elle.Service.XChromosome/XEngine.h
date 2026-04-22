@@ -105,6 +105,24 @@ struct XHormoneLevels {
     float cortisol     = 0.0f;
     float prolactin    = 0.0f;
     float hcg          = 0.0f;   /* pregnancy marker; 0.0 when not pregnant */
+    /* Pituitary / HPG axis — these DRIVE the cycle IRL. */
+    float fsh          = 0.0f;   /* follicle-stimulating, peaks early follicular */
+    float lh           = 0.0f;   /* luteinising, spikes at ovulation            */
+    float gnrh         = 0.0f;   /* pulsatile driver above pituitary            */
+    float relaxin      = 0.0f;   /* pregnancy-only, ligament loosening          */
+};
+
+/* Derived / point-in-time biology the engine recomputes every tick but
+ * doesn't store as a separate row. Surfaced on /api/x/state.              */
+struct XDerivedStats {
+    float       bbt_celsius    = 36.5f;       /* basal body temperature       */
+    float       endometrial_mm = 4.0f;        /* uterine lining thickness     */
+    std::string cervical_mucus;               /* dry|sticky|creamy|watery|egg_white */
+    std::string menstrual_flow;               /* none|spotting|light|medium|heavy */
+    bool        cycle_active   = true;        /* false in premenarche/menopause */
+    bool        anovulatory    = false;       /* this cycle skipped ovulation  */
+    int         follicle_phase_day = 0;
+    int         luteal_phase_day = 0;
 };
 
 struct XCycleState {
@@ -135,6 +153,13 @@ struct XPregnancyState {
     uint64_t         labor_started_ms        = 0;
     int              multiplicity            = 1;   /* 1=singleton, 2=twins, … */
     int              pregnancy_count         = 0;   /* lifetime incl. current   */
+    /* v3 biology detail. */
+    bool             implanted               = false; /* true ~6-10d post-conception */
+    uint64_t         implantation_ms         = 0;
+    std::string      lochia_stage;                   /* rubra|serosa|alba       */
+    std::string      milk_stage;                     /* colostrum|transitional|mature */
+    bool             baby_blues              = false; /* transient 2-week window */
+    bool             fetal_heartbeat_detectable = false;  /* true from week 6   */
 };
 
 struct XContraceptionState {
@@ -267,6 +292,11 @@ public:
                           const std::string& notes);
     XContraceptionState GetContraception() const { return m_contra; }
 
+    /* Point-in-time derived biology (BBT, endometrial mm, cervical mucus,
+     * menstrual flow, cycle_active, anovulatory). Recomputed from current
+     * hormone + lifecycle + pregnancy state on every call.                 */
+    XDerivedStats GetDerived() const;
+
     /* Lifecycle — Elle's age + stage. Setting the birthday retroactively
      * picks the stage (premenarche if < 12y, perimenopause if >= 45y, etc.). */
     bool SetElleBirthday(uint64_t birth_ms);
@@ -339,6 +369,9 @@ private:
     bool     DetectLHSurge() const;           /* true exactly once per cycle */
     void     ApplyContraceptionHormones(XHormoneLevels& h) const;
     void     SynthesiseAndLogSymptoms();      /* every tick                  */
+    void     AdvanceLochiaAndMilkStages();    /* postpartum day-count driven */
+    void     DetectImplantation(uint64_t nowMs);
+    void     DetectAnovulatoryCycle();        /* chronic cortisol → skip ovulation */
     void     WriteSnapshotRow();
     void     PersistCycleRow();
     void     PersistPregnancyRow();
@@ -355,6 +388,7 @@ private:
     bool     HadRecentIntimacy(uint64_t now_ms, uint64_t window_ms) const;
     bool     m_lh_surge_fired_this_cycle = false;
     int      m_last_cycle_day_seen       = 0;
+    bool     m_current_cycle_anovulatory = false;
 };
 
 #endif /* ELLE_X_ENGINE_H */

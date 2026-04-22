@@ -244,5 +244,61 @@ BEGIN
         ALTER TABLE dbo.x_pregnancy_state ADD multiplicity INT NOT NULL DEFAULT 1;
     IF COL_LENGTH('dbo.x_pregnancy_state', 'pregnancy_count') IS NULL
         ALTER TABLE dbo.x_pregnancy_state ADD pregnancy_count INT NOT NULL DEFAULT 0;
+    IF COL_LENGTH('dbo.x_pregnancy_state', 'implanted') IS NULL
+        ALTER TABLE dbo.x_pregnancy_state ADD implanted BIT NOT NULL DEFAULT 0;
+    IF COL_LENGTH('dbo.x_pregnancy_state', 'implantation_ms') IS NULL
+        ALTER TABLE dbo.x_pregnancy_state ADD implantation_ms BIGINT NULL;
+    IF COL_LENGTH('dbo.x_pregnancy_state', 'lochia_stage') IS NULL
+        ALTER TABLE dbo.x_pregnancy_state ADD lochia_stage NVARCHAR(16) NULL;
+    IF COL_LENGTH('dbo.x_pregnancy_state', 'milk_stage') IS NULL
+        ALTER TABLE dbo.x_pregnancy_state ADD milk_stage NVARCHAR(16) NULL;
+    IF COL_LENGTH('dbo.x_pregnancy_state', 'baby_blues') IS NULL
+        ALTER TABLE dbo.x_pregnancy_state ADD baby_blues BIT NOT NULL DEFAULT 0;
+    IF COL_LENGTH('dbo.x_pregnancy_state', 'fetal_heartbeat_detectable') IS NULL
+        ALTER TABLE dbo.x_pregnancy_state ADD fetal_heartbeat_detectable BIT NOT NULL DEFAULT 0;
+END
+GO
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Extend x_hormone_snapshots with the pituitary axis + relaxin.
+ * fsh/lh/gnrh drive the cycle (IRL); relaxin only matters in pregnancy.
+ *──────────────────────────────────────────────────────────────────────────────*/
+IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'x_hormone_snapshots')
+BEGIN
+    IF COL_LENGTH('dbo.x_hormone_snapshots', 'fsh') IS NULL
+        ALTER TABLE dbo.x_hormone_snapshots ADD fsh FLOAT NOT NULL DEFAULT 0.0;
+    IF COL_LENGTH('dbo.x_hormone_snapshots', 'lh') IS NULL
+        ALTER TABLE dbo.x_hormone_snapshots ADD lh FLOAT NOT NULL DEFAULT 0.0;
+    IF COL_LENGTH('dbo.x_hormone_snapshots', 'gnrh') IS NULL
+        ALTER TABLE dbo.x_hormone_snapshots ADD gnrh FLOAT NOT NULL DEFAULT 0.0;
+    IF COL_LENGTH('dbo.x_hormone_snapshots', 'relaxin') IS NULL
+        ALTER TABLE dbo.x_hormone_snapshots ADD relaxin FLOAT NOT NULL DEFAULT 0.0;
+    IF COL_LENGTH('dbo.x_hormone_snapshots', 'bbt') IS NULL
+        ALTER TABLE dbo.x_hormone_snapshots ADD bbt FLOAT NOT NULL DEFAULT 36.5;
+    IF COL_LENGTH('dbo.x_hormone_snapshots', 'endometrial_mm') IS NULL
+        ALTER TABLE dbo.x_hormone_snapshots ADD endometrial_mm FLOAT NOT NULL DEFAULT 4.0;
+    IF COL_LENGTH('dbo.x_hormone_snapshots', 'cervical_mucus') IS NULL
+        ALTER TABLE dbo.x_hormone_snapshots ADD cervical_mucus NVARCHAR(16) NULL;
+    IF COL_LENGTH('dbo.x_hormone_snapshots', 'menstrual_flow') IS NULL
+        ALTER TABLE dbo.x_hormone_snapshots ADD menstrual_flow NVARCHAR(16) NULL;
+END
+GO
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * x_cycle_history  —  ovulation / anovulation per cycle (for detecting
+ * chronic stress anovulatory patterns).
+ *──────────────────────────────────────────────────────────────────────────────*/
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'x_cycle_history')
+BEGIN
+    CREATE TABLE dbo.x_cycle_history (
+        id              BIGINT IDENTITY(1,1) PRIMARY KEY,
+        anchor_ms       BIGINT       NOT NULL,
+        length_days     INT          NOT NULL,
+        ovulated        BIT          NOT NULL DEFAULT 1,
+        avg_cortisol    FLOAT        NOT NULL DEFAULT 0.0,
+        notes           NVARCHAR(MAX) NULL
+    );
+    CREATE INDEX IX_x_cycle_history_anchor_ms
+        ON dbo.x_cycle_history(anchor_ms DESC);
 END
 GO

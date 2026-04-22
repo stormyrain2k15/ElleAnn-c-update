@@ -2400,7 +2400,11 @@ private:
             auto hr = ElleSQLPool::Instance().Query(
                 "SELECT TOP 1 taken_ms, estrogen, progesterone, testosterone, "
                 "       oxytocin, serotonin, dopamine, cortisol, prolactin, "
-                "       hcg, pregnancy_day, ISNULL(pregnancy_phase, N'') "
+                "       hcg, pregnancy_day, ISNULL(pregnancy_phase, N''), "
+                "       ISNULL(fsh, 0), ISNULL(lh, 0), ISNULL(gnrh, 0), "
+                "       ISNULL(relaxin, 0), ISNULL(bbt, 36.5), "
+                "       ISNULL(endometrial_mm, 4.0), ISNULL(cervical_mucus, N''), "
+                "       ISNULL(menstrual_flow, N'') "
                 "FROM ElleHeart.dbo.x_hormone_snapshots ORDER BY taken_ms DESC;");
             if (hr.success && !hr.rows.empty()) {
                 auto& h = hr.rows[0];
@@ -2414,7 +2418,17 @@ private:
                     {"dopamine",     h.GetFloat(6)},
                     {"cortisol",     h.GetFloat(7)},
                     {"prolactin",    h.GetFloat(8)},
-                    {"hcg",          h.GetFloat(9)}
+                    {"hcg",          h.GetFloat(9)},
+                    {"fsh",          h.GetFloat(12)},
+                    {"lh",           h.GetFloat(13)},
+                    {"gnrh",         h.GetFloat(14)},
+                    {"relaxin",      h.GetFloat(15)}
+                };
+                out["derived"] = {
+                    {"bbt_celsius",    h.GetFloat(16)},
+                    {"endometrial_mm", h.GetFloat(17)},
+                    {"cervical_mucus", h.values.size() > 18 ? h.values[18] : ""},
+                    {"menstrual_flow", h.values.size() > 19 ? h.values[19] : ""}
                 };
             }
 
