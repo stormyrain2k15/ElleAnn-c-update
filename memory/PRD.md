@@ -206,7 +206,30 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
-## Known Open Items
+## Phase 11 — Mood UI + Dictionary Seed (Feb 2026, this session) ✅
+
+### Android Mood Timeline screen
+- `data/models/ApiModels.kt` — `EmotionHistoryPoint` + `EmotionHistoryResponse`.
+- `data/api/ElleApiService.kt` — `getEmotionHistory(hours, points)` Retrofit call.
+- `data/repository/ElleRepository.kt` — `getEmotionHistory()` wrapper.
+- `ui/screens/server/MoodTimelineScreen.kt` — Compose `Canvas`-drawn triple-line
+  chart (valence/arousal/dominance) with a 1h/6h/24h/7d range selector, legend,
+  and a "Latest" card showing current V/A/D values. Zero extra deps.
+- `ui/navigation/NavRoutes.kt` + `ElleNavHost.kt` — `MoodTimeline` route.
+- `ui/screens/settings/SettingsScreen.kt` — nav row added to Server Management.
+
+### Pre-baked dictionary seed
+- `SQL/gen_dictionary_seed.py` — fetches api.dictionaryapi.dev definitions
+  for the CORE_WORDS list and emits idempotent `INSERT ... WHERE NOT EXISTS`
+  statements.
+- `SQL/dictionary_seed.sql` — generated this session. **2,104 definitions
+  across 183 curated words**, zero misses, 710 KB. Apply AFTER
+  `ElleAnn_MemoryDelta.sql` and Elle has a working vocabulary on first boot
+  — no runtime API roundtrip needed.
+- Re-generatable any time by running the script; the `WHERE NOT EXISTS`
+  guard makes re-applying safe.
+
+### Known Open Items
 
 ### P1 — Verify on user's Windows box
 - Kotlin app must successfully connect over `ws://<ip>:8000/` with handshake
