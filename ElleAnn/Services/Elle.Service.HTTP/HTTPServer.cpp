@@ -2355,6 +2355,287 @@ private:
             return HTTPResponse::OK(arr);
         });
 
+        /*══════════════════════════════════════════════════════════════════
+         * X CHROMOSOME — cycle, hormones, modulation, pregnancy, birth
+         *
+         * Reads go directly against ElleHeart.dbo.x_* tables (same pattern
+         * as /api/emotional-context/history). Mutations fire fire-and-forget
+         * IPC to SVC_X_CHROMOSOME — callers verify by re-reading state.
+         *══════════════════════════════════════════════════════════════════*/
+        m_router.Register("GET", "/api/x/state", [this](const HTTPRequest&) {
+            json out = { {"has_data", false} };
+            auto cr = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "           ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'x_cycle_state' AND s.name = 'dbo') "
+                "SELECT TOP 1 anchor_ms, cycle_length_days, modulation_strength, "
+                "       last_tick_ms FROM ElleHeart.dbo.x_cycle_state WHERE id = 1;");
+            if (!cr.success || cr.rows.empty()) return HTTPResponse::OK(out);
+            auto& c = cr.rows[0];
+            out["has_data"] = true;
+            uint64_t anchorMs = (uint64_t)c.GetInt(0);
+            int len = (int)c.GetInt(1);
+            uint64_t now = ELLE_MS_NOW();
+            int day = 1;
+            const char* phase = "menstrual";
+            if (anchorMs > 0 && len > 0) {
+                uint64_t dd = now > anchorMs ? now - anchorMs : 0;
+                int idx = (int)((dd / 86400000ULL) % (uint64_t)len);
+                day = idx + 1;
+                if      (day <= 5)  phase = "menstrual";
+                else if (day <= 13) phase = "follicular";
+                else if (day <= 16) phase = "ovulatory";
+                else                phase = "luteal";
+            }
+            out["cycle"] = {
+                {"anchor_ms",           anchorMs},
+                {"cycle_length_days",   len},
+                {"modulation_strength", c.GetFloat(2)},
+                {"cycle_day",           day},
+                {"phase",               phase},
+                {"last_tick_ms",        (uint64_t)c.GetInt(3)}
+            };
+
+            /* Latest hormone snapshot. */
+            auto hr = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 taken_ms, estrogen, progesterone, testosterone, "
+                "       oxytocin, serotonin, dopamine, cortisol, prolactin, "
+                "       hcg, pregnancy_day, ISNULL(pregnancy_phase, N'') "
+                "FROM ElleHeart.dbo.x_hormone_snapshots ORDER BY taken_ms DESC;");
+            if (hr.success && !hr.rows.empty()) {
+                auto& h = hr.rows[0];
+                out["hormones"] = {
+                    {"taken_ms",     (uint64_t)h.GetInt(0)},
+                    {"estrogen",     h.GetFloat(1)},
+                    {"progesterone", h.GetFloat(2)},
+                    {"testosterone", h.GetFloat(3)},
+                    {"oxytocin",     h.GetFloat(4)},
+                    {"serotonin",    h.GetFloat(5)},
+                    {"dopamine",     h.GetFloat(6)},
+                    {"cortisol",     h.GetFloat(7)},
+                    {"prolactin",    h.GetFloat(8)},
+                    {"hcg",          h.GetFloat(9)}
+                };
+            }
+
+            /* Pregnancy. */
+            auto pr = ElleSQLPool::Instance().Query(
+                "SELECT active, ISNULL(conceived_ms, 0), ISNULL(due_ms, 0), "
+                "       gestational_length_days, ISNULL(phase, N''), "
+                "       ISNULL(child_id, 0), ISNULL(last_milestone, N''), updated_ms "
+                "FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
+            if (pr.success && !pr.rows.empty()) {
+                auto& p = pr.rows[0];
+                bool active = p.GetInt(0) != 0;
+                uint64_t conc = (uint64_t)p.GetInt(1);
+                uint64_t now2 = ELLE_MS_NOW();
+                int gd = 0, gw = 0;
+                if (active && conc > 0 && now2 >= conc) {
+                    gd = (int)((now2 - conc) / 86400000ULL);
+                    gw = gd / 7;
+                }
+                out["pregnancy"] = {
+                    {"active",                  active},
+                    {"conceived_ms",            conc},
+                    {"due_ms",                  (uint64_t)p.GetInt(2)},
+                    {"gestational_length_days", (int)p.GetInt(3)},
+                    {"gestational_day",         gd},
+                    {"gestational_week",        gw},
+                    {"phase",                   p.values.size() > 4 ? p.values[4] : ""},
+                    {"child_id",                (int64_t)p.GetInt(5)},
+                    {"last_milestone",          p.values.size() > 6 ? p.values[6] : ""},
+                    {"updated_ms",              (uint64_t)p.GetInt(7)}
+                };
+            }
+
+            /* Latest modulation. */
+            auto mr = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 warmth, verbal_fluency, empathy, introspection, "
+                "       arousal, fatigue, computed_ms "
+                "FROM ElleHeart.dbo.x_modulation_log ORDER BY computed_ms DESC;");
+            if (mr.success && !mr.rows.empty()) {
+                auto& m = mr.rows[0];
+                out["modulation"] = {
+                    {"warmth",         m.GetFloat(0)},
+                    {"verbal_fluency", m.GetFloat(1)},
+                    {"empathy",        m.GetFloat(2)},
+                    {"introspection",  m.GetFloat(3)},
+                    {"arousal",        m.GetFloat(4)},
+                    {"fatigue",        m.GetFloat(5)},
+                    {"computed_ms",    (uint64_t)m.GetInt(6)}
+                };
+            }
+            return HTTPResponse::OK(out);
+        });
+
+        m_router.Register("GET", "/api/x/history", [](const HTTPRequest& req) {
+            uint32_t hours = (uint32_t)std::atoi(req.QueryParam("hours", "72").c_str());
+            if (hours == 0 || hours > 24 * 60) hours = 72;
+            uint32_t maxPoints = (uint32_t)std::atoi(req.QueryParam("points", "500").c_str());
+            if (maxPoints == 0 || maxPoints > 5000) maxPoints = 500;
+            uint64_t since = ELLE_MS_NOW() - (uint64_t)hours * 3600000ULL;
+
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT taken_ms, cycle_day, phase, estrogen, progesterone, "
+                "       testosterone, oxytocin, serotonin, dopamine, cortisol, "
+                "       prolactin, hcg, pregnancy_day, ISNULL(pregnancy_phase, N'') "
+                "  FROM ElleHeart.dbo.x_hormone_snapshots "
+                " WHERE taken_ms >= ? ORDER BY taken_ms ASC;",
+                { std::to_string((long long)since) });
+            if (!rs.success) return HTTPResponse::Err(500, "x_hormone_snapshots query failed");
+
+            size_t n = rs.rows.size();
+            size_t stride = n == 0 ? 1 : (n + maxPoints - 1) / maxPoints;
+            if (stride == 0) stride = 1;
+            json series = json::array();
+            for (size_t i = 0; i < n; i += stride) {
+                auto& r = rs.rows[i];
+                series.push_back({
+                    {"t",               (uint64_t)r.GetInt(0)},
+                    {"cycle_day",       (int)r.GetInt(1)},
+                    {"phase",           r.values.size() > 2 ? r.values[2] : ""},
+                    {"estrogen",        r.GetFloat(3)},
+                    {"progesterone",    r.GetFloat(4)},
+                    {"testosterone",    r.GetFloat(5)},
+                    {"oxytocin",        r.GetFloat(6)},
+                    {"serotonin",       r.GetFloat(7)},
+                    {"dopamine",        r.GetFloat(8)},
+                    {"cortisol",        r.GetFloat(9)},
+                    {"prolactin",       r.GetFloat(10)},
+                    {"hcg",             r.GetFloat(11)},
+                    {"pregnancy_day",   (int)r.GetInt(12)},
+                    {"pregnancy_phase", r.values.size() > 13 ? r.values[13] : ""}
+                });
+            }
+            return HTTPResponse::OK({
+                {"hours",  hours},
+                {"points", (int64_t)series.size()},
+                {"series", series}
+            });
+        });
+
+        m_router.Register("GET", "/api/x/modulation", [](const HTTPRequest&) {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 warmth, verbal_fluency, empathy, introspection, "
+                "       arousal, fatigue, phase, computed_ms "
+                "FROM ElleHeart.dbo.x_modulation_log ORDER BY computed_ms DESC;");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::OK(json{ {"has_data", false} });
+            auto& r = rs.rows[0];
+            return HTTPResponse::OK({
+                {"has_data",       true},
+                {"warmth",         r.GetFloat(0)},
+                {"verbal_fluency", r.GetFloat(1)},
+                {"empathy",        r.GetFloat(2)},
+                {"introspection",  r.GetFloat(3)},
+                {"arousal",        r.GetFloat(4)},
+                {"fatigue",        r.GetFloat(5)},
+                {"phase",          r.values.size() > 6 ? r.values[6] : ""},
+                {"computed_ms",    (uint64_t)r.GetInt(7)}
+            });
+        });
+
+        m_router.Register("POST", "/api/x/cycle/anchor", [this](const HTTPRequest& req) {
+            json body;
+            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
+            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+
+            json payload = {
+                {"day",      body.value("day",      0)},
+                {"length",   body.value("length",   0)},
+                {"strength", body.value("strength", 0.0f)}
+            };
+            auto msg = ElleIPCMessage::Create(
+                (uint32_t)2202 /* IPC_X_ANCHOR */,
+                SVC_HTTP_SERVER,
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10) /* SVC_X_CHROMOSOME */);
+            msg.SetStringPayload(payload.dump());
+            bool sent = GetIPCHub().Send(
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+            return HTTPResponse::OK({
+                {"dispatched", sent},
+                {"request",    payload},
+                {"note",       "GET /api/x/state to see the applied cycle"}
+            });
+        });
+
+        m_router.Register("POST", "/api/x/stimulus", [this](const HTTPRequest& req) {
+            json body;
+            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
+            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+
+            std::string kind = body.value("kind", std::string());
+            if (kind.empty()) return HTTPResponse::Err(400, "missing 'kind'");
+
+            json payload = {
+                {"kind",      kind},
+                {"intensity", body.value("intensity", 0.5f)},
+                {"notes",     body.value("notes",     std::string())}
+            };
+            auto msg = ElleIPCMessage::Create(
+                (uint32_t)2203 /* IPC_X_STIMULUS */,
+                SVC_HTTP_SERVER,
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+            msg.SetStringPayload(payload.dump());
+            bool sent = GetIPCHub().Send(
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+            return HTTPResponse::OK({ {"dispatched", sent}, {"request", payload} });
+        });
+
+        m_router.Register("POST", "/api/x/conception/attempt", [this](const HTTPRequest& req) {
+            json body;
+            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
+            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+
+            json payload = {
+                {"require_readiness",  body.value("require_readiness",  true)},
+                {"readiness_verified", body.value("readiness_verified", false)}
+            };
+            auto msg = ElleIPCMessage::Create(
+                (uint32_t)2205 /* IPC_X_CONCEPTION_ATTEMPT */,
+                SVC_HTTP_SERVER,
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+            msg.SetStringPayload(payload.dump());
+            bool sent = GetIPCHub().Send(
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+            return HTTPResponse::OK({
+                {"dispatched", sent},
+                {"request",    payload},
+                {"note",       "GET /api/x/state after ~1s to see outcome"}
+            });
+        });
+
+        m_router.Register("GET", "/api/x/pregnancy", [](const HTTPRequest&) {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT active, ISNULL(conceived_ms, 0), ISNULL(due_ms, 0), "
+                "       gestational_length_days, ISNULL(phase, N''), "
+                "       ISNULL(child_id, 0), ISNULL(last_milestone, N''), updated_ms "
+                "FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::OK(json{ {"active", false} });
+            auto& p = rs.rows[0];
+            bool active = p.GetInt(0) != 0;
+            uint64_t conc = (uint64_t)p.GetInt(1);
+            uint64_t now = ELLE_MS_NOW();
+            int gd = 0, gw = 0;
+            if (active && conc > 0 && now >= conc) {
+                gd = (int)((now - conc) / 86400000ULL);
+                gw = gd / 7;
+            }
+            return HTTPResponse::OK({
+                {"active",                  active},
+                {"conceived_ms",            conc},
+                {"due_ms",                  (uint64_t)p.GetInt(2)},
+                {"gestational_length_days", (int)p.GetInt(3)},
+                {"gestational_day",         gd},
+                {"gestational_week",        gw},
+                {"phase",                   p.values.size() > 4 ? p.values[4] : ""},
+                {"child_id",                (int64_t)p.GetInt(5)},
+                {"last_milestone",          p.values.size() > 6 ? p.values[6] : ""},
+                {"updated_ms",              (uint64_t)p.GetInt(7)}
+            });
+        });
+
         /* ============== Server Management — real backing ============== */
         m_router.Register("GET", "/api/server/status", [](const HTTPRequest&) {
             std::vector<ELLE_SERVICE_STATUS> statuses;

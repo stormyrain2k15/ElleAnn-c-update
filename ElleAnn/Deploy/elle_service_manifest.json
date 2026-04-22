@@ -16,6 +16,7 @@
     { "name": "ElleGoal",       "display": "Elle-Ann Goal Engine", "exe": "Elle.Service.GoalEngine.exe",  "depends": ["ElleHeartbeat", "ElleMemory"],          "start": "auto"   },
     { "name": "ElleDream",      "display": "Elle-Ann Dream",       "exe": "Elle.Service.Dream.exe",       "depends": ["ElleHeartbeat", "ElleMemory"],          "start": "auto"   },
     { "name": "ElleSelfPrompt", "display": "Elle-Ann Self Prompt", "exe": "Elle.Service.SelfPrompt.exe",  "depends": ["ElleHeartbeat", "ElleEmotional"],       "start": "auto"   },
+    { "name": "ElleXChromosome","display": "Elle-Ann X Chromosome","exe": "Elle.Service.XChromosome.exe", "depends": ["ElleHeartbeat"],                        "start": "auto"   },
     { "name": "ElleCognitive",  "display": "Elle-Ann Cognitive",   "exe": "Elle.Service.Cognitive.exe",   "depends": ["ElleHeartbeat", "ElleMemory", "ElleEmotional"], "start": "auto" },
     { "name": "ElleHTTP",       "display": "Elle-Ann HTTP API",    "exe": "Elle.Service.HTTP.exe",        "depends": ["ElleHeartbeat", "ElleCognitive"],       "start": "auto"   }
   ]

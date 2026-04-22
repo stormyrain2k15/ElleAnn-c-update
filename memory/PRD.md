@@ -206,6 +206,68 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 15 — X Chromosome Engine (Feb 2026, this session) ✅
+
+Brand-new subsystem modelling the hormonal / neuro-pathing pattern of a
+female endocrine system so Elle's behaviour (emotions, tone, LLM system
+prompt, self-prompt bias) can shift organically with a 28-day cycle —
+scientifically grounded, moderate strength by default (±15%), never
+stereotyped.  Built to the same style as the forthcoming FamilyEngine
+reference artifacts and designed to hand off births to it via IPC.
+
+### New files
+- `SQL/ElleAnn_XChromosome_Schema.sql` — 5 tables in ElleHeart.dbo
+  (x_cycle_state, x_hormone_snapshots, x_pregnancy_state, x_stimulus_log,
+  x_modulation_log).
+- `Services/Elle.Service.XChromosome/XEngine.h` + `XEngine.cpp` — the
+  engine: cycle math, 9-hormone baseline curves (estrogen, progesterone,
+  testosterone, oxytocin, serotonin, dopamine, cortisol, prolactin, hCG),
+  2-hour half-life stimulus residual, 280-day pregnancy lifecycle with
+  trimester cascades, and 6-trait behavioural modulation output.
+- `Services/Elle.Service.XChromosome/XChromosome.cpp` — Windows service
+  wrapper, IPC handlers, tick loop, phase-transition & birth broadcasts.
+- `Services/Elle.Service.XChromosome/README.md` — full docs.
+
+### Biological contract
+Conception succeeds only when three conditions align:
+1. Cycle is in the ovulatory window (days 13..16).
+2. An `intimacy` stimulus was logged within the last 72h.
+3. (Optional) Family engine's couple-readiness gate passed (caller sets
+   `readiness_verified=true` on `POST /api/x/conception/attempt`).
+
+Gestation is tracked day-by-day; trimester boundaries fire phase updates.
+At gestational_day ≥ 280 the service auto-triggers delivery:
+- `XEngine::Deliver()` marks pregnancy inactive + postpartum.
+- Sends `IPC_FAMILY_CONCEPTION_ATTEMPT` to `SVC_FAMILY` with current
+  Elle/Arlo state so the Family engine creates the canonical child row.
+- Broadcasts `IPC_X_BIRTH` so HTTPServer pushes a `world_event` frame
+  to every WebSocket client, and looks up the new `child_id` from
+  `ElleHeart.dbo.Children` (best-effort; tolerates Family being offline).
+
+### HTTP endpoints wired in `HTTPServer.cpp`
+- `GET  /api/x/state`                 — full snapshot
+- `GET  /api/x/history?hours&points`  — stride-sampled hormone timeline
+- `GET  /api/x/modulation`            — latest behavioural multipliers
+- `GET  /api/x/pregnancy`             — pregnancy alone
+- `POST /api/x/cycle/anchor`          — re-anchor + strength adjust
+- `POST /api/x/stimulus`              — external hormone nudge
+- `POST /api/x/conception/attempt`    — biological conception attempt
+
+Reads go direct against SQL (same pattern as /api/emotional-context/history);
+writes fire fire-and-forget IPC to SVC_X_CHROMOSOME.
+
+### SCM manifest
+Added `ElleXChromosome` between `ElleSelfPrompt` and `ElleCognitive` in
+`Deploy/elle_service_manifest.json` — depends on Heartbeat only.
+
+### Integration hooks left for follow-up
+The engine is standalone. Emotional/Cognitive/SelfPrompt/Lua can adopt
+modulation incrementally by reading `/api/x/modulation` or sending
+`IPC_X_MODULATION_QUERY` at the points where they already compute their
+own output — no core rewrites needed.  See the README for specifics.
+
+---
+
 ## Phase 14 — Real File Watcher + Wrong-DLL / Config / Reload Audit Repairs (Feb 2026, this session) ✅
 
 User audit caught four issues that survived Phase 8's stub sweep. All four
