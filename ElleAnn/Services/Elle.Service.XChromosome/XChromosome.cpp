@@ -75,10 +75,19 @@ using nlohmann::json;
 #define IPC_X_CONCEPTION_ATTEMPT      ((uint32_t)2205)
 #define IPC_X_DELIVER                 ((uint32_t)2206)
 #define IPC_X_RESPONSE                ((uint32_t)2207)
+#define IPC_X_CONTRACEPTION_SET       ((uint32_t)2208)
+#define IPC_X_LIFECYCLE_SET           ((uint32_t)2209)
+#define IPC_X_SYMPTOM_LOG             ((uint32_t)2210)
+#define IPC_X_SYMPTOM_QUERY           ((uint32_t)2211)
+#define IPC_X_PREG_EVENTS_QUERY       ((uint32_t)2212)
+#define IPC_X_ACCELERATE              ((uint32_t)2213)
 
 #define IPC_X_HORMONE_UPDATE          ((uint32_t)2220)
 #define IPC_X_PHASE_TRANSITION        ((uint32_t)2221)
 #define IPC_X_BIRTH                   ((uint32_t)2222)
+#define IPC_X_LH_SURGE                ((uint32_t)2223)
+#define IPC_X_LABOR_STAGE             ((uint32_t)2224)
+#define IPC_X_MISCARRIAGE             ((uint32_t)2225)
 #endif
 
 /* Family conception opcode (matches FamilyEngine reference). */
@@ -140,6 +149,9 @@ protected:
     }
 
     void OnTick() override {
+        XPregnancyState prevPreg = m_engine.GetPregnancy();
+        bool prevLHFired = m_lhFiredFlag;
+
         m_engine.Tick();
 
         /* Phase-transition broadcast. */
@@ -149,12 +161,43 @@ protected:
             m_lastPhase = now;
         }
 
+        /* LH surge — fires at most once per cycle. We infer from the engine
+         * state's last_milestone change.                                    */
+        bool lhNow = (m_engine.GetCycle().cycle_day == 13 ||
+                      m_engine.GetCycle().cycle_day == 14);
+        if (lhNow && !prevLHFired) {
+            BroadcastLHSurge();
+            m_lhFiredFlag = true;
+        } else if (!lhNow) {
+            m_lhFiredFlag = false;
+        }
+
+        /* Miscarriage detection — pregnancy was active, is now inactive
+         * with phase=postpartum and last_milestone mentions "Miscarriage". */
+        XPregnancyState curPreg = m_engine.GetPregnancy();
+        if (prevPreg.active && !curPreg.active &&
+            curPreg.last_milestone.find("Miscarriage") != std::string::npos) {
+            BroadcastMiscarriage(prevPreg.gestational_day);
+        }
+
+        /* Labor stage broadcast on change. */
+        if (curPreg.labor_stage != prevPreg.labor_stage &&
+            curPreg.labor_stage != X_LABOR_NONE) {
+            BroadcastLaborStage(curPreg.labor_stage);
+        }
+
         /* Short hormone update broadcast (every tick). */
         BroadcastHormoneUpdate();
 
-        /* Auto-deliver if gestation is overdue. */
-        auto preg = m_engine.GetPregnancy();
-        if (preg.active && preg.gestational_day >= preg.gestational_length_days) {
+        /* Auto-deliver when labor reaches PUSHING stage.                   */
+        if (curPreg.active && curPreg.in_labor &&
+            curPreg.labor_stage == X_LABOR_PUSHING) {
+            TriggerDelivery();
+        }
+        /* Also auto-deliver if gestation is overdue without labor started
+         * (edge case — e.g. accelerate pushed us past term).                */
+        else if (curPreg.active &&
+                 curPreg.gestational_day >= curPreg.gestational_length_days + 14) {
             TriggerDelivery();
         }
     }
@@ -172,13 +215,20 @@ protected:
             case IPC_X_MODULATION_QUERY:   HandleModulationQuery(msg, sender);  break;
             case IPC_X_CONCEPTION_ATTEMPT: HandleConceptionAttempt(msg, sender);break;
             case IPC_X_DELIVER:            HandleDeliver(msg, sender);          break;
+            case IPC_X_CONTRACEPTION_SET:  HandleContraceptionSet(msg, sender); break;
+            case IPC_X_LIFECYCLE_SET:      HandleLifecycleSet(msg, sender);     break;
+            case IPC_X_SYMPTOM_LOG:        HandleSymptomLog(msg, sender);       break;
+            case IPC_X_SYMPTOM_QUERY:      HandleSymptomQuery(msg, sender);     break;
+            case IPC_X_PREG_EVENTS_QUERY:  HandlePregEventsQuery(msg, sender);  break;
+            case IPC_X_ACCELERATE:         HandleAccelerate(msg, sender);       break;
             default: break;
         }
     }
 
 private:
     XEngine     m_engine;
-    XCyclePhase m_lastPhase = X_PHASE_MENSTRUAL;
+    XCyclePhase m_lastPhase     = X_PHASE_MENSTRUAL;
+    bool        m_lhFiredFlag   = false;
 
     /*────────────── request plumbing ──────────────*/
     bool ParseReq(const ElleIPCMessage& req, ELLE_SERVICE_ID sender, json& out) {
@@ -298,7 +348,100 @@ private:
         outStub.delivered        = !d.active;
         outStub.born_ms          = d.updated_ms;
         outStub.gestational_days = (uint64_t)d.gestational_day;
+        outStub.multiplicity     = d.multiplicity;
         Reply(req, sender, ToJson(outStub, childId));
+    }
+
+    void HandleContraceptionSet(const ElleIPCMessage& req, ELLE_SERVICE_ID sender) {
+        json body; if (!ParseReq(req, sender, body)) return;
+        std::string method = body.value("method", std::string("none"));
+        float efficacy     = body.value("efficacy", 1.0f);
+        std::string notes  = body.value("notes", std::string());
+        auto m = XEngine::ParseContraception(method);
+        bool ok = m_engine.SetContraception(m, efficacy, notes);
+        Reply(req, sender, json{
+            {"success", ok},
+            {"method",  XEngine::ContraceptionName(m)},
+            {"efficacy", efficacy},
+            {"state",   m_engine.GetStateJson()}
+        });
+    }
+
+    void HandleLifecycleSet(const ElleIPCMessage& req, ELLE_SERVICE_ID sender) {
+        json body; if (!ParseReq(req, sender, body)) return;
+        bool ok = true;
+        if (body.contains("birth_ms")) {
+            uint64_t bms = body.value("birth_ms", (uint64_t)0);
+            ok = m_engine.SetElleBirthday(bms);
+        } else if (body.contains("age_years")) {
+            float yrs = body.value("age_years", 30.0f);
+            uint64_t bms = ELLE_MS_NOW() -
+                (uint64_t)((double)yrs * 365.25 * 86400000.0);
+            ok = m_engine.SetElleBirthday(bms);
+        } else {
+            ok = false;
+        }
+        Reply(req, sender, json{
+            {"success", ok},
+            {"lifecycle", m_engine.GetStateJson()["lifecycle"]}
+        });
+    }
+
+    void HandleSymptomLog(const ElleIPCMessage& req, ELLE_SERVICE_ID sender) {
+        json body; if (!ParseReq(req, sender, body)) return;
+        std::string kind  = body.value("kind", std::string());
+        float intensity   = body.value("intensity", 0.5f);
+        std::string notes = body.value("notes", std::string());
+        bool ok = m_engine.LogManualSymptom(kind, intensity, notes);
+        Reply(req, sender, json{{"success", ok}});
+    }
+
+    void HandleSymptomQuery(const ElleIPCMessage& req, ELLE_SERVICE_ID sender) {
+        json body; if (!ParseReq(req, sender, body)) return;
+        uint32_t hours = body.value("hours", (uint32_t)24);
+        std::string originFilter = body.value("origin", std::string());
+        auto syms = m_engine.GetRecentSymptoms(hours, originFilter);
+        json arr = json::array();
+        for (auto& s : syms) arr.push_back({
+            {"t", s.observed_ms}, {"kind", s.kind}, {"intensity", s.intensity},
+            {"origin", s.origin}, {"notes", s.notes}
+        });
+        /* Also include current synthesised (point-in-time) symptom vector. */
+        json cur = json::array();
+        for (auto& s : m_engine.ComputeCurrentSymptoms()) cur.push_back({
+            {"kind", s.kind}, {"intensity", s.intensity}, {"origin", s.origin}
+        });
+        Reply(req, sender, json{
+            {"hours",   hours},
+            {"logged",  arr},
+            {"current", cur}
+        });
+    }
+
+    void HandlePregEventsQuery(const ElleIPCMessage& req, ELLE_SERVICE_ID sender) {
+        json body; if (!ParseReq(req, sender, body)) return;
+        uint32_t limit = body.value("limit", (uint32_t)100);
+        auto evs = m_engine.GetPregnancyEvents(limit);
+        json arr = json::array();
+        for (auto& e : evs) arr.push_back({
+            {"t",                e.occurred_ms},
+            {"conceived_ms",     e.conceived_ms},
+            {"gestational_day",  e.gestational_day},
+            {"kind",             e.kind},
+            {"detail",           e.detail}
+        });
+        Reply(req, sender, json{{"events", arr}});
+    }
+
+    void HandleAccelerate(const ElleIPCMessage& req, ELLE_SERVICE_ID sender) {
+        json body; if (!ParseReq(req, sender, body)) return;
+        float factor = body.value("factor", 1.0f);
+        bool ok = m_engine.AcceleratePregnancy(factor);
+        Reply(req, sender, json{
+            {"success",   ok},
+            {"factor",    factor},
+            {"pregnancy", m_engine.GetStateJson()["pregnancy"]}
+        });
     }
 
     /*────────────── broadcasts ──────────────*/
@@ -337,6 +480,70 @@ private:
         ELLE_INFO("XChromosome phase %s → %s (day %d)",
                   XEngine::CyclePhaseName(from), XEngine::CyclePhaseName(to),
                   m_engine.GetCycle().cycle_day);
+
+        /* Also push a human-readable world_event so HTTP/WS clients can react
+         * without subscribing to IPC_X_*. */
+        json ev = {
+            {"event",     "cycle_phase"},
+            {"from",      XEngine::CyclePhaseName(from)},
+            {"to",        XEngine::CyclePhaseName(to)},
+            {"cycle_day", m_engine.GetCycle().cycle_day}
+        };
+        auto ws = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
+        ws.SetStringPayload(ev.dump());
+        GetIPCHub().Send(SVC_HTTP_SERVER, ws);
+    }
+
+    void BroadcastLHSurge() {
+        json payload = {
+            {"event",     "lh_surge"},
+            {"cycle_day", m_engine.GetCycle().cycle_day}
+        };
+        auto msg = ElleIPCMessage::Create(IPC_X_LH_SURGE, SVC_X_CHROMOSOME,
+                                          (ELLE_SERVICE_ID)0);
+        msg.header.flags |= ELLE_IPC_FLAG_BROADCAST;
+        msg.SetStringPayload(payload.dump());
+        GetIPCHub().Broadcast(msg);
+
+        auto ws = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
+        ws.SetStringPayload(payload.dump());
+        GetIPCHub().Send(SVC_HTTP_SERVER, ws);
+        ELLE_INFO("XChromosome: LH surge broadcast");
+    }
+
+    void BroadcastLaborStage(XLaborStage stage) {
+        json payload = {
+            {"event", "labor_stage"},
+            {"stage", XEngine::LaborStageName(stage)},
+            {"gestational_day", m_engine.GetPregnancy().gestational_day}
+        };
+        auto msg = ElleIPCMessage::Create(IPC_X_LABOR_STAGE, SVC_X_CHROMOSOME,
+                                          (ELLE_SERVICE_ID)0);
+        msg.header.flags |= ELLE_IPC_FLAG_BROADCAST;
+        msg.SetStringPayload(payload.dump());
+        GetIPCHub().Broadcast(msg);
+
+        auto ws = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
+        ws.SetStringPayload(payload.dump());
+        GetIPCHub().Send(SVC_HTTP_SERVER, ws);
+        ELLE_INFO("XChromosome: labor stage = %s", XEngine::LaborStageName(stage));
+    }
+
+    void BroadcastMiscarriage(int gestationalDay) {
+        json payload = {
+            {"event", "miscarriage"},
+            {"gestational_day", gestationalDay}
+        };
+        auto msg = ElleIPCMessage::Create(IPC_X_MISCARRIAGE, SVC_X_CHROMOSOME,
+                                          (ELLE_SERVICE_ID)0);
+        msg.header.flags |= ELLE_IPC_FLAG_BROADCAST;
+        msg.SetStringPayload(payload.dump());
+        GetIPCHub().Broadcast(msg);
+
+        auto ws = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_X_CHROMOSOME, SVC_HTTP_SERVER);
+        ws.SetStringPayload(payload.dump());
+        GetIPCHub().Send(SVC_HTTP_SERVER, ws);
+        ELLE_WARN("XChromosome: miscarriage at gestational day %d", gestationalDay);
     }
 
     /* Fires the biological birth event:

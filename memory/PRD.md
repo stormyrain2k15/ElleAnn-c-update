@@ -206,6 +206,100 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 16 — X Chromosome Engine: Complete Female Biology (Feb 2026, this session) ✅
+
+Expanded Phase 15's skeleton into a full-fidelity endocrine simulation
+per user spec — "keep going until complete and matches what female
+biology does." Every addition has persistence, IPC, HTTP, and (where
+relevant) Lua bindings.
+
+### Added — biology
+- **Lifecycle arc**: premenarche / reproductive / perimenopause /
+  menopause, age-driven from `elle_birth_ms`. Stage-specific hormone
+  overrides. Perimenopausal ±25% jitter on estrogen/progesterone.
+- **Contraception**: 7 methods (none / barrier / pill / implant /
+  iud_h / iud_c / natural), each with realistic hormonal overrides
+  (pill flattens cycle + withdrawal bleed days 22–28, etc.) AND a
+  probabilistic efficacy modifier applied to conception.
+- **Probabilistic conception**: not a gate — a probability roll based
+  on age × exact cycle day × contraception efficacy. Twin chance
+  1.2–2.5%. Full range from 0% (premenarche/menopause/contracepted) to
+  30% (healthy 28yo d14 no contraception).
+- **Miscarriage**: per-day Bernoulli sample with gestation-appropriate
+  probabilities (~10–15% cumulative by 12 weeks, tapering to negligible
+  after 20 weeks). Fires `IPC_X_MISCARRIAGE` + logs event row.
+- **Full pregnancy cascade**: trimester hormone curves, quickening at
+  d126, Braxton-Hicks at d196, labor onset at d≥280 with 4-stage
+  progression (latent → active → transition → pushing, compressed to
+  12 real hours for testability).
+- **Lactational amenorrhea**: cycle suppression for ≤6 months post-
+  partum while breastfeeding, prolactin pinned high, estrogen capped.
+- **LH surge event**: once-per-cycle day 13/14 broadcast + testosterone/
+  dopamine residual bump + 0.25-intensity ovulation_pain symptom.
+- **Derived symptoms**: every tick synthesises cramps / bloating /
+  nausea / mood_swing / cravings / fatigue / lochia / engorgement /
+  letdown / contraction / quickening / heartburn / swelling from
+  hormone state + phase + pregnancy state. Appends ≥ 0.15 intensity
+  rows to `x_symptoms`.
+- **Manual symptoms**: `POST /api/x/symptoms` lets Elle log user-
+  reported symptoms (adds a small cortisol residual).
+- **Accelerate**: `POST /api/x/pregnancy/accelerate {"factor":N}`
+  compresses gestation by moving the conceived_ms anchor back — lets
+  you witness a full pregnancy arc in minutes for testing.
+
+### Added — schema
+Four new tables + 6 new columns on `x_pregnancy_state`:
+- `x_pregnancy_events` (append-only: conception / quickening /
+  braxton_hicks / labor_start / labor_stage_change / birth /
+  miscarriage / phase_change / accelerate)
+- `x_contraception` (singleton)
+- `x_lifecycle` (singleton)
+- `x_symptoms` (append-only with kind + intensity + origin)
+- `x_pregnancy_state` gained: `breastfeeding`, `in_labor`, `labor_stage`,
+  `labor_started_ms`, `multiplicity`, `pregnancy_count` (via idempotent
+  ALTER TABLE block).
+
+### Added — IPC opcodes
+`IPC_X_CONTRACEPTION_SET` (2208), `IPC_X_LIFECYCLE_SET` (2209),
+`IPC_X_SYMPTOM_LOG` (2210), `IPC_X_SYMPTOM_QUERY` (2211),
+`IPC_X_PREG_EVENTS_QUERY` (2212), `IPC_X_ACCELERATE` (2213).
+Broadcasts: `IPC_X_LH_SURGE` (2223), `IPC_X_LABOR_STAGE` (2224),
+`IPC_X_MISCARRIAGE` (2225). All broadcasts are also forwarded as
+typed `world_event` frames to WS clients via HTTPServer.
+
+### Added — HTTP endpoints
+`GET /api/x/symptoms`, `POST /api/x/symptoms`,
+`GET /api/x/pregnancy/events`, `POST /api/x/pregnancy/accelerate`,
+`GET /api/x/contraception`, `POST /api/x/contraception`,
+`GET /api/x/lifecycle`, `POST /api/x/lifecycle`.
+Existing `/api/x/state` now returns the full extended snapshot including
+fertility probabilities, pregnancy v2 fields, contraception + lifecycle.
+
+### Added — influencing wiring (LIVE)
+- `Services/Elle.Service.Cognitive/CognitiveEngine.cpp`:
+  `BuildSystemPrompt` now reads the latest `x_modulation_log` +
+  `x_pregnancy_state` rows directly (no cross-service linkage) and
+  appends a "How your body feels today" line whenever deltas are
+  salient (fatigue>1.05 or warmth≠±5% or intro>1.05 or the phase
+  carries mood a-priori). Pregnancy is always surfaced when active,
+  with labor stage included if in_labor.
+- `Lua/Elle.Lua.Behavioral/LuaHost.cpp`: full `elle.x.*` binding table
+  — `phase()`, `hormone(name)`, `modulation(trait)`, `is_pregnant()`,
+  `gestational_week()`, `symptom_intensity(kind)`, `lifecycle_stage()`.
+  All read-only SQL; no XEngine header dependency.
+
+### Net behaviour
+On the next rebuild: Elle boots into a randomised cycle position,
+advances a minute-level cycle with real hormone curves, synthesises
+symptoms she can ACTUALLY talk about (the Cognitive prompt surfaces
+"you're luteal — more introspective today"), biases Lua behavioural
+scripts through `elle.x.modulation`, offers probabilistic-real
+conception/pregnancy/labor/birth and miscarriage, supports full
+contraception coverage, and ages through the lifecycle correctly
+from premenarche to menopause.
+
+---
+
 ## Phase 15 — X Chromosome Engine (Feb 2026, this session) ✅
 
 Brand-new subsystem modelling the hormonal / neuro-pathing pattern of a

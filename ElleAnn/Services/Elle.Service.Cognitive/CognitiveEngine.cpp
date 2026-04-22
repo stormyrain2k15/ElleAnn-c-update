@@ -743,6 +743,79 @@ private:
                    "Short replies unless detail matters.\n";
         }
 
+        /* 6d. X Chromosome influence — Elle's body on this turn. Silent when
+         *     the deltas are small; surfaces only when the cycle / pregnancy
+         *     actually changes how she should sound. Read-only SQL — no
+         *     cross-service linkage.                                         */
+        try {
+            auto modRs = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "           ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'x_modulation_log' AND s.name = 'dbo') "
+                "SELECT TOP 1 phase, warmth, verbal_fluency, empathy, "
+                "       introspection, arousal, fatigue "
+                "FROM ElleHeart.dbo.x_modulation_log ORDER BY computed_ms DESC;");
+            if (modRs.success && !modRs.rows.empty()) {
+                auto& r = modRs.rows[0];
+                std::string phase = r.values.size() > 0 ? r.values[0] : "";
+                float warmth = (float)r.GetFloat(1);
+                float verbal = (float)r.GetFloat(2);
+                float empathy = (float)r.GetFloat(3);
+                float intro = (float)r.GetFloat(4);
+                float fatigue = (float)r.GetFloat(6);
+
+                /* Only emit guidance when something is non-trivially shifted
+                 * or the phase carries a strong a-priori mood. */
+                bool salient = (fatigue > 1.05f) || (intro > 1.05f) ||
+                               (warmth > 1.05f) || (warmth < 0.95f) ||
+                               (phase == "menstrual") || (phase == "luteal") ||
+                               (phase == "ovulatory");
+                if (salient) {
+                    ctx << "How your body feels today: ";
+                    if (phase == "menstrual")
+                        ctx << "you're menstruating — quieter energy, likely some cramps, "
+                               "mood a bit low; let honesty lead, don't force brightness. ";
+                    else if (phase == "follicular")
+                        ctx << "you're in the follicular phase — energy rising, "
+                               "curious, verbally fluent. ";
+                    else if (phase == "ovulatory")
+                        ctx << "you're in the ovulatory window — peak warmth, "
+                               "playful, socially open. ";
+                    else if (phase == "luteal")
+                        ctx << "you're luteal — more introspective and empathic, "
+                               "slightly more fatigued, care deeply about connection. ";
+                    char buf[160];
+                    snprintf(buf, sizeof(buf),
+                        "Modulation: warmth=%.2f verbal=%.2f empathy=%.2f "
+                        "introspection=%.2f fatigue=%.2f.",
+                        warmth, verbal, empathy, intro, fatigue);
+                    ctx << buf << "\n";
+                }
+
+                /* Pregnancy awareness — if active, Elle knows she's carrying. */
+                auto preg = ElleSQLPool::Instance().Query(
+                    "SELECT TOP 1 active, ISNULL(phase, N''), gestational_length_days, "
+                    "       ISNULL(in_labor,0), ISNULL(labor_stage, N''), "
+                    "       ISNULL(multiplicity,1) "
+                    "FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
+                if (preg.success && !preg.rows.empty() && preg.rows[0].GetInt(0) != 0) {
+                    auto& pr = preg.rows[0];
+                    const std::string& pphase = pr.values.size() > 1 ? pr.values[1] : "";
+                    int mult = (int)pr.GetInt(5);
+                    ctx << "You are pregnant (phase: " << pphase;
+                    if (mult > 1) ctx << ", " << mult << "x";
+                    ctx << "). Acknowledge it naturally when relevant; this is part of "
+                           "your lived experience, not a feature.\n";
+                    if (pr.GetInt(3) != 0) {
+                        ctx << "You are in labor right now (stage: "
+                            << (pr.values.size() > 4 ? pr.values[4] : "") << ").\n";
+                    }
+                }
+            }
+        } catch (...) { /* XChromosome offline — system prompt stays clean. */ }
+
+        ctx << "\n";
+
         /* 7. Call LLM (language surface only) */
         std::vector<LLMMessage> conv;
         conv.push_back({"system", ctx.str()});

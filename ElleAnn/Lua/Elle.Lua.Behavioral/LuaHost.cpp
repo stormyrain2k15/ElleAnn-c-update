@@ -8,6 +8,7 @@
 #include "../../Shared/ElleServiceBase.h"
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
+#include "../../Shared/ElleSQLConn.h"
 
 extern "C" {
 #include <lua.h>
@@ -18,6 +19,7 @@ extern "C" {
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <cstring>
 #include <mutex>
 #include <filesystem>
 
@@ -183,6 +185,142 @@ private:
             return 1;
         });
         lua_setfield(m_L, -2, "time_ms");
+
+        /*──────────────────────────────────────────────────────────────
+         * elle.x.* — X Chromosome engine bindings.
+         *
+         * All reads go direct against ElleHeart.dbo tables (same pattern
+         * as Cognitive's system-prompt hook), so behavioural scripts can
+         * react to cycle phase / hormones / pregnancy without any cross-
+         * service header dependencies.
+         *──────────────────────────────────────────────────────────────*/
+        lua_newtable(m_L);
+
+        /* elle.x.phase() → string */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            auto rs = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "ON s.schema_id = t.schema_id WHERE t.name = 'x_hormone_snapshots' "
+                "AND s.name = 'dbo') "
+                "SELECT TOP 1 phase FROM ElleHeart.dbo.x_hormone_snapshots "
+                "ORDER BY taken_ms DESC;");
+            if (rs.success && !rs.rows.empty() && rs.rows[0].values.size() > 0)
+                lua_pushstring(L, rs.rows[0].values[0].c_str());
+            else
+                lua_pushstring(L, "unknown");
+            return 1;
+        });
+        lua_setfield(m_L, -2, "phase");
+
+        /* elle.x.hormone("estrogen"|"progesterone"|...) → float */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            const char* name = luaL_checkstring(L, 1);
+            int col = -1;
+            if      (!strcmp(name, "estrogen"))     col = 0;
+            else if (!strcmp(name, "progesterone")) col = 1;
+            else if (!strcmp(name, "testosterone")) col = 2;
+            else if (!strcmp(name, "oxytocin"))     col = 3;
+            else if (!strcmp(name, "serotonin"))    col = 4;
+            else if (!strcmp(name, "dopamine"))     col = 5;
+            else if (!strcmp(name, "cortisol"))     col = 6;
+            else if (!strcmp(name, "prolactin"))    col = 7;
+            else if (!strcmp(name, "hcg"))          col = 8;
+            if (col < 0) { lua_pushnumber(L, 0.0); return 1; }
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 estrogen, progesterone, testosterone, oxytocin, "
+                "       serotonin, dopamine, cortisol, prolactin, hcg "
+                "FROM ElleHeart.dbo.x_hormone_snapshots ORDER BY taken_ms DESC;");
+            if (rs.success && !rs.rows.empty())
+                lua_pushnumber(L, rs.rows[0].GetFloat(col));
+            else
+                lua_pushnumber(L, 0.0);
+            return 1;
+        });
+        lua_setfield(m_L, -2, "hormone");
+
+        /* elle.x.modulation("warmth"|"verbal"|"empathy"|
+         *                   "introspection"|"arousal"|"fatigue") → float */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            const char* trait = luaL_checkstring(L, 1);
+            int col = -1;
+            if      (!strcmp(trait, "warmth"))        col = 0;
+            else if (!strcmp(trait, "verbal") ||
+                     !strcmp(trait, "verbal_fluency")) col = 1;
+            else if (!strcmp(trait, "empathy"))       col = 2;
+            else if (!strcmp(trait, "introspection")) col = 3;
+            else if (!strcmp(trait, "arousal"))       col = 4;
+            else if (!strcmp(trait, "fatigue"))       col = 5;
+            if (col < 0) { lua_pushnumber(L, 1.0); return 1; }
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 warmth, verbal_fluency, empathy, introspection, "
+                "       arousal, fatigue "
+                "FROM ElleHeart.dbo.x_modulation_log ORDER BY computed_ms DESC;");
+            if (rs.success && !rs.rows.empty())
+                lua_pushnumber(L, rs.rows[0].GetFloat(col));
+            else
+                lua_pushnumber(L, 1.0);
+            return 1;
+        });
+        lua_setfield(m_L, -2, "modulation");
+
+        /* elle.x.is_pregnant() → bool */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT active FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
+            bool a = false;
+            if (rs.success && !rs.rows.empty()) a = rs.rows[0].GetInt(0) != 0;
+            lua_pushboolean(L, a ? 1 : 0);
+            return 1;
+        });
+        lua_setfield(m_L, -2, "is_pregnant");
+
+        /* elle.x.gestational_week() → int */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT active, ISNULL(conceived_ms, 0) "
+                "FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
+            int wk = 0;
+            if (rs.success && !rs.rows.empty() && rs.rows[0].GetInt(0) != 0) {
+                uint64_t conc = (uint64_t)rs.rows[0].GetInt(1);
+                uint64_t now = ELLE_MS_NOW();
+                if (conc > 0 && now >= conc)
+                    wk = (int)((now - conc) / (7ULL * 86400000ULL));
+            }
+            lua_pushinteger(L, wk);
+            return 1;
+        });
+        lua_setfield(m_L, -2, "gestational_week");
+
+        /* elle.x.symptom_intensity("cramps"|...) → float in last 2h */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            const char* kind = luaL_checkstring(L, 1);
+            uint64_t since = ELLE_MS_NOW() - 2ULL * 3600000ULL;
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT TOP 1 intensity FROM ElleHeart.dbo.x_symptoms "
+                " WHERE kind = ? AND observed_ms >= ? "
+                " ORDER BY observed_ms DESC;",
+                { std::string(kind), std::to_string((long long)since) });
+            if (rs.success && !rs.rows.empty())
+                lua_pushnumber(L, rs.rows[0].GetFloat(0));
+            else
+                lua_pushnumber(L, 0.0);
+            return 1;
+        });
+        lua_setfield(m_L, -2, "symptom_intensity");
+
+        /* elle.x.lifecycle_stage() → string */
+        lua_pushcfunction(m_L, [](lua_State* L) -> int {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT stage FROM ElleHeart.dbo.x_lifecycle WHERE id = 1;");
+            if (rs.success && !rs.rows.empty() && rs.rows[0].values.size() > 0)
+                lua_pushstring(L, rs.rows[0].values[0].c_str());
+            else
+                lua_pushstring(L, "reproductive");
+            return 1;
+        });
+        lua_setfield(m_L, -2, "lifecycle_stage");
+
+        lua_setfield(m_L, -2, "x");
 
         lua_setglobal(m_L, "elle");
     }

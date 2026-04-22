@@ -2609,7 +2609,10 @@ private:
             auto rs = ElleSQLPool::Instance().Query(
                 "SELECT active, ISNULL(conceived_ms, 0), ISNULL(due_ms, 0), "
                 "       gestational_length_days, ISNULL(phase, N''), "
-                "       ISNULL(child_id, 0), ISNULL(last_milestone, N''), updated_ms "
+                "       ISNULL(child_id, 0), ISNULL(last_milestone, N''), updated_ms, "
+                "       ISNULL(breastfeeding,0), ISNULL(in_labor,0), "
+                "       ISNULL(labor_stage, N''), ISNULL(labor_started_ms, 0), "
+                "       ISNULL(multiplicity, 1), ISNULL(pregnancy_count, 0) "
                 "FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
             if (!rs.success || rs.rows.empty())
                 return HTTPResponse::OK(json{ {"active", false} });
@@ -2632,7 +2635,192 @@ private:
                 {"phase",                   p.values.size() > 4 ? p.values[4] : ""},
                 {"child_id",                (int64_t)p.GetInt(5)},
                 {"last_milestone",          p.values.size() > 6 ? p.values[6] : ""},
-                {"updated_ms",              (uint64_t)p.GetInt(7)}
+                {"updated_ms",              (uint64_t)p.GetInt(7)},
+                {"breastfeeding",           p.GetInt(8) != 0},
+                {"in_labor",                p.GetInt(9) != 0},
+                {"labor_stage",             p.values.size() > 10 ? p.values[10] : ""},
+                {"labor_started_ms",        (uint64_t)p.GetInt(11)},
+                {"multiplicity",            (int)p.GetInt(12)},
+                {"pregnancy_count",         (int)p.GetInt(13)}
+            });
+        });
+
+        m_router.Register("GET", "/api/x/symptoms", [](const HTTPRequest& req) {
+            uint32_t hours = (uint32_t)std::atoi(req.QueryParam("hours", "24").c_str());
+            if (hours == 0 || hours > 24 * 90) hours = 24;
+            std::string origin = req.QueryParam("origin", "");
+            std::string q =
+                "SELECT observed_ms, kind, intensity, origin, ISNULL(notes, N'') "
+                "  FROM ElleHeart.dbo.x_symptoms "
+                " WHERE observed_ms >= ? ";
+            std::vector<std::string> params = {
+                std::to_string((long long)(ELLE_MS_NOW() - (uint64_t)hours * 3600000ULL))
+            };
+            if (!origin.empty()) { q += "   AND origin = ? "; params.push_back(origin); }
+            q += " ORDER BY observed_ms DESC;";
+            auto rs = ElleSQLPool::Instance().QueryParams(q, params);
+            if (!rs.success) return HTTPResponse::Err(500, "x_symptoms query failed");
+            json arr = json::array();
+            for (auto& r : rs.rows) arr.push_back({
+                {"t",         (uint64_t)r.GetInt(0)},
+                {"kind",      r.values.size() > 1 ? r.values[1] : ""},
+                {"intensity", r.GetFloat(2)},
+                {"origin",    r.values.size() > 3 ? r.values[3] : ""},
+                {"notes",     r.values.size() > 4 ? r.values[4] : ""}
+            });
+            return HTTPResponse::OK({
+                {"hours",   hours},
+                {"origin",  origin},
+                {"logged",  arr}
+            });
+        });
+
+        m_router.Register("POST", "/api/x/symptoms", [this](const HTTPRequest& req) {
+            json body;
+            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
+            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json payload = {
+                {"kind",      body.value("kind",      std::string())},
+                {"intensity", body.value("intensity", 0.5f)},
+                {"notes",     body.value("notes",     std::string())}
+            };
+            if (payload["kind"].get<std::string>().empty())
+                return HTTPResponse::Err(400, "missing 'kind'");
+            auto msg = ElleIPCMessage::Create(
+                (uint32_t)2210 /* IPC_X_SYMPTOM_LOG */,
+                SVC_HTTP_SERVER,
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+            msg.SetStringPayload(payload.dump());
+            bool sent = GetIPCHub().Send(
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+            return HTTPResponse::OK({ {"dispatched", sent}, {"request", payload} });
+        });
+
+        m_router.Register("GET", "/api/x/pregnancy/events", [](const HTTPRequest& req) {
+            int limit = std::atoi(req.QueryParam("limit", "100").c_str());
+            if (limit <= 0 || limit > 500) limit = 100;
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP " + std::to_string(limit) + " "
+                "       occurred_ms, ISNULL(conceived_ms,0), gestational_day, kind, "
+                "       ISNULL(detail, N'') "
+                "  FROM ElleHeart.dbo.x_pregnancy_events ORDER BY occurred_ms DESC;");
+            if (!rs.success) return HTTPResponse::Err(500, "x_pregnancy_events query failed");
+            json arr = json::array();
+            for (auto& r : rs.rows) arr.push_back({
+                {"t",                (uint64_t)r.GetInt(0)},
+                {"conceived_ms",     (uint64_t)r.GetInt(1)},
+                {"gestational_day",  (int)r.GetInt(2)},
+                {"kind",             r.values.size() > 3 ? r.values[3] : ""},
+                {"detail",           r.values.size() > 4 ? r.values[4] : ""}
+            });
+            return HTTPResponse::OK({{"events", arr}});
+        });
+
+        m_router.Register("GET", "/api/x/contraception", [](const HTTPRequest&) {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT method, started_ms, efficacy, ISNULL(notes, N''), updated_ms "
+                "  FROM ElleHeart.dbo.x_contraception WHERE id = 1;");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::OK(json{
+                    {"method", "none"}, {"efficacy", 1.0}, {"has_data", false}
+                });
+            auto& r = rs.rows[0];
+            return HTTPResponse::OK({
+                {"has_data",   true},
+                {"method",     r.values.size() > 0 ? r.values[0] : "none"},
+                {"started_ms", (uint64_t)r.GetInt(1)},
+                {"efficacy",   r.GetFloat(2)},
+                {"notes",      r.values.size() > 3 ? r.values[3] : ""},
+                {"updated_ms", (uint64_t)r.GetInt(4)}
+            });
+        });
+
+        m_router.Register("POST", "/api/x/contraception", [this](const HTTPRequest& req) {
+            json body;
+            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
+            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json payload = {
+                {"method",   body.value("method",   std::string("none"))},
+                {"efficacy", body.value("efficacy", 1.0f)},
+                {"notes",    body.value("notes",    std::string())}
+            };
+            auto msg = ElleIPCMessage::Create(
+                (uint32_t)2208 /* IPC_X_CONTRACEPTION_SET */,
+                SVC_HTTP_SERVER,
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+            msg.SetStringPayload(payload.dump());
+            bool sent = GetIPCHub().Send(
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+            return HTTPResponse::OK({
+                {"dispatched", sent},
+                {"request",    payload},
+                {"note",       "GET /api/x/contraception to confirm"}
+            });
+        });
+
+        m_router.Register("GET", "/api/x/lifecycle", [](const HTTPRequest&) {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT elle_birth_ms, stage, ISNULL(menarche_ms,0), "
+                "       ISNULL(perimenopause_ms,0), ISNULL(menopause_ms,0), updated_ms "
+                "  FROM ElleHeart.dbo.x_lifecycle WHERE id = 1;");
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::OK(json{ {"has_data", false} });
+            auto& r = rs.rows[0];
+            uint64_t birth = (uint64_t)r.GetInt(0);
+            float age = 0.0f;
+            if (birth > 0) {
+                uint64_t now = ELLE_MS_NOW();
+                age = (float)((now - birth) / 86400000ULL) / 365.25f;
+            }
+            return HTTPResponse::OK({
+                {"has_data",         true},
+                {"elle_birth_ms",    birth},
+                {"age_years",        age},
+                {"stage",            r.values.size() > 1 ? r.values[1] : "reproductive"},
+                {"menarche_ms",      (uint64_t)r.GetInt(2)},
+                {"perimenopause_ms", (uint64_t)r.GetInt(3)},
+                {"menopause_ms",     (uint64_t)r.GetInt(4)},
+                {"updated_ms",       (uint64_t)r.GetInt(5)}
+            });
+        });
+
+        m_router.Register("POST", "/api/x/lifecycle", [this](const HTTPRequest& req) {
+            json body;
+            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
+            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            if (!body.contains("birth_ms") && !body.contains("age_years"))
+                return HTTPResponse::Err(400, "provide 'birth_ms' or 'age_years'");
+            auto msg = ElleIPCMessage::Create(
+                (uint32_t)2209 /* IPC_X_LIFECYCLE_SET */,
+                SVC_HTTP_SERVER,
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+            msg.SetStringPayload(body.dump());
+            bool sent = GetIPCHub().Send(
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+            return HTTPResponse::OK({
+                {"dispatched", sent},
+                {"request",    body},
+                {"note",       "GET /api/x/lifecycle to confirm"}
+            });
+        });
+
+        m_router.Register("POST", "/api/x/pregnancy/accelerate", [this](const HTTPRequest& req) {
+            json body;
+            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
+            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            float factor = body.value("factor", 1.0f);
+            json payload = {{"factor", factor}};
+            auto msg = ElleIPCMessage::Create(
+                (uint32_t)2213 /* IPC_X_ACCELERATE */,
+                SVC_HTTP_SERVER,
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10));
+            msg.SetStringPayload(payload.dump());
+            bool sent = GetIPCHub().Send(
+                (ELLE_SERVICE_ID)(ELLE_SERVICE_COUNT + 10), msg);
+            return HTTPResponse::OK({
+                {"dispatched", sent},
+                {"factor",     factor},
+                {"note",       "GET /api/x/pregnancy to see elapsed gestation"}
             });
         });
 
