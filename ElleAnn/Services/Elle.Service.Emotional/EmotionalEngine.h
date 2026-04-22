@@ -140,4 +140,10 @@ private:
 
     uint32_t m_broadcastCounter = 0;
     uint32_t m_broadcastInterval = 10; /* Every 10 ticks */
+
+    /* Crash-safe checkpoint cadence — tick interval × 600 ≈ one minute
+     * given a 100 ms service tick. Adjusts automatically if you change
+     * the service's tick rate. */
+    uint32_t m_checkpointCounter  = 0;
+    uint32_t m_checkpointInterval = 600;
 };

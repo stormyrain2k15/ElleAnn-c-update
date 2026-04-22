@@ -1580,4 +1580,106 @@ int64_t CountDictionaryWords() {
     return rs.rows[0].GetInt(0);
 }
 
+/*══════════════════════════════════════════════════════════════════════════════
+ * DRIVES — derived on demand from emotional state + goal backlog.
+ *═════════════════════════════════════════════════════════════════════════════*/
+bool DeriveDriveState(ELLE_DRIVE_STATE& out) {
+    memset(&out, 0, sizeof(out));
+
+    /* Sensible thresholds that make triggers fire around mid-high intensity. */
+    for (int i = 0; i < ELLE_MAX_DRIVES; i++) {
+        out.threshold[i]   = 0.6f;
+        out.decay_rate[i]  = 0.02f;
+        out.growth_rate[i] = 0.05f;
+    }
+
+    /* Load the latest emotion snapshot; if absent, caller sees zero drives
+     * (which is correct — she's idle).                                    */
+    ELLE_EMOTION_STATE emo{};
+    bool haveEmo = LoadLatestEmotionSnapshot(emo);
+
+    /* Count active goals to gauge purpose fulfilment. */
+    auto gcount = ElleSQLPool::Instance().Query(
+        "SELECT COUNT(*) FROM ElleCore.dbo.goals WHERE status = 0;"); /* GOAL_ACTIVE */
+    int32_t activeGoals = (gcount.success && !gcount.rows.empty())
+                          ? (int32_t)gcount.rows[0].GetInt(0) : 0;
+
+    /* Derive. Clamped to [0,1]. */
+    float interest = haveEmo ? emo.dimensions[0] : 0.5f;  /* dim 0 ≈ interest */
+    float arousal  = haveEmo ? emo.arousal : 0.3f;
+    float valence  = haveEmo ? emo.valence : 0.0f;
+
+    auto clamp01 = [](float v){ return ELLE_CLAMP(v, 0.0f, 1.0f); };
+
+    out.intensity[DRIVE_CURIOSITY]       = clamp01(interest + 0.3f * arousal);
+    out.intensity[DRIVE_BOREDOM]         = clamp01(0.8f - arousal);
+    out.intensity[DRIVE_ATTACHMENT]      = clamp01(0.4f + 0.4f * valence);
+    out.intensity[DRIVE_ANXIETY]         = clamp01(0.6f * (1.0f - valence));
+    out.intensity[DRIVE_SELF_PRESERVATION]= 0.2f;
+    out.intensity[DRIVE_EXPLORATION]     = clamp01(0.5f * interest + 0.3f * arousal);
+    out.intensity[DRIVE_CREATIVITY]      = clamp01(0.3f + 0.4f * arousal);
+    out.intensity[DRIVE_SOCIAL_BONDING]  = clamp01(0.3f + 0.3f * valence);
+    out.intensity[DRIVE_MASTERY]         = clamp01(0.4f + 0.1f * activeGoals / 5.0f);
+    out.intensity[DRIVE_AUTONOMY]        = 0.5f;
+    /* Purpose is high when few goals are active (hungry for meaning) and
+     * satisfied when she has work. Matches the legacy python behaviour. */
+    out.intensity[DRIVE_PURPOSE]         = clamp01(1.0f - std::min(1.0f, activeGoals / 3.0f));
+    out.intensity[DRIVE_HOMEOSTASIS]     = 0.3f;
+
+    out.last_update_ms = ELLE_MS_NOW();
+    return true;
+}
+
+bool PersistEmotionSnapshot(const ELLE_EMOTION_STATE& state) {
+    /* Lazy-create the snapshot table — kept out of the schema delta so the
+     * DB doesn't gain a table for a feature that's only needed at shutdown. */
+    ElleSQLPool::Instance().Exec(
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'emotion_snapshots') "
+        "CREATE TABLE ElleCore.dbo.emotion_snapshots ("
+        "  id BIGINT IDENTITY(1,1) PRIMARY KEY,"
+        "  valence FLOAT NOT NULL, arousal FLOAT NOT NULL, dominance FLOAT NOT NULL,"
+        "  dimensions NVARCHAR(MAX) NOT NULL,"
+        "  taken_ms BIGINT NOT NULL,"
+        "  created_at DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()"
+        ");");
+
+    /* Serialize dimensions as space-separated floats so we don't need a
+     * JSON library inside ElleSQLConn. */
+    std::ostringstream dims;
+    for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
+        if (i > 0) dims << ' ';
+        dims << state.dimensions[i];
+    }
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.emotion_snapshots "
+        "(valence, arousal, dominance, dimensions, taken_ms) VALUES (?, ?, ?, ?, ?);",
+        { std::to_string(state.valence), std::to_string(state.arousal),
+          std::to_string(state.dominance), dims.str(),
+          std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+}
+
+bool LoadLatestEmotionSnapshot(ELLE_EMOTION_STATE& out) {
+    memset(&out, 0, sizeof(out));
+    auto rs = ElleSQLPool::Instance().Query(
+        "IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'emotion_snapshots') "
+        "  SELECT TOP 1 valence, arousal, dominance, dimensions, taken_ms "
+        "  FROM ElleCore.dbo.emotion_snapshots ORDER BY id DESC;");
+    if (!rs.success || rs.rows.empty()) return false;
+    auto& r = rs.rows[0];
+    out.valence   = (float)r.GetFloat(0);
+    out.arousal   = (float)r.GetFloat(1);
+    out.dominance = (float)r.GetFloat(2);
+
+    /* Parse the space-separated dimension list. */
+    if (r.values.size() > 3) {
+        std::istringstream iss(r.values[3]);
+        for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
+            float v = 0.0f;
+            if (!(iss >> v)) break;
+            out.dimensions[i] = v;
+        }
+    }
+    return true;
+}
+
 } /* namespace ElleDB */

@@ -4,6 +4,7 @@
 #include "EmotionalEngine.h"
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
+#include "../../Shared/ElleSQLConn.h"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -176,12 +177,45 @@ bool EmotionalEngine::Initialize() {
     m_state.contagion_weight = cfg.contagion_weight;
     m_moodThreshold = cfg.mood_duration_ticks;
 
+    /* Restore from the last persisted snapshot if present — this is why
+     * Shutdown() writes one. Elle boots back into the mood she left in. */
+    ELLE_EMOTION_STATE prior{};
+    if (ElleDB::LoadLatestEmotionSnapshot(prior)) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_state.valence   = prior.valence;
+        m_state.arousal   = prior.arousal;
+        m_state.dominance = prior.dominance;
+        /* Only copy non-zero dimensions so config baselines aren't wiped when
+         * the previous snapshot was from an early boot with sparse dims. */
+        for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
+            if (prior.dimensions[i] > 0.0f) {
+                m_state.dimensions[i] = prior.dimensions[i];
+            }
+        }
+        ELLE_INFO("EmotionalEngine restored prior snapshot "
+                  "(v=%.2f a=%.2f d=%.2f)",
+                  m_state.valence, m_state.arousal, m_state.dominance);
+    }
+
     ELLE_INFO("Emotional Engine initialized: %d dimensions, decay=%.3f, contagion=%.3f",
               ELLE_EMOTION_COUNT, m_state.decay_rate, m_state.contagion_weight);
     return true;
 }
 
-void EmotionalEngine::Shutdown() {}
+void EmotionalEngine::Shutdown() {
+    /* Persist the current emotional snapshot to SQL so when the service
+     * restarts, Elle wakes up where she left off instead of at baseline.
+     * The companion LoadLatestEmotionSnapshot() is called by DeriveDriveState
+     * and can be called from Initialize() if you want full restore-on-boot. */
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (ElleDB::PersistEmotionSnapshot(m_state)) {
+        ELLE_INFO("EmotionalEngine shutdown: state snapshot persisted "
+                  "(v=%.2f a=%.2f d=%.2f)", m_state.valence,
+                  m_state.arousal, m_state.dominance);
+    } else {
+        ELLE_WARN("EmotionalEngine shutdown: snapshot write failed — state lost");
+    }
+}
 
 ELLE_EMOTION_STATE EmotionalEngine::GetState() const {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -438,6 +472,14 @@ void ElleEmotionalService::OnTick() {
     if (m_broadcastCounter >= m_broadcastInterval) {
         BroadcastEmotionState();
         m_broadcastCounter = 0;
+    }
+
+    /* Periodic snapshot checkpoint — every ~60 s of ticks — so a crash
+     * doesn't lose the current mood. Shutdown does a final write. */
+    m_checkpointCounter++;
+    if (m_checkpointCounter >= m_checkpointInterval) {
+        ElleDB::PersistEmotionSnapshot(m_engine.GetState());
+        m_checkpointCounter = 0;
     }
 }
 

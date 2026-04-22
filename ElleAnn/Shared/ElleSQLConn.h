@@ -378,6 +378,19 @@ namespace ElleDB {
                               const std::string& definition,
                               const std::string& example);
     int64_t CountDictionaryWords();
+
+    /*──────────────────────────────────────────────────────────────────────
+     * Drives — derived from current emotional snapshot + goal backlog.
+     * Consumed by GoalEngine and SelfPrompt which both previously carried
+     * an always-zero m_drives stub. Single source of truth = the live
+     * EmotionalEngine state (via SQL) + a count of active goals.
+     *──────────────────────────────────────────────────────────────────────*/
+    bool DeriveDriveState(ELLE_DRIVE_STATE& out);
+
+    /* Persist the emotional engine's 102-dim state on shutdown so it's
+     * restored on next boot instead of resetting to baseline.             */
+    bool PersistEmotionSnapshot(const ELLE_EMOTION_STATE& state);
+    bool LoadLatestEmotionSnapshot(ELLE_EMOTION_STATE& out);
 }
 
 #endif /* ELLE_SQL_CONN_H */

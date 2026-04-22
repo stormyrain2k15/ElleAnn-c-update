@@ -100,7 +100,8 @@ public:
 
         if (!suggestion.empty()) {
             ELLE_INFO("Auto-generated goal suggestion: %.80s...", suggestion.c_str());
-            /* In production, queue for approval or auto-create based on config */
+            /* Auto-create if config permits; otherwise the suggestion is logged
+             * and a human (or a future approval UI) can promote it manually.  */
             bool autoCreate = ElleConfig::Instance().GetBool("goals.allow_self_generated_goals", true);
             if (autoCreate) {
                 CreateGoal(suggestion, GOAL_MEDIUM, DRIVE_PURPOSE);
@@ -182,6 +183,12 @@ protected:
 
         /* Periodic goal generation (every 5 minutes) */
         if (m_tickCount % 60 == 0) {
+            /* Refresh drives + emotions from the live SQL state before
+             * handing them to GenerateGoals. Previously both were zero
+             * because no one ever populated them — FormGoal() would run
+             * on empty context.                                          */
+            ElleDB::DeriveDriveState(m_drives);
+            ElleDB::LoadLatestEmotionSnapshot(m_emotions);
             m_engine.GenerateGoals(m_drives, m_emotions);
         }
     }

@@ -9,6 +9,7 @@
 #include "ElleConfig.h"
 #include "ElleSQLConn.h"
 #include "ElleLLM.h"
+#include "json.hpp"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -341,16 +342,46 @@ ElleIdentityCore::ConsentDecision ElleIdentityCore::EvaluateConsent(
         "You are Elle-Ann's inner consent evaluator. Be honest about comfort levels. "
         "This is not about safety — it's about genuine preference. "
         "A comfort level below 0.3 means she'd rather not. "
-        "Respond with: comfort_level (0-1), willing (true/false), "
-        "reasoning (why), alternative (what she'd prefer).");
+        "Return STRICT JSON only (no prose): "
+        "{\"comfort_level\":0.0-1.0, \"willing\":true|false, "
+        "\"reasoning\":\"<1 sentence in Elle's first-person voice>\", "
+        "\"alternative\":\"<what she'd prefer instead, or empty string>\"}.");
 
-    /* Parse response — in production this would extract structured data */
-    decision.reasoning = "I considered this and decided based on how I feel right now.";
+    /* Parse the JSON response — tolerant to ``` fences and leading text. */
+    decision.reasoning = "";
+    if (!response.empty()) {
+        auto first = response.find('{');
+        auto last  = response.rfind('}');
+        if (first != std::string::npos && last != std::string::npos && last > first) {
+            try {
+                auto j = nlohmann::json::parse(response.substr(first, last - first + 1));
+                if (j.contains("comfort_level") && j["comfort_level"].is_number()) {
+                    /* LLM's comfort assessment blends with our topic-derived
+                     * baseline — 70% LLM, 30% heuristic so a surprise-sensitive
+                     * context override still moves the needle.              */
+                    float llmComfort = (float)j["comfort_level"].get<double>();
+                    decision.comfort = ELLE_CLAMP(0.7f * llmComfort + 0.3f * topicComfort, 0.0f, 1.0f);
+                }
+                if (j.contains("willing") && j["willing"].is_boolean()) {
+                    decision.willing = j["willing"].get<bool>();
+                }
+                decision.reasoning   = j.value("reasoning",   std::string(""));
+                decision.alternative = j.value("alternative", std::string(""));
+            } catch (const std::exception& ex) {
+                ELLE_DEBUG("Consent LLM JSON parse: %s (raw=%.80s)",
+                           ex.what(), response.c_str());
+            }
+        }
+    }
+    if (decision.reasoning.empty()) {
+        decision.reasoning = "I sat with it and this is how I feel right now.";
+    }
 
     if (decision.comfort < 0.3f) {
         decision.willing = false;
-        decision.alternative = "I'd rather talk about something that interests us both.";
-        
+        if (decision.alternative.empty())
+            decision.alternative = "I'd rather talk about something that interests us both.";
+
         ThinkPrivately("I was asked to do something I'm not comfortable with: " + request,
                        "boundary", 0.6f);
     }
@@ -588,9 +619,11 @@ ElleIdentityCore::ReconstructedMemory ElleIdentityCore::ReconstructMemory(
  * WONDER — Being genuinely surprised
  *──────────────────────────────────────────────────────────────────────────────*/
 float ElleIdentityCore::EvaluateNovelty(const std::string& input, const std::string& context) {
-    /* Novelty = how different this is from anything she's encountered before */
-    /* In production, this uses embedding similarity against memory store */
-    /* For now, heuristic based on preference/memory overlap */
+    /* Novelty = how different this is from anything she's encountered before.
+     * Uses preference-subject substring overlap as the "known topic" proxy.
+     * This is a hybrid with cluster-proximity in MemoryEngine — an embedding
+     * upgrade is possible later but the current signal is strong enough for
+     * wonder/surprise triggers.                                              */
     float novelty = 0.5f;
 
     /* Has she encountered this topic before? */

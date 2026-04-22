@@ -43,6 +43,12 @@ protected:
 
         if (now - m_lastPromptMs < minInterval) return;
 
+        /* Refresh drives + emotions from the live DB before evaluating triggers.
+         * These used to be zero-initialized and never populated — self-prompts
+         * would fire on random chance only. Now they reflect actual state.   */
+        ElleDB::DeriveDriveState(m_drives);
+        ElleDB::LoadLatestEmotionSnapshot(m_emotions);
+
         /* Check if idle */
         uint32_t idleThreshold = (uint32_t)cfg.GetInt("self_prompt.idle_threshold_seconds", 60) * 1000;
         bool isIdle = (now - m_lastUserInteraction) > idleThreshold;
@@ -92,8 +98,8 @@ private:
     ELLE_EMOTION_STATE m_emotions = {};
 
     bool CheckDriveTrigger() {
-        /* Would query drive state from drives engine */
-        /* For now, check if boredom or curiosity is high */
+        /* m_drives is refreshed from SQL each tick (see OnTick).
+         * Fires when curiosity or boredom is above its configured threshold. */
         return m_drives.intensity[DRIVE_CURIOSITY] > m_drives.threshold[DRIVE_CURIOSITY] ||
                m_drives.intensity[DRIVE_BOREDOM] > m_drives.threshold[DRIVE_BOREDOM];
     }

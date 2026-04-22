@@ -59,7 +59,7 @@ protected:
                 ELLE_FATAL("DEAD MAN SWITCH: %s not responding for %llums!",
                            ElleIPC::GetServiceName((ELLE_SERVICE_ID)i), elapsed);
                 m_healthy[i] = false;
-                /* In production: attempt restart via SCM */
+                /* Dead-man switch tripped — initiate real SCM restart. */
                 AttemptRestart((ELLE_SERVICE_ID)i);
             } else if (elapsed > m_timeoutMs && m_healthy[i]) {
                 ELLE_WARN("Service %s heartbeat timeout (%llums)",

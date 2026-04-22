@@ -27,6 +27,7 @@
 #include "../../Shared/ElleLLM.h"
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
+#include "../../Shared/json.hpp"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -225,6 +226,10 @@ private:
     float m_needToBeConsistent = 0.5f;
     float m_needToRest = 0.2f;
 
+    /* LLM-rate-limit clock for CheckOpinionFormation() — prevents a storm of
+     * round-trips on rapid-fire user turns. */
+    uint64_t m_lastOpinionLLMMs = 0;
+
     void CheckAuthenticity() {
         if (m_recentResponses.size() < 3) return;
 
@@ -286,8 +291,8 @@ private:
     }
 
     void CheckOpinionFormation(const std::string& userMessage, const std::string& elleResponse) {
-        /* When Elle encounters something she has feelings about,
-           form or reinforce a preference */
+        /* When Elle encounters something she has feelings about, form or
+         * reinforce a preference in her identity core.                      */
         auto& identity = ElleIdentityCore::Instance();
         float novelty = identity.EvaluateNovelty(userMessage, "");
 
@@ -295,8 +300,48 @@ private:
             identity.ExperienceWonder(userMessage.substr(0, 80), novelty);
         }
 
-        /* Detect topic and form preference based on emotional response */
-        /* In production, use LLM to extract topic and sentiment */
+        /* Extract topic + sentiment via LLM so preference formation reflects
+         * what the exchange was actually ABOUT, not just that one happened.
+         * Rate-limited: one LLM round-trip per tick at most, so this doesn't
+         * run on every single user turn.                                    */
+        uint64_t now = ELLE_MS_NOW();
+        if (now - m_lastOpinionLLMMs < 30000) return;  /* 30s cooldown */
+        m_lastOpinionLLMMs = now;
+
+        std::string prompt =
+            "User said: \"" + userMessage.substr(0, 400) + "\"\n"
+            "Elle replied: \"" + elleResponse.substr(0, 200) + "\"\n\n"
+            "Extract the opinion-worthy topic of this exchange. Return STRICT "
+            "JSON: {\"domain\":\"<one of: people|ideas|activities|places|food|"
+            "art|tech|self|other>\",\"subject\":\"<short noun phrase, <=40 "
+            "chars>\",\"valence\":<-1.0 to 1.0>,\"strength\":<0.0 to 1.0>,"
+            "\"skip\":<true if the exchange doesn't warrant a preference>}. "
+            "No prose outside the JSON.";
+        std::string raw = ElleLLMEngine::Instance().Ask(prompt,
+            "You distill exchanges into preferences. Terse. JSON only.");
+        if (raw.empty()) return;
+        auto first = raw.find('{');
+        auto last  = raw.rfind('}');
+        if (first == std::string::npos || last == std::string::npos || last <= first) return;
+
+        try {
+            auto j = nlohmann::json::parse(raw.substr(first, last - first + 1));
+            if (j.value("skip", false)) return;
+            std::string domain  = j.value("domain",  std::string(""));
+            std::string subject = j.value("subject", std::string(""));
+            float valence       = (float)j.value("valence",  0.0);
+            float strength      = (float)j.value("strength", 0.2);
+            if (domain.empty() || subject.empty()) return;
+
+            /* Strength gates the delta — faint signals barely move the needle;
+             * confident signals reinforce more strongly.                    */
+            float delta = valence * strength;
+            identity.ReinforcePreference(domain, subject, delta);
+            ELLE_DEBUG("Opinion formed: %s/%s val=%.2f str=%.2f",
+                       domain.c_str(), subject.c_str(), valence, strength);
+        } catch (const std::exception& ex) {
+            ELLE_DEBUG("CheckOpinionFormation JSON parse: %s", ex.what());
+        }
     }
 
     void CheckNeeds() {
