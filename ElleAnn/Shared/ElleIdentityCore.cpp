@@ -580,6 +580,11 @@ uint64_t ElleIdentityCore::TimeSinceLastContact() const {
     return ELLE_MS_NOW() - m_feltTime.last_interaction_ms;
 }
 
+ElleFeltTime ElleIdentityCore::GetFeltTime() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_feltTime;
+}
+
 std::string ElleIdentityCore::DescribeTimeFeeling() const {
     uint64_t absence = TimeSinceLastContact();
     float loneliness = m_feltTime.loneliness_accumulator;

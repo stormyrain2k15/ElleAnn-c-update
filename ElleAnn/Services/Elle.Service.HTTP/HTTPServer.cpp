@@ -2104,7 +2104,7 @@ private:
             }
             return HTTPResponse::Err(404, "emotion not found");
         });
-        m_router.Register("PUT", "/api/emotions/dimensions/{name}", [](const HTTPRequest& req) {
+        m_router.Register("PUT", "/api/emotions/dimensions/{name}", [this](const HTTPRequest& req) {
             /* Setting an emotion dimension directly is a write-through to Emotional
              * service via IPC so it can recompute V/A/D + broadcast. */
             std::string name = req.headers.at("x-path-name");
@@ -2331,7 +2331,7 @@ private:
                 {"finished_ms", job.finished_ms}
             });
         });
-        m_router.Register("POST", "/api/video/avatar/upload", [](const HTTPRequest& req) {
+        m_router.Register("POST", "/api/video/avatar/upload", [RequireUserId](const HTTPRequest& req) {
             /* Accept either (a) a file_path already on disk, or (b) base64 image
              * bytes. Base64 path writes the file into cfg avatar_dir so the
              * video generator can pick it up.                                  */
@@ -2753,7 +2753,9 @@ private:
             uint64_t actionId = req.PathLL("id");
             json body = req.BodyJSON();
             std::string result = body.value("result", std::string("done"));
-            uint32_t status = body.value("success", true) ? ACTION_COMPLETED_SUCCESS : ACTION_COMPLETED_FAILURE;
+            ELLE_ACTION_STATUS status = body.value("success", true)
+                                         ? ACTION_COMPLETED_SUCCESS
+                                         : ACTION_COMPLETED_FAILURE;
             bool ok = ElleDB::UpdateActionStatus(actionId, status, result);
             if (!ok) return HTTPResponse::Err(500, "UpdateActionStatus failed");
             return HTTPResponse::OK({{"action_id", actionId}, {"recorded", true}});
@@ -3516,7 +3518,7 @@ private:
                 {"strength", body.value("strength", 0.0f)}
             };
             auto msg = ElleIPCMessage::Create(
-                (uint32_t)2202 /* IPC_X_ANCHOR */,
+                (ELLE_IPC_MSG_TYPE)2202 /* IPC_X_ANCHOR */,
                 SVC_HTTP_SERVER,
                 SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
@@ -3541,7 +3543,7 @@ private:
                 {"notes",     body.value("notes",     std::string())}
             };
             auto msg = ElleIPCMessage::Create(
-                (uint32_t)2203 /* IPC_X_STIMULUS */,
+                (ELLE_IPC_MSG_TYPE)2203 /* IPC_X_STIMULUS */,
                 SVC_HTTP_SERVER,
                 SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
@@ -3558,7 +3560,7 @@ private:
                 {"readiness_verified", body.value("readiness_verified", false)}
             };
             auto msg = ElleIPCMessage::Create(
-                (uint32_t)2205 /* IPC_X_CONCEPTION_ATTEMPT */,
+                (ELLE_IPC_MSG_TYPE)2205 /* IPC_X_CONCEPTION_ATTEMPT */,
                 SVC_HTTP_SERVER,
                 SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
@@ -3845,7 +3847,7 @@ private:
             if (payload["kind"].get<std::string>().empty())
                 return HTTPResponse::Err(400, "missing 'kind'");
             auto msg = ElleIPCMessage::Create(
-                (uint32_t)2210 /* IPC_X_SYMPTOM_LOG */,
+                (ELLE_IPC_MSG_TYPE)2210 /* IPC_X_SYMPTOM_LOG */,
                 SVC_HTTP_SERVER,
                 SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
@@ -3901,7 +3903,7 @@ private:
                 {"notes",    body.value("notes",    std::string())}
             };
             auto msg = ElleIPCMessage::Create(
-                (uint32_t)2208 /* IPC_X_CONTRACEPTION_SET */,
+                (ELLE_IPC_MSG_TYPE)2208 /* IPC_X_CONTRACEPTION_SET */,
                 SVC_HTTP_SERVER,
                 SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
@@ -3945,7 +3947,7 @@ private:
             if (!body.contains("birth_ms") && !body.contains("age_years"))
                 return HTTPResponse::Err(400, "provide 'birth_ms' or 'age_years'");
             auto msg = ElleIPCMessage::Create(
-                (uint32_t)2209 /* IPC_X_LIFECYCLE_SET */,
+                (ELLE_IPC_MSG_TYPE)2209 /* IPC_X_LIFECYCLE_SET */,
                 SVC_HTTP_SERVER,
                 SVC_X_CHROMOSOME);
             msg.SetStringPayload(body.dump());
@@ -3963,7 +3965,7 @@ private:
             float factor = body.value("factor", 1.0f);
             json payload = {{"factor", factor}};
             auto msg = ElleIPCMessage::Create(
-                (uint32_t)2213 /* IPC_X_ACCELERATE */,
+                (ELLE_IPC_MSG_TYPE)2213 /* IPC_X_ACCELERATE */,
                 SVC_HTTP_SERVER,
                 SVC_X_CHROMOSOME);
             msg.SetStringPayload(payload.dump());
@@ -4112,13 +4114,13 @@ private:
             }
             return HTTPResponse::OK({{"backups", arr}});
         });
-        m_router.Register("POST", "/api/server/commit-memory", [](const HTTPRequest&) {
+        m_router.Register("POST", "/api/server/commit-memory", [this](const HTTPRequest&) {
             /* Ask Memory service to consolidate STM → LTM now. */
             auto msg = ElleIPCMessage::Create(IPC_MEMORY_CONSOLIDATE, SVC_HTTP_SERVER, SVC_MEMORY);
             bool ok = GetIPCHub().Send(SVC_MEMORY, msg);
             return HTTPResponse::OK({{"triggered", ok}});
         });
-        m_router.Register("POST", "/api/server/commit-emotional-memory", [](const HTTPRequest&) {
+        m_router.Register("POST", "/api/server/commit-emotional-memory", [this](const HTTPRequest&) {
             auto msg = ElleIPCMessage::Create(IPC_EMOTION_CONSOLIDATE, SVC_HTTP_SERVER, SVC_EMOTIONAL);
             bool ok = GetIPCHub().Send(SVC_EMOTIONAL, msg);
             return HTTPResponse::OK({{"triggered", ok}});

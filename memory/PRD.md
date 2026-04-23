@@ -299,6 +299,52 @@ C2220 warnings-as-errors over the refactored surface area. All fixed:
 
 Next: user re-runs `msbuild ElleAnn/ElleAnn.sln /m /p:Configuration=Release /p:Platform=x64 /v:minimal /clp:ErrorsOnly;Summary` and confirms the 20-error / 14-warning count goes to 0.
 
+### MSBuild /WX dynamic-pass regression sweep — round 2 (Feb 2026)
+After round 1 cleared the Shared project, MSBuild surfaced 46 errors
+across the Services tier (real latent bugs previously masked by early
+build failure). All fixed in 11 files:
+
+- **Header boundary** — `ElleServiceBase::Current()` moved to `public`
+  (was `protected`, blocking `ActionExecutor` from publishing IPC).
+- **Missing symbol** — `ElleIdentityCore::GetFeltTime()` was declared
+  in the header but never defined → LNK2001 in Continuity + InnerLife.
+  Added `{ lock_guard; return m_feltTime; }` consistent with existing
+  accessor conventions in the file.
+- **SQLRow API drift in LuaHost** — 5 call sites of `GetFloat(col)` /
+  `GetInt(col)` migrated to the fail-closed `GetFloatOr(col, default)`
+  / `GetIntOr(col, default)` pair (the last holdouts from the 397-site
+  sweep that missed the Lua bridge).
+- **Enum-strict IPC API** — MSBuild under /WX rejects `uint32_t`→
+  `ELLE_IPC_MSG_TYPE` implicit narrowing. Changed the 20 `IPC_X_*`
+  `#define`s in XChromosome.cpp from `((uint32_t)N)` to
+  `((ELLE_IPC_MSG_TYPE)N)` (fixes 7 sites). Separately replaced
+  `(uint32_t)22NN` casts at 7 HTTPServer IPC call sites with
+  `(ELLE_IPC_MSG_TYPE)22NN`. Same treatment for `UpdateActionStatus`
+  where `uint32_t status` was changed to `ELLE_ACTION_STATUS status`.
+- **Missing `#include`** — `EmotionalEngine.cpp` uses `std::setprecision`
+  → added `<iomanip>`. `Solitude.cpp` uses `std::ostringstream` +
+  `setprecision` → added both headers.
+- **Enum rename follow-up** — `EMOTION_JOY` → `EMO_JOY` in
+  CognitiveEngine.cpp (enum was renamed globally; one site leaked).
+- **Lambda captures** — 4 HTTPServer route-handler lambdas were
+  declared with `[]` but call `GetIPCHub()` / `RequireUserId`. Added
+  `[this]` / `[RequireUserId]` so the member / outer lambda resolves.
+- **Narrowing conversions** — chrono `.count()` (long long) → `mt19937`
+  seed wrapped in `static_cast<std::mt19937::result_type>(...)` in both
+  Solitude.cpp:45 and SelfPrompt.cpp:22. `(float)` cast in
+  MemoryEngine.cpp `v / ELLE_EMOTION_COUNT`.
+- **C++20 `u8string` strictness** — `std::filesystem::path::u8string()`
+  returns `std::u8string` (not `std::string`) in C++20. Three sites in
+  Family.cpp that fed it into `vector<string>` init lists or
+  `json` values were switched to `.string()`.
+- **Bad config reference** — `ServiceConfig::tick_interval_ms` does not
+  exist; SelfPrompt was reading from the wrong config struct. Replaced
+  with `ElleConfig.GetInt("self_prompt.min_interval_seconds", 30)`
+  matching the autonomous-path gate used elsewhere in the same file.
+
+Next: user re-runs MSBuild — expect a clean 0 / 0 or a much smaller
+third wave of latent bugs. No more mass patterns remain in my review.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

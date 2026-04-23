@@ -58,30 +58,33 @@ using nlohmann::json;
 /*──────────────────────────────────────────────────────────────────────────────
  * Provisional IPC opcode ids — the service IDs (SVC_X_CHROMOSOME /
  * SVC_FAMILY) are now proper enum values in Shared/ElleTypes.h, so no
- * cast-past-ELLE_SERVICE_COUNT is needed any more.
+ * cast-past-ELLE_SERVICE_COUNT is needed any more. The X-* opcodes are
+ * cast to ELLE_IPC_MSG_TYPE directly so call sites don't need per-use
+ * static_casts (ElleIPCMessage::Create takes the enum, /WX rejects the
+ * implicit uint32_t → enum conversion).
  *──────────────────────────────────────────────────────────────────────────────*/
 #ifndef IPC_X_STATE_QUERY
-#define IPC_X_STATE_QUERY             ((uint32_t)2200)
-#define IPC_X_HISTORY_QUERY           ((uint32_t)2201)
-#define IPC_X_ANCHOR                  ((uint32_t)2202)
-#define IPC_X_STIMULUS                ((uint32_t)2203)
-#define IPC_X_MODULATION_QUERY        ((uint32_t)2204)
-#define IPC_X_CONCEPTION_ATTEMPT      ((uint32_t)2205)
-#define IPC_X_DELIVER                 ((uint32_t)2206)
-#define IPC_X_RESPONSE                ((uint32_t)2207)
-#define IPC_X_CONTRACEPTION_SET       ((uint32_t)2208)
-#define IPC_X_LIFECYCLE_SET           ((uint32_t)2209)
-#define IPC_X_SYMPTOM_LOG             ((uint32_t)2210)
-#define IPC_X_SYMPTOM_QUERY           ((uint32_t)2211)
-#define IPC_X_PREG_EVENTS_QUERY       ((uint32_t)2212)
-#define IPC_X_ACCELERATE              ((uint32_t)2213)
+#define IPC_X_STATE_QUERY             ((ELLE_IPC_MSG_TYPE)2200)
+#define IPC_X_HISTORY_QUERY           ((ELLE_IPC_MSG_TYPE)2201)
+#define IPC_X_ANCHOR                  ((ELLE_IPC_MSG_TYPE)2202)
+#define IPC_X_STIMULUS                ((ELLE_IPC_MSG_TYPE)2203)
+#define IPC_X_MODULATION_QUERY        ((ELLE_IPC_MSG_TYPE)2204)
+#define IPC_X_CONCEPTION_ATTEMPT      ((ELLE_IPC_MSG_TYPE)2205)
+#define IPC_X_DELIVER                 ((ELLE_IPC_MSG_TYPE)2206)
+#define IPC_X_RESPONSE                ((ELLE_IPC_MSG_TYPE)2207)
+#define IPC_X_CONTRACEPTION_SET       ((ELLE_IPC_MSG_TYPE)2208)
+#define IPC_X_LIFECYCLE_SET           ((ELLE_IPC_MSG_TYPE)2209)
+#define IPC_X_SYMPTOM_LOG             ((ELLE_IPC_MSG_TYPE)2210)
+#define IPC_X_SYMPTOM_QUERY           ((ELLE_IPC_MSG_TYPE)2211)
+#define IPC_X_PREG_EVENTS_QUERY       ((ELLE_IPC_MSG_TYPE)2212)
+#define IPC_X_ACCELERATE              ((ELLE_IPC_MSG_TYPE)2213)
 
-#define IPC_X_HORMONE_UPDATE          ((uint32_t)2220)
-#define IPC_X_PHASE_TRANSITION        ((uint32_t)2221)
-#define IPC_X_BIRTH                   ((uint32_t)2222)
-#define IPC_X_LH_SURGE                ((uint32_t)2223)
-#define IPC_X_LABOR_STAGE             ((uint32_t)2224)
-#define IPC_X_MISCARRIAGE             ((uint32_t)2225)
+#define IPC_X_HORMONE_UPDATE          ((ELLE_IPC_MSG_TYPE)2220)
+#define IPC_X_PHASE_TRANSITION        ((ELLE_IPC_MSG_TYPE)2221)
+#define IPC_X_BIRTH                   ((ELLE_IPC_MSG_TYPE)2222)
+#define IPC_X_LH_SURGE                ((ELLE_IPC_MSG_TYPE)2223)
+#define IPC_X_LABOR_STAGE             ((ELLE_IPC_MSG_TYPE)2224)
+#define IPC_X_MISCARRIAGE             ((ELLE_IPC_MSG_TYPE)2225)
 #endif
 
 /* IPC_FAMILY_CONCEPTION_ATTEMPT is now declared in Shared/ElleTypes.h alongside

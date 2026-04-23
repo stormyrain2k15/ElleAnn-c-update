@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <sstream>
+#include <iomanip>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * EMOTION NAMES

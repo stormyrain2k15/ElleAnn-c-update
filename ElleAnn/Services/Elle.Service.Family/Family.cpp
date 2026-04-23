@@ -365,7 +365,7 @@ private:
         ElleSQLPool::Instance().QueryParams(
             "UPDATE ElleHeart.dbo.family_pregnancies "
             "SET snapshot_path = ? WHERE id = ?;",
-            { zipPath.u8string(), std::to_string(pregId) });
+            { zipPath.string(), std::to_string(pregId) });
         ELLE_INFO("Family: snapshot captured for pregnancy #%lld → %s",
                   (long long)pregId, zipPath.u8string().c_str());
     }
@@ -467,7 +467,7 @@ private:
                  * without this override the child would fall back to the
                  * default Lua\Elle.Lua.Behavioral\scripts path relative to
                  * its CWD and find nothing.                              */
-                {"scripts_directory", (childDir / "scripts").u8string()}
+                {"scripts_directory", (childDir / "scripts").string()}
             }},
             {"services", {
                 {"sql_pipes", {
@@ -532,7 +532,7 @@ private:
             "VALUES (?, ?, ?, ?, ?);",
             { std::to_string(pregId),
               std::to_string(port),
-              childDir.u8string(),
+              childDir.string(),
               "0", /* placeholder — updated to HTTP pid below */
               std::to_string((int64_t)nowMs) });
         int64_t childId = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetIntOr(0, 0) : 0;

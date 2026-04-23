@@ -1149,7 +1149,7 @@ private:
                  *   3) Else fall back to EMOTION_JOY.
                  * Delta defaults to intent.urgency * 0.5f so urgent intents
                  * push harder than casual ones.                            */
-                uint32_t emoId = (uint32_t)EMOTION_JOY;
+                uint32_t emoId = (uint32_t)EMO_JOY;
                 float    delta = intent.urgency * 0.5f;
                 if (delta <= 0.0f) delta = 0.25f;
 

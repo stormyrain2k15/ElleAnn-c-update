@@ -19,7 +19,8 @@ public:
         : ElleServiceBase(SVC_SELF_PROMPT, "ElleSelfPrompt",
                           "Elle-Ann Self-Prompt Engine",
                           "Autonomous thought generation driven by emotions and drives")
-        , m_rng(std::chrono::steady_clock::now().time_since_epoch().count()) {}
+        , m_rng(static_cast<std::mt19937::result_type>(
+                    std::chrono::steady_clock::now().time_since_epoch().count())) {}
 
 protected:
     bool OnStart() override {
@@ -89,7 +90,11 @@ protected:
              * produced a fresh LLM call, draining budget and flooding
              * the chat log.                                            */
             uint64_t now = ELLE_MS_NOW();
-            uint32_t minIntervalMs = ElleConfig::Instance().GetService().tick_interval_ms * 10;
+            /* Reuse the autonomous-path config knob instead of a non-existent
+             * ServiceConfig.tick_interval_ms field — same intent (throttle
+             * external triggers), real config value, no placeholder arithmetic. */
+            uint32_t minIntervalMs = (uint32_t)ElleConfig::Instance().GetInt(
+                                         "self_prompt.min_interval_seconds", 30) * 1000;
             if (now - m_lastPromptMs < minIntervalMs) {
                 ELLE_DEBUG("SelfPrompt: external trigger from %u throttled "
                            "(%llums since last, need %ums)",

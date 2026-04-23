@@ -122,7 +122,7 @@ uint64_t MemoryEngine::StoreSTM(const std::string& content, float importance,
         /* Compute emotional valence from snapshot */
         float v = 0.0f;
         for (int i = 0; i < ELLE_EMOTION_COUNT; i++) v += emotions[i];
-        mem.emotional_valence = v / ELLE_EMOTION_COUNT;
+        mem.emotional_valence = v / (float)ELLE_EMOTION_COUNT;
     }
 
     /* Tags */

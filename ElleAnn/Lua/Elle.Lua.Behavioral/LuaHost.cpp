@@ -341,7 +341,7 @@ private:
                 "       serotonin, dopamine, cortisol, prolactin, hcg "
                 "FROM ElleHeart.dbo.x_hormone_snapshots ORDER BY taken_ms DESC;");
             if (rs.success && !rs.rows.empty())
-                lua_pushnumber(L, rs.rows[0].GetFloat(col));
+                lua_pushnumber(L, rs.rows[0].GetFloatOr(col, 0.0));
             else
                 lua_pushnumber(L, 0.0);
             return 1;
@@ -366,7 +366,7 @@ private:
                 "       arousal, fatigue "
                 "FROM ElleHeart.dbo.x_modulation_log ORDER BY computed_ms DESC;");
             if (rs.success && !rs.rows.empty())
-                lua_pushnumber(L, rs.rows[0].GetFloat(col));
+                lua_pushnumber(L, rs.rows[0].GetFloatOr(col, 1.0));
             else
                 lua_pushnumber(L, 1.0);
             return 1;
@@ -378,7 +378,7 @@ private:
             auto rs = ElleSQLPool::Instance().Query(
                 "SELECT active FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
             bool a = false;
-            if (rs.success && !rs.rows.empty()) a = rs.rows[0].GetInt(0) != 0;
+            if (rs.success && !rs.rows.empty()) a = rs.rows[0].GetIntOr(0, 0) != 0;
             lua_pushboolean(L, a ? 1 : 0);
             return 1;
         });
@@ -390,8 +390,8 @@ private:
                 "SELECT active, ISNULL(conceived_ms, 0) "
                 "FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
             int wk = 0;
-            if (rs.success && !rs.rows.empty() && rs.rows[0].GetInt(0) != 0) {
-                uint64_t conc = (uint64_t)rs.rows[0].GetInt(1);
+            if (rs.success && !rs.rows.empty() && rs.rows[0].GetIntOr(0, 0) != 0) {
+                uint64_t conc = (uint64_t)rs.rows[0].GetIntOr(1, 0);
                 uint64_t now = ELLE_MS_NOW();
                 if (conc > 0 && now >= conc)
                     wk = (int)((now - conc) / (7ULL * 86400000ULL));
@@ -411,7 +411,7 @@ private:
                 " ORDER BY observed_ms DESC;",
                 { std::string(kind), std::to_string((long long)since) });
             if (rs.success && !rs.rows.empty())
-                lua_pushnumber(L, rs.rows[0].GetFloat(0));
+                lua_pushnumber(L, rs.rows[0].GetFloatOr(0, 0.0));
             else
                 lua_pushnumber(L, 0.0);
             return 1;

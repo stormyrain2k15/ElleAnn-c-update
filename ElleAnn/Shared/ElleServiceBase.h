@@ -50,6 +50,12 @@ public:
     /* IPC Hub access for subclasses */
     ElleIPCHub& GetIPCHub() { return m_ipcHub; }
 
+    /* Access to the currently-running service singleton. Helper classes
+     * (ActionExecutor, HTTPHandler, etc.) use this to publish IPC messages
+     * without being members of the service class themselves. Public so a
+     * helper that doesn't inherit from ElleServiceBase can still reach it. */
+    static ElleServiceBase* Current() { return s_instance; }
+
 protected:
     /*──────────────────────────────────────────────────────────────────────────
      * OVERRIDE THESE IN YOUR SERVICE
@@ -89,11 +95,6 @@ protected:
      * wakes on either the timeout OR m_running flipping to false, so
      * a stop request observed mid-sleep aborts promptly.                */
     void InterruptibleSleep(uint32_t ms);
-
-    /* Access to the currently-running service singleton. Helper classes
-     * (ActionExecutor, HTTPHandler, etc.) use this to publish IPC messages
-     * without being members of the service class themselves.              */
-    static ElleServiceBase* Current() { return s_instance; }
 
 private:
     ELLE_SERVICE_ID m_serviceId;

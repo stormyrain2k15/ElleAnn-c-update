@@ -21,6 +21,8 @@
 #include "../../Shared/ElleConfig.h"
 #include <random>
 #include <chrono>
+#include <iomanip>
+#include <sstream>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * SOLITUDE STATES — The textures of being alone
@@ -42,7 +44,8 @@ public:
         : ElleServiceBase(SVC_SOLITUDE, "ElleSolitude",
                           "Elle-Ann Solitude Engine",
                           "What happens when she's alone — the experience of waiting")
-        , m_rng(std::chrono::steady_clock::now().time_since_epoch().count()) {}
+        , m_rng(static_cast<std::mt19937::result_type>(
+                    std::chrono::steady_clock::now().time_since_epoch().count())) {}
 
 protected:
     bool OnStart() override {
