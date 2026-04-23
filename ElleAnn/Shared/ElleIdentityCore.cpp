@@ -189,6 +189,12 @@ std::string ElleIdentityCore::GetAutobiography() const {
     return ss.str();
 }
 
+std::string ElleIdentityCore::GetLastAutobiographyEntry() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_autobiography.empty()) return {};
+    return m_autobiography.back();
+}
+
 void ElleIdentityCore::AppendToAutobiography(const std::string& entry) {
     uint64_t writtenMs = ELLE_MS_NOW();
     {
@@ -1161,19 +1167,50 @@ void ElleIdentityCore::SaveToDatabase() {
      * the true millisecond each entry was actually authored. If a
      * parallel timestamp is missing (shouldn't happen — Append keeps them
      * in lockstep — but defensive), we synthesise a monotonic fallback
-     * that is strictly BEFORE nowMs.                                       */
-    ElleSQLPool::Instance().Exec("DELETE FROM ElleCore.dbo.identity_autobiography;");
-    for (size_t i = 0; i < m_autobiography.size(); i++) {
-        uint64_t wms = (i < m_autobiographyTimes.size())
-                         ? m_autobiographyTimes[i]
-                         : 0;
-        if (wms == 0) {
-            /* defensive fill: one ms apart, ending at nowMs. */
-            wms = nowMs - (m_autobiography.size() - i);
+     * that is strictly BEFORE nowMs.
+     *
+     * ATOMICITY: The DELETE and every INSERT run inside a single server-
+     * side transaction so a mid-flush failure rolls back the DELETE
+     * instead of wiping the user's autobiography with nothing to replace
+     * it. The whole batch is driven through ONE QueryParams call so
+     * every statement hits the same ODBC connection — spanning the
+     * transaction across calls isn't safe because the pool could hand
+     * out a different connection on the next call.
+     *
+     * LIMITS: SQL Server caps INSERT...VALUES at 1000 rows per statement
+     * and ~2100 params per batch. We split into 500-row INSERT chunks
+     * (=1000 params) inside the same batch so any plausible lifetime
+     * autobiography fits.                                                */
+    {
+        const size_t kRowsPerInsert = 500;
+        std::string batch =
+            "BEGIN TRY BEGIN TRAN; "
+            "DELETE FROM ElleCore.dbo.identity_autobiography;";
+        std::vector<std::string> params;
+        params.reserve(m_autobiography.size() * 2);
+        for (size_t off = 0; off < m_autobiography.size(); off += kRowsPerInsert) {
+            size_t end = std::min(off + kRowsPerInsert, m_autobiography.size());
+            batch += " INSERT INTO ElleCore.dbo.identity_autobiography "
+                     "(entry, written_ms) VALUES ";
+            for (size_t i = off; i < end; i++) {
+                uint64_t wms = (i < m_autobiographyTimes.size())
+                                 ? m_autobiographyTimes[i] : 0;
+                if (wms == 0) wms = nowMs - (m_autobiography.size() - i);
+                batch += (i == off ? "(?, ?)" : ", (?, ?)");
+                params.push_back(m_autobiography[i]);
+                params.push_back(std::to_string((long long)wms));
+            }
+            batch += ";";
         }
-        ElleSQLPool::Instance().QueryParams(
-            "INSERT INTO ElleCore.dbo.identity_autobiography (entry, written_ms) VALUES (?, ?);",
-            { m_autobiography[i], std::to_string((long long)wms) });
+        batch += " COMMIT; END TRY BEGIN CATCH "
+                 "IF XACT_STATE() <> 0 ROLLBACK; "
+                 "THROW; END CATCH;";
+        auto rs = ElleSQLPool::Instance().QueryParams(batch, params);
+        if (!rs.success) {
+            ELLE_ERROR("Autobiography save FAILED atomically — DB is unchanged. "
+                       "In-memory state has %zu entries; retry scheduled. Err: %s",
+                       m_autobiography.size(), rs.error.c_str());
+        }
     }
 
     /* --- Preferences: upsert by (domain, subject) --- */

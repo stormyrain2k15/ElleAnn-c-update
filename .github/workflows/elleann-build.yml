@@ -2,15 +2,22 @@
 # Elle-Ann ESI v3.0 — CI Pipeline
 #
 # Runs on every push / PR touching the C++ tree and on manual dispatch.
-# Verifies the entire Visual Studio solution (26 projects) builds clean on
-# a Windows runner with MSVC v143.
+# Enforces the audit bar automatically — not just "does it compile".
 #
 # What it does:
 #   1. Checks out the repo.
 #   2. Sets up MSBuild via microsoft/setup-msbuild.
 #   3. Downloads Lua 5.4.6 source into Lua/lua54 (matches Option A in BUILD_VS.md).
-#   4. Runs MSBuild for both Debug|x64 and Release|x64.
-#   5. Uploads Deploy/Release/x64 as a build artifact so releases are reproducible.
+#   4. Runs MSBuild for both Debug|x64 and Release|x64 honouring
+#      Directory.Build.props (Level4 + TreatWarningAsError).
+#   5. Uploads Deploy/Release/x64 as a build artifact.
+#   6. Runs separate static-hygiene jobs that would otherwise be discovered
+#      by a human reviewer too late:
+#        - .sln ↔ .vcxproj cross-reference + XML well-formedness
+#        - C++ brace/paren balance (string & comment aware)
+#        - PowerShell parser syntax check on all Deploy/*.ps1
+#        - SQL delta idempotency guard (every ALTER/CREATE must be wrapped
+#          in IF NOT EXISTS)
 #
 # What it does NOT do:
 #   - Start SQL Server / ODBC / run the actual services. Those require
@@ -102,7 +109,12 @@ jobs:
           }
 
       # ───────────────────────────────────────────────────────────
-      # Build
+      # Build.
+      #
+      # We DO NOT pass /p:WarningLevel — Directory.Build.props sets
+      # Level4 + TreatWarningAsError for the whole solution and CI must
+      # honour that (a previous revision overrode with WarningLevel=3
+      # which silently lowered the bar on every PR).
       # ───────────────────────────────────────────────────────────
       - name: Build ${{ matrix.configuration }} x64
         shell: pwsh
@@ -112,7 +124,6 @@ jobs:
             /nologo `
             /p:Configuration=${{ matrix.configuration }} `
             /p:Platform=x64 `
-            /p:WarningLevel=3 `
             /v:minimal `
             /clp:ErrorsOnly`;Summary
 
@@ -136,9 +147,7 @@ jobs:
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────────────
-  # Static hygiene check — a minimal-dependency Python pass that verifies
-  # every .vcxproj is well-formed XML and every solution reference resolves.
-  # Catches the "sln references missing vcxproj" class of bugs before MSBuild.
+  # Static hygiene — sln ↔ disk, XML well-formedness.
   # ────────────────────────────────────────────────────────────────────────
   sln-integrity:
     name: Solution ↔ Filesystem Integrity
@@ -180,3 +189,155 @@ jobs:
           print(f'Referenced: {len(referenced)}  On disk: {len(existing)}')
           sys.exit(1 if errs else 0)
           PY
+
+  # ────────────────────────────────────────────────────────────────────────
+  # C++ brace / paren balance — string-and-comment-aware. Catches half-
+  # committed refactors that MSBuild would also catch but much later.
+  # ────────────────────────────────────────────────────────────────────────
+  cpp-balance:
+    name: C++ Brace / Paren Balance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Balance sweep
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          def strip(src):
+              out = []; i = 0; n = len(src)
+              while i < n:
+                  c = src[i]
+                  if c == '"':
+                      i += 1
+                      while i < n and src[i] != '"':
+                          if src[i] == '\\' and i+1 < n: i += 2
+                          else: i += 1
+                      i += 1
+                  elif c == "'":
+                      i += 1
+                      while i < n and src[i] != "'":
+                          if src[i] == '\\' and i+1 < n: i += 2
+                          else: i += 1
+                      i += 1
+                  elif c == '/' and i+1 < n and src[i+1] == '/':
+                      while i < n and src[i] != '\n': i += 1
+                  elif c == '/' and i+1 < n and src[i+1] == '*':
+                      i += 2
+                      while i+1 < n and not (src[i] == '*' and src[i+1] == '/'): i += 1
+                      i += 2
+                  else:
+                      out.append(c); i += 1
+              return ''.join(out)
+          bad = []
+          exts = ('.cpp', '.h', '.hpp', '.cc', '.cxx')
+          skip_dirs = {'Lua/lua54', 'Debug', 'Release', 'x64', '.vs'}
+          # Skip third-party vendored headers that intentionally have
+          # lopsided pre-processor gates (json.hpp with its NLOHMANN_*
+          # macro families). Those are known good.
+          skip_files = {'ElleAnn/Shared/json.hpp'}
+          for dirpath, dirnames, files in os.walk('ElleAnn'):
+              dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+              for fn in files:
+                  if not fn.lower().endswith(exts): continue
+                  p = os.path.join(dirpath, fn)
+                  if p in skip_files: continue
+                  s = strip(open(p, 'r', encoding='utf-8', errors='ignore').read())
+                  if s.count('{') != s.count('}') or s.count('(') != s.count(')'):
+                      bad.append((p, s.count('{'), s.count('}'), s.count('('), s.count(')')))
+          if bad:
+              for p, ob, cb, op, cp in bad:
+                  print(f'::error file={p}::unbalanced: {{ {ob}/{cb} }} ( {op}/{cp} )')
+              sys.exit(1)
+          print(f'Balance OK')
+          PY
+
+  # ────────────────────────────────────────────────────────────────────────
+  # PowerShell syntax — parse every Deploy/*.ps1 with the real PS parser.
+  # Catches typos, missing params, broken string interpolation before an
+  # operator runs the installer.
+  # ────────────────────────────────────────────────────────────────────────
+  powershell-syntax:
+    name: PowerShell Syntax
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse every .ps1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $errs = 0
+          Get-ChildItem -Recurse -Filter *.ps1 -Path ElleAnn/Deploy | ForEach-Object {
+            $file = $_.FullName
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $file, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              foreach ($e in $errors) {
+                Write-Host "::error file=$file,line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              }
+              $script:errs += $errors.Count
+            } else {
+              Write-Host "OK  $file"
+            }
+          }
+          if ($errs -gt 0) { exit 1 }
+
+  # ────────────────────────────────────────────────────────────────────────
+  # SQL delta idempotency — every ALTER/CREATE in SQL/ must sit inside an
+  # `IF NOT EXISTS` (or equivalent) guard so re-applying a delta on a
+  # live database is a no-op. Re-runnability is the contract; this test
+  # pins the contract.
+  #
+  # Granularity: SQL Server scripts are batched on `GO`. A batch is
+  # idempotent if it contains at least one IF NOT EXISTS / IF EXISTS /
+  # IF COL_LENGTH / IF OBJECT_ID guard before its schema statement.
+  # ────────────────────────────────────────────────────────────────────────
+  sql-delta-idempotency:
+    name: SQL Delta Idempotency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit deltas
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          offenders = []
+          # Initial schemas apply once against an empty DB. Deltas must be
+          # re-runnable.
+          initial_schemas = {
+            'ElleAnn_Schema.sql',
+            'ElleAnn_Identity_Schema.sql',
+            'ElleAnn_XChromosome_Schema.sql',
+          }
+          sql_dir = 'ElleAnn/SQL'
+          if not os.path.isdir(sql_dir):
+              print('no SQL dir'); sys.exit(0)
+          guard_rx = re.compile(r'\bIF\s+(NOT\s+)?EXISTS\b|\bIF\s+COL_LENGTH\b|\bIF\s+OBJECT_ID\b',
+                                re.IGNORECASE)
+          schema_rx = re.compile(r'\b(ALTER\s+TABLE|CREATE\s+TABLE|CREATE\s+INDEX|CREATE\s+PROCEDURE|CREATE\s+FUNCTION|CREATE\s+VIEW|ADD\s+CONSTRAINT)\b',
+                                  re.IGNORECASE)
+          for fn in sorted(os.listdir(sql_dir)):
+              if not fn.endswith('.sql'): continue
+              if fn in initial_schemas: continue
+              path = os.path.join(sql_dir, fn)
+              txt = open(path).read()
+              # Split on GO lines — standard SQL Server batch delimiter.
+              batches = re.split(r'^\s*GO\s*$', txt, flags=re.IGNORECASE | re.MULTILINE)
+              line_cursor = 1
+              for batch in batches:
+                  schema_stmt = schema_rx.search(batch)
+                  if schema_stmt:
+                      if not guard_rx.search(batch):
+                          # Compute the real line number.
+                          rel_line = batch.count('\n', 0, schema_stmt.start())
+                          offenders.append(
+                              f'{path}:{line_cursor + rel_line} '
+                              f'{schema_stmt.group(0).upper()} batch has no '
+                              f'IF [NOT] EXISTS / COL_LENGTH / OBJECT_ID guard')
+                  line_cursor += batch.count('\n') + 1   # +1 for the GO
+          if offenders:
+              for o in offenders: print(f'::error::{o}')
+              sys.exit(1)
+          print('All deltas idempotent.')
+          PY
+

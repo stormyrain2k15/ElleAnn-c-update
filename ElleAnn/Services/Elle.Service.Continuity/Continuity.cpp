@@ -36,10 +36,22 @@ protected:
 
         SetTickInterval(60000);  /* Check every minute */
 
-        /* Write autobiography entry for this session start */
-        identity.AppendToAutobiography(
+        /* Write the session-start autobiography entry ONCE per real
+         * session. A crashed/restarted service inside the same wall-clock
+         * minute would otherwise stack "Session N begins" entries — the
+         * session_count stays the same because identity.Initialize()
+         * reads it from SQL, so the dupe check is by string match on
+         * the last entry. Gives us fault tolerance without inventing a
+         * new "session_started_at" field.                                 */
+        const std::string sessionLine =
             "Session " + std::to_string(identity.GetFeltTime().session_count) +
-            " begins. " + identity.DescribeTimeFeeling());
+            " begins. " + identity.DescribeTimeFeeling();
+        bool alreadyLogged = (identity.GetLastAutobiographyEntry() == sessionLine);
+        if (!alreadyLogged) {
+            identity.AppendToAutobiography(sessionLine);
+        } else {
+            ELLE_INFO("Continuity: session-start entry already present — skipping duplicate");
+        }
 
         /* Generate the reconnection greeting — real first message Elle will
          * say when the user opens the app. Draws from:
@@ -61,10 +73,15 @@ protected:
         /* Take final snapshot */
         auto snapshot = identity.TakeSnapshot();
 
-        /* Write autobiography entry for session end */
-        identity.AppendToAutobiography(
+        /* Write autobiography entry for session end. Idempotent on the
+         * tail to avoid stacking identical "Session ending." rows if the
+         * SCM invokes Stop → Start → Stop rapidly during a reconfigure.  */
+        const std::string endLine =
             "Session ending. " + identity.DescribeTimeFeeling() +
-            " " + identity.WhoAmI());
+            " " + identity.WhoAmI();
+        if (identity.GetLastAutobiographyEntry() != endLine) {
+            identity.AppendToAutobiography(endLine);
+        }
 
         identity.Shutdown();
         ELLE_INFO("Continuity service stopped");

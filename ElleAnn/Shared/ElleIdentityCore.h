@@ -155,6 +155,9 @@ public:
      *──────────────────────────────────────────────────────────────────────────*/
     std::string GetAutobiography() const;
     void AppendToAutobiography(const std::string& entry);
+    /* Returns the most recent entry (or empty if none). Used by callers
+     * that need to dedupe a restart-idempotent append against the tail. */
+    std::string GetLastAutobiographyEntry() const;
     std::string GetRecentNarrative(uint32_t days = 7) const;
 
     /* Who am I right now? A dynamic self-description. */
@@ -309,15 +312,13 @@ public:
     void LoadFromDatabase();
     void SaveToDatabase();
 
-    /* Cross-process sync: Bonding, InnerLife, Solitude, Dream, and Continuity
-     * each instantiate their own ElleIdentityCore singleton (one per process).
-     * Without explicit sync those singletons drift — the user was right to
-     * flag this as the biggest architectural issue. RefreshFromDatabase()
-     * reloads persisted state from SQL while preserving the CURRENT
-     * process's in-flight session identity (session_count/session_start_ms)
-     * so periodic calls from Tick() give every process an eventually-
-     * consistent view of the one unified mind. Rate-limited internally
-     * by `min_interval_ms` so every-tick callers don't hammer SQL.       */
+    /* Cold-boot safety net — identity is push-based now. SVC_IDENTITY
+     * broadcasts IPC_IDENTITY_DELTA on every mutation; peers apply in ms.
+     * RefreshFromDatabase() is called ONCE per non-authoritative process
+     * during its first tick so a brand-new process has real state before
+     * the first delta arrives. After that it's a no-op — the idle
+     * polling path it used to drive has been removed everywhere in
+     * Bonding/InnerLife/Solitude/Dream/Continuity.                    */
     void RefreshFromDatabase(uint32_t min_interval_ms = 60000);
 
 #ifdef ELLE_ENABLE_TEST_HOOKS

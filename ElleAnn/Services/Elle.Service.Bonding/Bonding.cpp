@@ -353,7 +353,7 @@ private:
             "  OBJECT_ID(N'ElleHeart.dbo.relationship_state') AND name = 'unresolved_tension') "
             "ALTER TABLE ElleHeart.dbo.relationship_state ADD "
             "  unresolved_tension  BIT     NOT NULL DEFAULT 0, "
-            "  tension_source      NVARCHAR(4000) NOT NULL DEFAULT N'', "
+            "  tension_source      NVARCHAR(MAX) NOT NULL DEFAULT N'', "
             "  repair_motivation   FLOAT   NOT NULL DEFAULT 0.0, "
             "  conflicts_resolved  INT     NOT NULL DEFAULT 0, "
             "  first_repair_ms     BIGINT  NOT NULL DEFAULT 0;");

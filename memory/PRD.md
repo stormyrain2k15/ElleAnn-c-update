@@ -96,6 +96,43 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 - `Continuity::GenerateReconnectionGreeting` refuses to queue a new
   greeting if an unconsumed one less than 2 minutes old already exists —
   a crash-looping service can no longer stack welcome-back messages.
+- `Continuity::OnStart`/`OnStop` now check `GetLastAutobiographyEntry()`
+  before appending the session-start / session-end line. A crash-loop
+  or an SCM reconfigure can no longer stack duplicate autobiography
+  entries. Added `GetLastAutobiographyEntry()` to the identity core
+  header + .cpp.
+
+### P1 — Authoritative Persistence (this session)
+- `ElleIdentityCore::SaveToDatabase` autobiography flush is now ATOMIC.
+  Previously the DELETE + per-row INSERTs were separate pool calls — a
+  dropped ODBC connection between them destroyed the user's real
+  autobiography with nothing to replace it. Now the whole replay is a
+  single `BEGIN TRY / BEGIN TRAN / … / COMMIT / CATCH / ROLLBACK /
+  THROW` batch routed through one `QueryParams` call, chunked at
+  500 rows per INSERT to stay under SQL Server's 2100-parameter batch
+  ceiling. On failure the DB is unchanged and an `ELLE_ERROR` surfaces.
+- `Bonding` tension_source column widened from `NVARCHAR(4000)` →
+  `NVARCHAR(MAX)` to match the in-memory `std::string`. Silent
+  truncation path closed.
+- `ElleIdentityCore::RefreshFromDatabase` header comment rewritten to
+  describe its real role — a one-shot cold-boot safety net for
+  non-authoritative peers, not a polling API. The idle polling it
+  used to drive was already removed from every caller.
+
+### Build/CI — Bar Enforcement (this session)
+- `.github/workflows/elleann-build.yml` hardened:
+  - Removed the `/p:WarningLevel=3` override so CI honours
+    `Directory.Build.props` (Level4 + TreatWarningAsError).
+  - New job `cpp-balance` — string/comment-aware brace & paren balance
+    across the whole C++ tree; vendored `json.hpp` explicitly skipped.
+  - New job `powershell-syntax` — parses every `Deploy/*.ps1` with the
+    real PowerShell parser on `windows-latest`. Syntax regressions are
+    caught before an operator runs the installer.
+  - New job `sql-delta-idempotency` — splits every non-initial SQL
+    file on `GO` boundaries and requires each batch containing a
+    CREATE/ALTER to include an `IF [NOT] EXISTS / COL_LENGTH /
+    OBJECT_ID` guard. Re-runnability is now a contract the bot enforces.
+- All four hygiene jobs verified passing locally against current tree.
 
 ### P1 — XEngine Historical Pregnancy Separation (this session)
 - `Deliver()` now snapshots the completed pregnancy into the new
