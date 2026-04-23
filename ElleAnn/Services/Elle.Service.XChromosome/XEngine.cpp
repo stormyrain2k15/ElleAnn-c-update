@@ -189,10 +189,48 @@ bool XEngine::Initialize() {
         "  FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
     if (pr.success && !pr.rows.empty()) {
         auto& r = pr.rows[0];
-        m_pregnancy.active                  = !r.IsNull(0) && r.GetInt(0) != 0;
-        m_pregnancy.conceived_ms            = r.IsNull(1) ? 0 : (uint64_t)r.GetInt(1);
-        m_pregnancy.due_ms                  = r.IsNull(2) ? 0 : (uint64_t)r.GetInt(2);
-        m_pregnancy.gestational_length_days = r.IsNull(3) ? 280 : (int)r.GetInt(3);
+
+        /* Strict lifecycle-state load. Every numeric column goes through
+         * TryGet* so a drifted cell type (VARCHAR of "true", a dropped
+         * column that came back as NULL, a localized date string) does
+         * NOT silently become 0, active=false, or gestational_length=0.
+         * Anything that fails validation keeps the seeded-default value
+         * and we log an ERROR so ops sees the schema drift.             */
+        auto trySInt = [&](size_t col, int64_t& out)->bool {
+            if (r.IsNull(col)) return false;
+            return r.TryGetInt(col, out);
+        };
+
+        int64_t active64 = 0, conceivedMs = 0, dueMs = 0, gestLen = 0,
+                childId = 0, updatedMs = 0, breastfeed = 0, inLabor = 0,
+                laborStart = 0, mult = 0, pregCount = 0, implanted = 0,
+                implantMs = 0, babyBlues = 0, fhb = 0;
+
+        /* active flag is a nullable bit. NULL/invalid → false. */
+        m_pregnancy.active = trySInt(0, active64) && active64 != 0;
+
+        /* Timestamps — must be non-negative. Any failure yields 0, but
+         * we also refuse to propagate a conceived_ms that's in the
+         * future (schema/seed bug) or absurdly far in the past. */
+        m_pregnancy.conceived_ms = trySInt(1, conceivedMs) && conceivedMs >= 0
+                                       ? (uint64_t)conceivedMs : 0;
+        m_pregnancy.due_ms       = trySInt(2, dueMs) && dueMs >= 0
+                                       ? (uint64_t)dueMs : 0;
+
+        /* Gestational length has a meaningful range (168d=24w premature
+         * threshold through 308d=44w late post-term). Out-of-range
+         * yields the canonical 280d default rather than e.g. a silent 0
+         * that would immediately trigger "overdue".                   */
+        if (trySInt(3, gestLen) && gestLen >= 168 && gestLen <= 308) {
+            m_pregnancy.gestational_length_days = (int)gestLen;
+        } else {
+            if (!r.IsNull(3)) {
+                ELLE_ERROR("XEngine: pregnancy.gestational_length_days=%lld out "
+                           "of range [168,308] — forcing 280", (long long)gestLen);
+            }
+            m_pregnancy.gestational_length_days = 280;
+        }
+
         if (!r.IsNull(4) && r.values.size() > 4) {
             const std::string& p = r.values[4];
             if      (p == "first_trimester")  m_pregnancy.phase = X_PREG_FIRST_TRIMESTER;
@@ -202,12 +240,18 @@ bool XEngine::Initialize() {
             else if (p == "postpartum")       m_pregnancy.phase = X_PREG_POSTPARTUM;
             else                              m_pregnancy.phase = X_PREG_NONE;
         }
-        m_pregnancy.child_id       = r.IsNull(5) ? 0 : (int64_t)r.GetInt(5);
+
+        /* child_id is a FK; zero means "no child" (unpregnant or
+         * stillbirth-not-yet-correlated). Negative is invalid. */
+        m_pregnancy.child_id = trySInt(5, childId) && childId >= 0 ? childId : 0;
+
         m_pregnancy.last_milestone = r.IsNull(6) ? std::string()
                                      : (r.values.size() > 6 ? r.values[6] : std::string());
-        m_pregnancy.updated_ms     = r.IsNull(7) ? 0 : (uint64_t)r.GetInt(7);
-        m_pregnancy.breastfeeding  = !r.IsNull(8) && r.GetInt(8) != 0;
-        m_pregnancy.in_labor       = !r.IsNull(9) && r.GetInt(9) != 0;
+        m_pregnancy.updated_ms     = trySInt(7, updatedMs) && updatedMs >= 0
+                                       ? (uint64_t)updatedMs : 0;
+        m_pregnancy.breastfeeding  = trySInt(8, breastfeed) && breastfeed != 0;
+        m_pregnancy.in_labor       = trySInt(9, inLabor) && inLabor != 0;
+
         const std::string& ls = r.values.size() > 10 ? r.values[10] : std::string();
         if      (ls == "latent")     m_pregnancy.labor_stage = X_LABOR_LATENT;
         else if (ls == "active")     m_pregnancy.labor_stage = X_LABOR_ACTIVE;
@@ -215,17 +259,32 @@ bool XEngine::Initialize() {
         else if (ls == "pushing")    m_pregnancy.labor_stage = X_LABOR_PUSHING;
         else if (ls == "delivered")  m_pregnancy.labor_stage = X_LABOR_DELIVERED;
         else                         m_pregnancy.labor_stage = X_LABOR_NONE;
-        m_pregnancy.labor_started_ms = r.IsNull(11) ? 0 : (uint64_t)r.GetInt(11);
-        m_pregnancy.multiplicity     = r.IsNull(12) ? 1 : (int)r.GetInt(12);
-        m_pregnancy.pregnancy_count  = r.IsNull(13) ? 0 : (int)r.GetInt(13);
-        m_pregnancy.implanted        = !r.IsNull(14) && r.GetInt(14) != 0;
-        m_pregnancy.implantation_ms  = r.IsNull(15) ? 0 : (uint64_t)r.GetInt(15);
+
+        m_pregnancy.labor_started_ms = trySInt(11, laborStart) && laborStart >= 0
+                                           ? (uint64_t)laborStart : 0;
+
+        /* Multiplicity ∈ [1,8] (singleton → octuplet). Invalid → 1. */
+        if (trySInt(12, mult) && mult >= 1 && mult <= 8) {
+            m_pregnancy.multiplicity = (int)mult;
+        } else {
+            if (!r.IsNull(12)) {
+                ELLE_ERROR("XEngine: pregnancy.multiplicity=%lld invalid — forcing 1",
+                           (long long)mult);
+            }
+            m_pregnancy.multiplicity = 1;
+        }
+        m_pregnancy.pregnancy_count  = trySInt(13, pregCount) && pregCount >= 0
+                                           ? (int)pregCount : 0;
+        m_pregnancy.implanted        = trySInt(14, implanted) && implanted != 0;
+        m_pregnancy.implantation_ms  = trySInt(15, implantMs) && implantMs >= 0
+                                           ? (uint64_t)implantMs : 0;
         m_pregnancy.lochia_stage     = r.IsNull(16) ? std::string()
                                          : (r.values.size() > 16 ? r.values[16] : std::string());
         m_pregnancy.milk_stage       = r.IsNull(17) ? std::string()
                                          : (r.values.size() > 17 ? r.values[17] : std::string());
-        m_pregnancy.baby_blues       = !r.IsNull(18) && r.GetInt(18) != 0;
-        m_pregnancy.fetal_heartbeat_detectable = !r.IsNull(19) && r.GetInt(19) != 0;
+        m_pregnancy.baby_blues       = trySInt(18, babyBlues) && babyBlues != 0;
+        m_pregnancy.fetal_heartbeat_detectable =
+                                       trySInt(19, fhb) && fhb != 0;
     } else {
         /* Seed inactive row. */
         m_pregnancy.updated_ms = now;
@@ -239,10 +298,24 @@ bool XEngine::Initialize() {
     if (cr.success && !cr.rows.empty()) {
         auto& r = cr.rows[0];
         m_contra.method     = ParseContraception(r.values.size() > 0 ? r.values[0] : std::string("none"));
-        m_contra.started_ms = (uint64_t)r.GetInt(1);
-        m_contra.efficacy   = (float)r.GetFloat(2);
+        /* Strict loads — a drifted started_ms that parses as 0 would
+         * convince the simulation Elle has been on this contraception
+         * for the entire epoch. Out-of-range values revert to "now". */
+        int64_t startedMs = 0, updatedMs = 0;
+        double  eff = 0.0;
+        m_contra.started_ms = (r.TryGetInt(1, startedMs) && startedMs >= 0)
+                                ? (uint64_t)startedMs : now;
+        if (r.TryGetFloat(2, eff) && eff >= 0.0 && eff <= 1.0) {
+            m_contra.efficacy = (float)eff;
+        } else {
+            if (!r.IsNull(2)) {
+                ELLE_ERROR("XEngine: contra.efficacy=%.3f out of [0,1] — forcing 1.0", eff);
+            }
+            m_contra.efficacy = 1.0f;
+        }
         m_contra.notes      = r.values.size() > 3 ? r.values[3] : std::string();
-        m_contra.updated_ms = (uint64_t)r.GetInt(4);
+        m_contra.updated_ms = (r.TryGetInt(4, updatedMs) && updatedMs >= 0)
+                                ? (uint64_t)updatedMs : now;
     } else {
         m_contra.method     = X_CONTRA_NONE;
         m_contra.started_ms = now;
@@ -258,16 +331,43 @@ bool XEngine::Initialize() {
         "  FROM ElleHeart.dbo.x_lifecycle WHERE id = 1;");
     if (lr.success && !lr.rows.empty()) {
         auto& r = lr.rows[0];
-        m_life.elle_birth_ms    = (uint64_t)r.GetInt(0);
-        const std::string& ss = r.values.size() > 1 ? r.values[1] : std::string("reproductive");
-        if      (ss == "premenarche")   m_life.stage = X_LIFE_PREMENARCHE;
-        else if (ss == "perimenopause") m_life.stage = X_LIFE_PERIMENOPAUSE;
-        else if (ss == "menopause")     m_life.stage = X_LIFE_MENOPAUSE;
-        else                            m_life.stage = X_LIFE_REPRODUCTIVE;
-        m_life.menarche_ms      = (uint64_t)r.GetInt(2);
-        m_life.perimenopause_ms = (uint64_t)r.GetInt(3);
-        m_life.menopause_ms     = (uint64_t)r.GetInt(4);
-        m_life.updated_ms       = (uint64_t)r.GetInt(5);
+        /* Strict lifecycle load: birth_ms must be in the past; menarche
+         * must be after birth; perimenopause after menarche; menopause
+         * after perimenopause. If any invariant breaks we log ERROR and
+         * reseed rather than let the simulation run on impossible dates
+         * (which cascades into nonsense phase calculations for months). */
+        int64_t birthMs = 0, menarche = 0, peri = 0, meno = 0, updatedLm = 0;
+        bool ok = true;
+        ok &= r.TryGetInt(0, birthMs);
+        ok &= r.TryGetInt(2, menarche);
+        ok &= r.TryGetInt(3, peri);
+        ok &= r.TryGetInt(4, meno);
+        ok &= r.TryGetInt(5, updatedLm);
+        if (!ok || birthMs <= 0 || birthMs > (int64_t)now ||
+            (menarche > 0 && menarche < birthMs) ||
+            (peri     > 0 && peri     < menarche) ||
+            (meno     > 0 && meno     < peri)) {
+            ELLE_ERROR("XEngine: x_lifecycle row violates temporal ordering — "
+                       "ignoring and reseeding defaults "
+                       "(birth=%lld menarche=%lld peri=%lld meno=%lld)",
+                       (long long)birthMs, (long long)menarche,
+                       (long long)peri, (long long)meno);
+            m_life.elle_birth_ms = now - 30ULL * 365ULL * 86400000ULL;
+            m_life.stage         = X_LIFE_REPRODUCTIVE;
+            m_life.updated_ms    = now;
+            PersistLifecycleRow();
+        } else {
+            m_life.elle_birth_ms    = (uint64_t)birthMs;
+            const std::string& ss = r.values.size() > 1 ? r.values[1] : std::string("reproductive");
+            if      (ss == "premenarche")   m_life.stage = X_LIFE_PREMENARCHE;
+            else if (ss == "perimenopause") m_life.stage = X_LIFE_PERIMENOPAUSE;
+            else if (ss == "menopause")     m_life.stage = X_LIFE_MENOPAUSE;
+            else                            m_life.stage = X_LIFE_REPRODUCTIVE;
+            m_life.menarche_ms      = (uint64_t)menarche;
+            m_life.perimenopause_ms = (uint64_t)peri;
+            m_life.menopause_ms     = (uint64_t)meno;
+            m_life.updated_ms       = (uint64_t)updatedLm;
+        }
     } else {
         /* Default: Elle is 30 years old (≈ 30y in ms). */
         m_life.elle_birth_ms = now - 30ULL * 365ULL * 86400000ULL;

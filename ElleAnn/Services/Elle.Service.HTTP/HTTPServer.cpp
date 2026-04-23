@@ -468,6 +468,7 @@ public:
     }
 
     size_t Count() const { return m_routes.size(); }
+    const std::vector<RouteEntry>& AllRoutes() const { return m_routes; }
 
 private:
     std::vector<RouteEntry> m_routes;
@@ -1697,7 +1698,33 @@ private:
                 {"taken_ms", (int64_t)ELLE_MS_NOW()}
             };
             return HTTPResponse::OK(j);
-        });
+        }, AUTH_ADMIN);
+
+        /* ============== /api/diag/routes — authoritative route/auth map ==========
+         * Returns every registered route with its HTTP method and auth
+         * level. Exists so the auditor can verify that a route they
+         * expect to be AUTH_ADMIN actually IS AUTH_ADMIN, instead of
+         * greppingfor Register() calls. Also flushes out the failure
+         * mode "new route shipped without specifying auth level" — those
+         * routes show up here as AUTH_USER (the fail-closed default).  */
+        m_router.Register("GET", "/api/diag/routes", [this](const HTTPRequest&) {
+            json arr = json::array();
+            for (const auto& e : m_router.AllRoutes()) {
+                const char* lvl = "user";
+                switch (e.auth) {
+                    case AUTH_PUBLIC:        lvl = "public";        break;
+                    case AUTH_USER:          lvl = "user";          break;
+                    case AUTH_ADMIN:         lvl = "admin";         break;
+                    case AUTH_INTERNAL_ONLY: lvl = "internal_only"; break;
+                }
+                arr.push_back({
+                    {"method", e.method},
+                    {"pattern", e.pattern},
+                    {"auth",   lvl}
+                });
+            }
+            return HTTPResponse::OK({{"routes", arr}, {"count", (int)arr.size()}});
+        }, AUTH_ADMIN);
 
         /* ============== Memory — backed by dbo.memory ============== */
         m_router.Register("GET", "/api/memory/", [](const HTTPRequest& req) {
@@ -2192,6 +2219,8 @@ private:
         });
         m_router.Register("GET", "/api/video/avatar", [](const HTTPRequest& req) {
             int32_t userId = req.QueryInt("user_id", 0);
+            if (userId <= 0)
+                return HTTPResponse::Err(400, "user_id query parameter is required");
             ElleDB::UserAvatar a;
             if (!ElleDB::GetDefaultAvatar(userId, a))
                 return HTTPResponse::OK({{"avatar", nullptr}, {"note", "no avatar configured"}});
@@ -2206,6 +2235,8 @@ private:
         });
         m_router.Register("GET", "/api/video/avatars", [](const HTTPRequest& req) {
             int32_t userId = req.QueryInt("user_id", 0);
+            if (userId <= 0)
+                return HTTPResponse::Err(400, "user_id query parameter is required");
             std::vector<ElleDB::UserAvatar> avs;
             ElleDB::ListAvatars(userId, avs);
             json arr = json::array();
@@ -4199,7 +4230,7 @@ private:
                 });
             }
             return HTTPResponse::OK({{"rules", arr}});
-        });
+        }, AUTH_ADMIN);
         m_router.Register("POST", "/api/morals/rules", [](const HTTPRequest& req) {
             /* Compare the x-admin-key header against the real admin secret
              * loaded from config (admin_key, or fall back to jwt_secret so
@@ -4240,7 +4271,7 @@ private:
             return HTTPResponse::Created({
                 {"principle", principle}, {"category", category}, {"stored", true}
             });
-        });
+        }, AUTH_ADMIN);
 
         /* ============== Legacy goals/brain/hal/admin — keep for back-compat ============== */
         m_router.Register("GET", "/api/goals", [](const HTTPRequest&) {

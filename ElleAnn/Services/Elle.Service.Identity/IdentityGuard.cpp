@@ -9,6 +9,7 @@
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleIdentityCore.h"
+#include "../../Shared/ElleSQLConn.h"
 #include <fstream>
 #include <sstream>
 #include <windows.h>
@@ -76,11 +77,91 @@ protected:
         m_checkInterval = (uint32_t)ElleConfig::Instance().GetInt(
             "security.identity_check_interval_seconds", 60) * 1000;
 
-        /* Compute initial identity hash */
-        if (!ComputeIdentityHash(m_originalHash)) {
+        /* Ensure the DB-side trusted-source table exists. This is our
+         * anti-self-reference substrate: the expected hash lives in
+         * SQL Server, not in this process's own memory. An attacker
+         * who modifies identity.sig must ALSO have SQL Server write
+         * access under the same account to corrupt the reference —
+         * which requires privileges strictly higher than "can
+         * overwrite the identity file".                              */
+        ElleSQLPool::Instance().Query(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+            "               JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "               WHERE t.name = 'identity_integrity' AND s.name = 'dbo') "
+            "CREATE TABLE ElleCore.dbo.identity_integrity ("
+            "  path          NVARCHAR(512) NOT NULL PRIMARY KEY,"
+            "  expected_hash NVARCHAR(128) NOT NULL,"
+            "  algorithm     NVARCHAR(16)  NOT NULL,"
+            "  seeded_ms     BIGINT        NOT NULL,"
+            "  updated_ms    BIGINT        NOT NULL"
+            ");");
+
+        /* Compute current file hash */
+        std::string currentHash;
+        if (!ComputeIdentityHash(currentHash)) {
             ELLE_WARN("No identity file found — creating initial identity");
             CreateIdentityFile();
-            ComputeIdentityHash(m_originalHash);
+            if (!ComputeIdentityHash(currentHash)) {
+                ELLE_ERROR("Identity file still unreadable after create — "
+                           "refusing to start without a verifiable identity.");
+                return false;
+            }
+        }
+
+        /* Look up the authoritative expected-hash row. First run seeds
+         * it; subsequent runs compare against it. Note the
+         * m_originalHash we keep in-memory is a CACHE of the DB row,
+         * not the source of truth — OnTick re-fetches on every check. */
+        auto rs = ElleSQLPool::Instance().QueryParams(
+            "SELECT expected_hash, algorithm FROM ElleCore.dbo.identity_integrity "
+            "WHERE path = ?;",
+            { m_identityPath });
+        if (!rs.success) {
+            ELLE_ERROR("Identity: integrity table read failed: %s — refusing start",
+                       rs.error.c_str());
+            return false;
+        }
+        if (rs.rows.empty()) {
+            /* First-run seed: record the current hash as authoritative.
+             * This is the only moment the in-memory hash becomes the
+             * "trusted source", and it happens exactly once when the
+             * user first installs the service.                         */
+            uint64_t now = ELLE_MS_NOW();
+            auto ir = ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.identity_integrity "
+                "(path, expected_hash, algorithm, seeded_ms, updated_ms) "
+                "VALUES (?, ?, 'sha256', ?, ?);",
+                { m_identityPath, currentHash,
+                  std::to_string((int64_t)now),
+                  std::to_string((int64_t)now) });
+            if (!ir.success) {
+                ELLE_ERROR("Identity: failed to seed trusted hash: %s",
+                           ir.error.c_str());
+                return false;
+            }
+            ELLE_INFO("Identity: seeded authoritative SHA-256 hash for %s",
+                      m_identityPath.c_str());
+            m_originalHash = currentHash;
+        } else {
+            const std::string& expected = rs.rows[0].values[0];
+            const std::string& algo     = rs.rows[0].values.size() > 1
+                                            ? rs.rows[0].values[1]
+                                            : std::string("sha256");
+            if (algo != "sha256") {
+                ELLE_ERROR("Identity: trusted hash uses unsupported algorithm '%s'",
+                           algo.c_str());
+                return false;
+            }
+            if (expected != currentHash) {
+                /* TAMPER DETECTED AT STARTUP — fail closed immediately;
+                 * do not even enter ServiceLoop. */
+                ELLE_FATAL("IDENTITY TAMPER AT STARTUP — hash mismatch vs DB.");
+                ELLE_FATAL("  Expected (SQL): %s", expected.c_str());
+                ELLE_FATAL("  Got (file):     %s", currentHash.c_str());
+                return false;
+            }
+            m_originalHash = expected;
+            ELLE_INFO("Identity: hash verified against authoritative SQL row");
         }
 
         /* Set up watched paths */
@@ -108,15 +189,37 @@ protected:
     }
 
     void OnTick() override {
-        /* Periodic persist of authoritative state. Peers are live via
-         * broadcast — this is durability only.                          */
+        /* Periodic persist of authoritative state. */
         ElleIdentityCore::Instance().SaveToDatabase();
+
+        /* Re-fetch the trusted hash from SQL every tick so an operator
+         * who legitimately re-seeds the identity file (via an admin
+         * tool that also updates identity_integrity) takes effect on
+         * the next tick. DON'T use m_originalHash as the reference —
+         * that would be a self-referential check, which is exactly the
+         * audit finding we're fixing.                                    */
+        std::string expected;
+        {
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT expected_hash FROM ElleCore.dbo.identity_integrity "
+                "WHERE path = ?;",
+                { m_identityPath });
+            if (!rs.success || rs.rows.empty()) {
+                ELLE_ERROR("Identity: trusted-source row missing on tick — "
+                           "failing closed.");
+                Running().store(false);
+                return;
+            }
+            expected = rs.rows[0].values[0];
+        }
+        m_originalHash = expected;    /* keep cache in sync for diagnostics */
+
         std::string currentHash;
         if (ComputeIdentityHash(currentHash)) {
-            if (currentHash != m_originalHash) {
+            if (currentHash != expected) {
                 ELLE_FATAL("IDENTITY TAMPER DETECTED! Hash mismatch.");
-                ELLE_FATAL("  Expected: %s", m_originalHash.c_str());
-                ELLE_FATAL("  Got:      %s", currentHash.c_str());
+                ELLE_FATAL("  Expected (SQL): %s", expected.c_str());
+                ELLE_FATAL("  Got (file):     %s", currentHash.c_str());
 
                 /* Alert all services */
                 auto msg = ElleIPCMessage::Create(IPC_SHUTDOWN, SVC_IDENTITY, (ELLE_SERVICE_ID)0);
@@ -124,17 +227,12 @@ protected:
                 msg.header.flags = ELLE_IPC_FLAG_BROADCAST | ELLE_IPC_FLAG_URGENT;
                 GetIPCHub().Broadcast(msg);
 
-                /* FAIL CLOSED LOCALLY — stop our own service loop. Previous
-                 * behaviour only broadcast a shutdown notice; peers who
-                 * ignored or missed the message continued to operate
-                 * against a tampered identity file. By flipping our own
-                 * Running() flag we guarantee at least THIS service stops,
-                 * and the SCM dependency chain brings the others down
-                 * behind us.                                              */
+                /* Fail closed locally. */
                 Running().store(false);
             }
         } else {
-            ELLE_ERROR("Identity file missing or unreadable!");
+            ELLE_ERROR("Identity file missing or unreadable — failing closed.");
+            Running().store(false);
         }
 
         /* Check config file for unexpected changes */
