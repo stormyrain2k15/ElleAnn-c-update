@@ -13,6 +13,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <condition_variable>
 #include <atomic>
 #include <functional>
 #include <fstream>
@@ -38,7 +39,7 @@ public:
                     ELLE_LOG_LEVEL minLevel = LOG_INFO);
     void Shutdown();
 
-    void SetMinLevel(ELLE_LOG_LEVEL level) { m_minLevel = level; }
+    void SetMinLevel(ELLE_LOG_LEVEL level);
     void SetLogFile(const std::string& path, uint32_t maxSizeMB = 100, uint32_t maxFiles = 10);
     void SetWebSocketBroadcaster(std::function<void(const std::string&)> broadcaster);
 
@@ -74,7 +75,7 @@ private:
 
     ELLE_SERVICE_ID m_sourceService = SVC_HEARTBEAT;
     uint32_t        m_targets = 0;
-    ELLE_LOG_LEVEL  m_minLevel = LOG_INFO;
+    std::atomic<ELLE_LOG_LEVEL>  m_minLevel{LOG_INFO};
     bool            m_initialized = false;
 
     /* Console output */
@@ -91,15 +92,22 @@ private:
     void WriteFile(const std::string& formatted);
     void RotateFile();
 
-    /* Database output (async) */
+    /* Database output (async, condition-variable driven) */
     std::queue<ELLE_LOG_ENTRY> m_dbQueue;
     std::mutex                  m_dbMutex;
+    std::condition_variable     m_dbCv;
     std::thread                 m_dbThread;
     std::atomic<bool>           m_dbRunning{false};
+    /* Shutdown-drain barrier — when true, Log() refuses new producers so
+     * the tail drain inside DatabaseWriterThread() cannot race with a
+     * late call that would enqueue after the final drain has started.  */
+    std::atomic<bool>           m_dbClosing{false};
     void DatabaseWriterThread();
 
-    /* WebSocket broadcast */
+    /* WebSocket broadcast — mutex-protected because SetWebSocketBroadcaster
+     * can be called from a different thread than Log(). */
     std::function<void(const std::string&)> m_wsBroadcaster;
+    std::mutex                              m_wsMutex;
 
     /* Formatting */
     std::string FormatEntry(ELLE_LOG_LEVEL level, const std::string& message, 

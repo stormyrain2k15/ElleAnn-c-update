@@ -58,6 +58,9 @@ public:
     }
 
     void Shutdown() {
+        /* Take the same mutex as Eval/ReloadScripts so we can't call
+         * lua_close() while another thread is mid-luaL_dostring.      */
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (m_L) {
             lua_close(m_L);
             m_L = nullptr;
@@ -67,19 +70,35 @@ public:
     /* Evaluate Lua expression and return result as string */
     std::string Eval(const std::string& code) {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_L) return "ERROR: lua state closed";
+        int baseTop = lua_gettop(m_L);
         std::string wrapped = "return " + code;
-        if (luaL_dostring(m_L, wrapped.c_str()) != LUA_OK) {
-            /* Try without return */
+        int rc = luaL_dostring(m_L, wrapped.c_str());
+        if (rc != LUA_OK) {
+            /* Pop the first error BEFORE retrying. Previous code left
+             * the first error on the stack, which (a) leaked a stack
+             * slot per failed Eval and (b) turned the second failure
+             * path's `lua_tostring(m_L, -1)` into the WRONG error
+             * (the first one), hiding the real syntax cause.           */
+            lua_pop(m_L, 1);
             if (luaL_dostring(m_L, code.c_str()) != LUA_OK) {
-                std::string err = lua_tostring(m_L, -1);
+                std::string err = lua_tostring(m_L, -1) ? lua_tostring(m_L, -1) : "?";
                 lua_pop(m_L, 1);
+                /* Stack-balance invariant: we must leave the stack exactly
+                 * the way we found it on every early return.             */
+                if (lua_gettop(m_L) != baseTop) {
+                    lua_settop(m_L, baseTop);
+                }
                 return "ERROR: " + err;
             }
         }
         std::string result;
-        if (lua_gettop(m_L) > 0) {
-            result = lua_tostring(m_L, -1) ? lua_tostring(m_L, -1) : "";
-            lua_pop(m_L, 1);
+        if (lua_gettop(m_L) > baseTop) {
+            const char* s = lua_tostring(m_L, -1);
+            result = s ? s : "";
+            /* Pop down to the original top. Guards against multi-return
+             * scripts leaving extra slots.                             */
+            lua_settop(m_L, baseTop);
         }
         return result;
     }
@@ -89,10 +108,55 @@ public:
      * only routes Eval() and reload events. Removed during the second-
      * wave audit to keep the public surface honest.                     */
 
-    /* Hot-reload all scripts */
+    /* Hot-reload all scripts — true reload: builds a fresh lua_State,
+     * rewires bindings, reloads scripts, then swaps the live pointer
+     * under the same mutex that serializes Eval(). The previous
+     * implementation re-ran LoadAllScripts() against the existing
+     * state, so:
+     *   (a) global tables carried over from the previous revision,
+     *   (b) a script rename left the old binding live,
+     *   (c) a compile error in the new script tree left the OLD scripts
+     *       running — callers thought they had reloaded, but Eval()
+     *       was still running stale code.
+     * Fresh state + explicit swap eliminates all three.                 */
     void ReloadScripts() {
-        ELLE_INFO("Hot-reloading Lua scripts...");
-        LoadAllScripts();
+        ELLE_INFO("Hot-reloading Lua scripts (fresh state swap)...");
+        std::lock_guard<std::mutex> lock(m_mutex);
+        lua_State* newL = luaL_newstate();
+        if (!newL) {
+            ELLE_ERROR("Lua reload: luaL_newstate() returned null — keeping old state");
+            return;
+        }
+        luaL_requiref(newL, "_G", luaopen_base, 1);
+        luaL_requiref(newL, "table", luaopen_table, 1);
+        luaL_requiref(newL, "string", luaopen_string, 1);
+        luaL_requiref(newL, "math", luaopen_math, 1);
+        lua_pop(newL, 4);
+        lua_pushnil(newL); lua_setglobal(newL, "os");
+        lua_pushnil(newL); lua_setglobal(newL, "io");
+        lua_pushnil(newL); lua_setglobal(newL, "loadfile");
+        lua_pushnil(newL); lua_setglobal(newL, "dofile");
+
+        /* Swap state briefly so RegisterBindings + LoadAllScripts
+         * operate on the new state, then restore or promote.           */
+        lua_State* oldL = m_L;
+        std::vector<std::string> oldLoaded = std::move(m_loadedScripts);
+        m_L = newL;
+        m_loadedScripts.clear();
+        RegisterBindings();
+        size_t loaded = LoadAllScripts();
+        if (loaded == 0) {
+            /* Nothing loaded — roll back to the previous state rather
+             * than leaving the service with zero behavior scripts.    */
+            ELLE_ERROR("Lua reload: no scripts loaded — rolling back to old state");
+            lua_close(newL);
+            m_L = oldL;
+            m_loadedScripts = std::move(oldLoaded);
+            return;
+        }
+        /* Promote new state — free the old one. */
+        lua_close(oldL);
+        ELLE_INFO("Lua reload: %zu scripts loaded onto fresh state", loaded);
     }
 
 private:
@@ -371,7 +435,10 @@ private:
         lua_setglobal(m_L, "elle");
     }
 
-    void LoadAllScripts() {
+    /* Returns the number of scripts successfully loaded. The count is
+     * used by ReloadScripts() to decide whether to promote the fresh
+     * lua_State or roll back.                                           */
+    size_t LoadAllScripts() {
         auto& cfg = ElleConfig::Instance();
         auto scriptsDir = cfg.GetString("lua.scripts_directory", "Lua\\Elle.Lua.Behavioral\\scripts");
 
@@ -421,6 +488,7 @@ private:
         }
         ELLE_INFO("Lua: loaded %zu script(s) from %s",
                   m_loadedScripts.size(), scriptsDir.c_str());
+        return m_loadedScripts.size();
     }
 };
 

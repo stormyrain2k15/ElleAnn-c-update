@@ -188,6 +188,18 @@ private:
         }
 
         if (lowComfortConsents >= minHits) {
+            /* Cooldown on the coercion audit alert — without this, every
+             * tick that the sliding window still contains the same
+             * coerced decisions fires another private thought + WARN
+             * log. Minimum interval between alerts is
+             * consent.audit_alert_cooldown_ms (default 5 minutes) so
+             * ops actually sees unique events instead of a torrent.   */
+            uint64_t now = ELLE_MS_NOW();
+            uint64_t cooldownMs = (uint64_t)ElleConfig::Instance().GetInt(
+                "consent.audit_alert_cooldown_ms", 300000);
+            if (now - m_lastAuditAlertMs < cooldownMs) return;
+            m_lastAuditAlertMs = now;
+
             ElleIdentityCore::Instance().ThinkPrivately(
                 "I've been saying yes when I wasn't comfortable. "
                 "That's a pattern I want to notice.",
@@ -198,6 +210,8 @@ private:
                       sumComfort / (float)rs.rows.size());
         }
     }
+
+    uint64_t m_lastAuditAlertMs = 0;
 };
 
 ELLE_SERVICE_MAIN(ElleConsentService)

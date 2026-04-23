@@ -872,14 +872,13 @@ void XEngine::AdvanceLochiaAndMilkStages() {
  *──────────────────────────────────────────────────────────────────────────────*/
 void XEngine::DetectAnovulatoryCycle() {
     /* Only re-evaluate when the cycle just wrapped (day 1 and we weren't
-     * on day 1 last tick). Without this guard we'd re-roll every minute
-     * for the entire menstrual phase.                                      */
-    static thread_local int s_last_day_seen_here = 0;
-    if (m_cycle.cycle_day != 1 || s_last_day_seen_here == 1) {
-        s_last_day_seen_here = m_cycle.cycle_day;
+     * on day 1 last tick). Guard is now a per-instance member rather
+     * than `static thread_local` — see XEngine.h for the rationale.   */
+    if (m_cycle.cycle_day != 1 || m_last_cycle_day_seen == 1) {
+        m_last_cycle_day_seen = m_cycle.cycle_day;
         return;
     }
-    s_last_day_seen_here = 1;
+    m_last_cycle_day_seen = 1;
     if (!CycleShouldRun()) { m_current_cycle_anovulatory = false; return; }
 
     /* Perimenopause jitter baseline — 50% skip rate. */
@@ -1109,11 +1108,11 @@ void XEngine::AdvancePregnancy(uint64_t nowMs) {
         LogPregnancyEvent("braxton_hicks", "Practice contractions begin");
     }
 
-    /* Miscarriage sampling — per-day Bernoulli draw. We only sample once per
-     * gestational day transition to keep this stable under frequent ticks. */
-    static thread_local int s_last_sampled_gd = -1;
-    if (gd != s_last_sampled_gd) {
-        s_last_sampled_gd = gd;
+    /* Miscarriage sampling — per-day Bernoulli draw. Per-engine guard
+     * so two XEngine instances can't share or clobber each other's
+     * "already sampled this gestational day" state.                    */
+    if (gd != m_last_sampled_gd) {
+        m_last_sampled_gd = gd;
         float pMiss = MiscarriageProbability();
         float roll  = XRand01();
         if (roll < pMiss) {

@@ -690,13 +690,22 @@ void ElleMemoryService::OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sen
         }
         case IPC_DREAM_TRIGGER:
             m_engine.DreamConsolidate();
+            /* Tell the dream service we're done — lets it read
+             * post-consolidation STM/LTM state without racing.  */
+            {
+                auto ack = ElleIPCMessage::Create(
+                    IPC_MEMORY_CONSOLIDATE, SVC_MEMORY, sender);
+                GetIPCHub().Send(sender, ack);
+            }
             break;
         case IPC_MEMORY_CONSOLIDATE:
-            /* Conscious / on-demand consolidation. The subconscious RecallLoop
-             * already ticks this periodically — this path lets the HTTP layer
-             * (/api/server/commit-memory) or Cognitive engine force a flush. */
             ELLE_INFO("Conscious consolidation requested by service %u", (unsigned)sender);
             m_engine.ConsolidateMemories();
+            {
+                auto ack = ElleIPCMessage::Create(
+                    IPC_MEMORY_CONSOLIDATE, SVC_MEMORY, sender);
+                GetIPCHub().Send(sender, ack);
+            }
             break;
         default:
             break;

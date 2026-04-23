@@ -355,6 +355,16 @@ private:
     XHormoneLevels   m_residual;
     uint64_t         m_residual_ms = 0;   /* last time residual was refreshed */
 
+    /* Per-instance guard state used by DetectAnovulatoryCycle() and the
+     * miscarriage Bernoulli draw. Was `static thread_local` before — the
+     * problem being (a) behavior was implicitly per-thread rather than
+     * per-engine, so two XEngine instances on the same thread would share
+     * state, and (b) any thread pool that dispatched XEngine::Tick
+     * across workers would reset the guard randomly. Tying it to `this`
+     * makes the behavior deterministic and explicit.                    */
+    int              m_last_cycle_day_seen = 0;
+    int              m_last_sampled_gd     = -1;
+
     /* Derived helpers. */
     void     RecomputeCycleDayAndPhase();
     void     RecomputeBaselineHormones();   /* fills m_hormones from phase   */

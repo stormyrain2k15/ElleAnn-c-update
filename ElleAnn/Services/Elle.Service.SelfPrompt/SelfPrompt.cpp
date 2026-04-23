@@ -82,8 +82,22 @@ protected:
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
         if (msg.header.msg_type == IPC_SELF_PROMPT) {
-            /* External trigger for self-prompt */
+            /* External trigger must still honor the min-interval gate.
+             * Previously the OnTick limiter guarded only the autonomous
+             * path — a peer service (InnerLife, Solitude, etc.) could
+             * blast dozens of IPC_SELF_PROMPT in a second and each
+             * produced a fresh LLM call, draining budget and flooding
+             * the chat log.                                            */
+            uint64_t now = ELLE_MS_NOW();
+            uint32_t minIntervalMs = ElleConfig::Instance().GetService().tick_interval_ms * 10;
+            if (now - m_lastPromptMs < minIntervalMs) {
+                ELLE_DEBUG("SelfPrompt: external trigger from %u throttled "
+                           "(%llums since last, need %ums)",
+                           (unsigned)sender, now - m_lastPromptMs, minIntervalMs);
+                return;
+            }
             GenerateSelfPrompt(msg.GetStringPayload());
+            m_lastPromptMs = now;
         }
         /* Track user activity */
         if (sender == SVC_HTTP_SERVER || sender == SVC_COGNITIVE) {

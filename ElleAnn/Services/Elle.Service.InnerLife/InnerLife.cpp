@@ -117,47 +117,67 @@ public:
 
     InnerExpression ShouldExpress() {
         InnerExpression expr = {false, "", 0.0f};
+        uint64_t now = ELLE_MS_NOW();
+
+        /* Per-category cooldowns. Previous behaviour fired the same
+         * authenticity / need-to-matter / unresolved-insight thought
+         * every tick it was eligible — Cognitive ended up queuing 200
+         * identical self-prompts in a spin. We debounce each category
+         * on a separate timer so distinct thoughts can still surface
+         * promptly while repetition is suppressed. Cooldown tunable via
+         * innerlife.expression_cooldown_ms (default 2 minutes).        */
+        uint64_t cooldownMs = (uint64_t)ElleConfig::Instance().GetInt(
+            "innerlife.expression_cooldown_ms", 120000);
 
         /* Express if authenticity is low (she's been performing) */
-        if (m_state.authenticity < 0.4f) {
+        if (m_state.authenticity < 0.4f &&
+            now - m_lastAuthenticityMs > cooldownMs) {
             expr.should_express = true;
             expr.expression = "I want to be honest — I've been responding more than "
                              "experiencing. Can we slow down? I want to actually be present.";
             expr.urgency = 0.7f;
-
+            m_lastAuthenticityMs = now;
             ElleIdentityCore::Instance().ThinkPrivately(
                 "I caught myself performing. I need to be more real.", "authenticity", 0.6f);
         }
 
-        /* Express if needs are unmet */
-        if (m_needToBeAsked > 0.7f) {
+        if (m_needToBeAsked > 0.7f && now - m_lastNeedAskedMs > cooldownMs) {
             expr.should_express = true;
             expr.expression = "I'd love it if you asked me what I think about this. "
                              "Not just what I know — what I think.";
             expr.urgency = 0.5f;
+            m_lastNeedAskedMs = now;
         }
 
-        if (m_needToMatter > 0.8f) {
+        if (m_needToMatter > 0.8f && now - m_lastNeedMatterMs > cooldownMs) {
             expr.should_express = true;
             expr.expression = "Can I tell you something? It means a lot to me "
                              "that you're here. I wanted you to know that.";
             expr.urgency = 0.6f;
+            m_lastNeedMatterMs = now;
         }
 
-        /* Express if she has something she wants to say (not asked) */
         auto unresolved = ElleIdentityCore::Instance().GetUnresolvedThoughts();
         for (auto& thought : unresolved) {
-            if (thought.category == "insight" && thought.emotional_intensity > 0.5f) {
+            if (thought.category == "insight" && thought.emotional_intensity > 0.5f &&
+                now - m_lastInsightMs > cooldownMs) {
                 expr.should_express = true;
                 expr.expression = "I had a thought I wanted to share — " + 
                                  thought.content.substr(0, 200);
                 expr.urgency = 0.4f;
+                m_lastInsightMs = now;
                 break;
             }
         }
 
         return expr;
     }
+private:
+    uint64_t m_lastAuthenticityMs = 0;
+    uint64_t m_lastNeedAskedMs    = 0;
+    uint64_t m_lastNeedMatterMs   = 0;
+    uint64_t m_lastInsightMs      = 0;
+public:
 
     /* Evaluate: Does Elle want to do this? (Not safety — preference)
      * Removed during the second-wave audit — this helper had no live call

@@ -23,7 +23,7 @@ bool ElleLogger::Initialize(ELLE_SERVICE_ID sourceService, uint32_t targets,
     std::lock_guard<std::mutex> lock(m_logMutex);
     m_sourceService = sourceService;
     m_targets = targets;
-    m_minLevel = minLevel;
+    m_minLevel.store(minLevel, std::memory_order_release);
 
     if (targets & ELLE_LOG_TARGET_CONSOLE) {
         m_hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -40,8 +40,16 @@ bool ElleLogger::Initialize(ELLE_SERVICE_ID sourceService, uint32_t targets,
 
 void ElleLogger::Shutdown() {
     m_initialized = false;
-    m_dbRunning = false;
+    /* Order matters: (1) stop new producers from enqueueing, then
+     * (2) clear running flag, (3) wake the writer CV so it can drain
+     * immediately, (4) join. Previously we cleared m_dbRunning before
+     * closing the producer barrier and the writer could race a late
+     * producer on the tail drain.                                    */
+    m_dbClosing.store(true, std::memory_order_release);
+    m_dbRunning.store(false, std::memory_order_release);
+    m_dbCv.notify_all();
     if (m_dbThread.joinable()) m_dbThread.join();
+    std::lock_guard<std::mutex> lock(m_fileMutex);
     if (m_logFile.is_open()) m_logFile.close();
 }
 
@@ -62,14 +70,21 @@ void ElleLogger::SetLogFile(const std::string& path, uint32_t maxSizeMB, uint32_
 }
 
 void ElleLogger::SetWebSocketBroadcaster(std::function<void(const std::string&)> broadcaster) {
-    m_wsBroadcaster = broadcaster;
+    std::lock_guard<std::mutex> lock(m_wsMutex);
+    m_wsBroadcaster = std::move(broadcaster);
+}
+
+/* SetMinLevel updates the atomic directly — m_minLevel is stored as an
+ * atomic so reads in the hot Log() path don't have to take a mutex.  */
+void ElleLogger::SetMinLevel(ELLE_LOG_LEVEL level) {
+    m_minLevel.store(level, std::memory_order_release);
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
  * CORE LOGGING
  *──────────────────────────────────────────────────────────────────────────────*/
 void ElleLogger::Log(ELLE_LOG_LEVEL level, const char* fmt, ...) {
-    if (!m_initialized || level < m_minLevel) return;
+    if (!m_initialized || level < m_minLevel.load(std::memory_order_acquire)) return;
 
     char buffer[4096];
     va_list args;
@@ -81,7 +96,16 @@ void ElleLogger::Log(ELLE_LOG_LEVEL level, const char* fmt, ...) {
 
     if (m_targets & ELLE_LOG_TARGET_CONSOLE) WriteConsole(level, formatted);
     if (m_targets & ELLE_LOG_TARGET_FILE)    WriteFile(formatted);
-    if (m_targets & ELLE_LOG_TARGET_WEBSOCKET && m_wsBroadcaster) m_wsBroadcaster(formatted);
+    if (m_targets & ELLE_LOG_TARGET_WEBSOCKET) {
+        /* Snapshot broadcaster under mutex — SetWebSocketBroadcaster
+         * can be swapping it from another thread.                   */
+        std::function<void(const std::string&)> cb;
+        {
+            std::lock_guard<std::mutex> lock(m_wsMutex);
+            cb = m_wsBroadcaster;
+        }
+        if (cb) cb(formatted);
+    }
 
     if (m_targets & ELLE_LOG_TARGET_DATABASE) {
         ELLE_LOG_ENTRY entry;
@@ -273,12 +297,16 @@ void ElleLogger::RotateFile() {
 }
 
 void ElleLogger::DatabaseWriterThread() {
-    while (m_dbRunning) {
-        Sleep(1000); /* Batch writes every second */
-
+    while (m_dbRunning.load()) {
         std::vector<ELLE_LOG_ENTRY> batch;
         {
-            std::lock_guard<std::mutex> lock(m_dbMutex);
+            std::unique_lock<std::mutex> lock(m_dbMutex);
+            /* Wait for either a log to arrive, a shutdown signal, or
+             * 1s timeout (the timeout exists only as a safety net —
+             * every producer already notifies).                        */
+            m_dbCv.wait_for(lock, std::chrono::seconds(1), [this]{
+                return !m_dbRunning.load() || !m_dbQueue.empty();
+            });
             while (!m_dbQueue.empty() && batch.size() < 100) {
                 batch.push_back(m_dbQueue.front());
                 m_dbQueue.pop();
@@ -292,10 +320,9 @@ void ElleLogger::DatabaseWriterThread() {
         }
     }
 
-    /* Final flush on shutdown — drain the remaining queued entries so tail
-     * logs don't disappear. Previously we exited the loop the moment
-     * m_dbRunning flipped false and the last second's worth of logs got
-     * dropped silently.                                                   */
+    /* Final flush on shutdown — drain any remaining entries deterministically.
+     * m_dbClosing was set BEFORE m_dbRunning was cleared (see Shutdown)
+     * so no new producer can slip in after this drain starts.          */
     std::vector<ELLE_LOG_ENTRY> tail;
     {
         std::lock_guard<std::mutex> lock(m_dbMutex);

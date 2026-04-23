@@ -6,6 +6,8 @@
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
+#include <mutex>
+#include <vector>
 
 class ElleHeartbeatService : public ElleServiceBase {
 public:
@@ -49,21 +51,35 @@ protected:
         msg.header.flags |= ELLE_IPC_FLAG_BROADCAST;
         GetIPCHub().Broadcast(msg);
 
-        /* Check service health */
+        /* Snapshot under lock so the iteration below can't race with
+         * OnMessage() mutating m_lastHeartbeat / m_healthy mid-scan. */
+        std::vector<uint64_t> last(ELLE_SERVICE_COUNT);
+        std::vector<char>     healthy(ELLE_SERVICE_COUNT);
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            for (int i = 0; i < ELLE_SERVICE_COUNT; i++) {
+                last[i]    = m_lastHeartbeat[i];
+                healthy[i] = m_healthy[i] ? 1 : 0;
+            }
+        }
+
         for (int i = 0; i < ELLE_SERVICE_COUNT; i++) {
             if (i == SVC_HEARTBEAT) continue;
 
-            uint64_t elapsed = now - m_lastHeartbeat[i];
+            uint64_t elapsed = now - last[i];
 
-            if (elapsed > m_deadManMs && m_healthy[i]) {
+            if (elapsed > m_deadManMs && healthy[i]) {
                 ELLE_FATAL("DEAD MAN SWITCH: %s not responding for %llums!",
                            ElleIPC::GetServiceName((ELLE_SERVICE_ID)i), elapsed);
-                m_healthy[i] = false;
-                /* Dead-man switch tripped — initiate real SCM restart. */
+                {
+                    std::lock_guard<std::mutex> lock(m_stateMutex);
+                    m_healthy[i] = false;
+                }
                 AttemptRestart((ELLE_SERVICE_ID)i);
-            } else if (elapsed > m_timeoutMs && m_healthy[i]) {
+            } else if (elapsed > m_timeoutMs && healthy[i]) {
                 ELLE_WARN("Service %s heartbeat timeout (%llums)",
                           ElleIPC::GetServiceName((ELLE_SERVICE_ID)i), elapsed);
+                std::lock_guard<std::mutex> lock(m_stateMutex);
                 m_healthy[i] = false;
             }
         }
@@ -76,15 +92,26 @@ protected:
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
-        /* Bounds-check sender against the fixed-size tracking arrays. A
-         * malformed frame or a yet-to-be-added service ID could index past
-         * the end otherwise.                                               */
         if ((int)sender < 0 || (int)sender >= ELLE_SERVICE_COUNT) {
             ELLE_WARN("Heartbeat OnMessage: sender %d out of range [0, %d)",
                       (int)sender, ELLE_SERVICE_COUNT);
             return;
         }
         if (msg.header.msg_type == IPC_HEARTBEAT) {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            /* Reset restart budget on verified healthy recovery — an
+             * earlier transient failure must NOT permanently exhaust
+             * the budget. Only reset on a clean healthy→healthy
+             * transition (i.e. this service has been visible for a
+             * full good tick).                                         */
+            if (!m_healthy[sender] &&
+                m_restartAttempts[sender] > 0) {
+                ELLE_INFO("Heartbeat: %s recovered — resetting restart budget "
+                          "(was %u)",
+                          ElleIPC::GetServiceName(sender),
+                          m_restartAttempts[sender]);
+                m_restartAttempts[sender] = 0;
+            }
             m_lastHeartbeat[sender] = ELLE_MS_NOW();
             m_healthy[sender] = true;
         }
@@ -93,6 +120,11 @@ protected:
             if (msg.GetPayload(status)) {
                 if ((int)status.service_id < 0 ||
                     (int)status.service_id >= ELLE_SERVICE_COUNT) return;
+                std::lock_guard<std::mutex> lock(m_stateMutex);
+                if (!m_healthy[status.service_id] && status.healthy &&
+                    m_restartAttempts[status.service_id] > 0) {
+                    m_restartAttempts[status.service_id] = 0;
+                }
                 m_lastHeartbeat[status.service_id] = ELLE_MS_NOW();
                 m_healthy[status.service_id] = status.healthy;
             }
@@ -100,6 +132,7 @@ protected:
     }
 
 private:
+    std::mutex m_stateMutex;
     uint64_t m_lastHeartbeat[ELLE_SERVICE_COUNT] = {};
     bool     m_healthy[ELLE_SERVICE_COUNT] = {};
     uint32_t m_timeoutMs = 15000;
@@ -114,15 +147,19 @@ private:
             return;
         }
         auto maxRestarts = ElleConfig::Instance().GetService().max_restarts;
-        if (m_restartAttempts[svc] >= maxRestarts) {
-            ELLE_FATAL("Max restart attempts reached for %s — manual intervention required",
-                       ElleIPC::GetServiceName(svc));
-            return;
+        uint32_t attempts;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            if (m_restartAttempts[svc] >= maxRestarts) {
+                ELLE_FATAL("Max restart attempts reached for %s — manual intervention required",
+                           ElleIPC::GetServiceName(svc));
+                return;
+            }
+            attempts = ++m_restartAttempts[svc];
         }
 
-        m_restartAttempts[svc]++;
-        ELLE_INFO("Attempting restart of %s (attempt %d/%d)",
-                  ElleIPC::GetServiceName(svc), m_restartAttempts[svc], maxRestarts);
+        ELLE_INFO("Attempting restart of %s (attempt %u/%u)",
+                  ElleIPC::GetServiceName(svc), attempts, maxRestarts);
 
         /* Via SCM: stop and start the service */
         SC_HANDLE hSCM = OpenSCManagerA(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
@@ -141,12 +178,22 @@ private:
     }
 
     void LogHealthSummary() {
+        uint64_t now = ELLE_MS_NOW();
+        std::vector<uint64_t> last(ELLE_SERVICE_COUNT);
+        std::vector<char>     healthy(ELLE_SERVICE_COUNT);
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            for (int i = 0; i < ELLE_SERVICE_COUNT; i++) {
+                last[i]    = m_lastHeartbeat[i];
+                healthy[i] = m_healthy[i] ? 1 : 0;
+            }
+        }
         ELLE_INFO("=== SERVICE HEALTH SUMMARY ===");
         for (int i = 0; i < ELLE_SERVICE_COUNT; i++) {
-            uint64_t age = ELLE_MS_NOW() - m_lastHeartbeat[i];
+            uint64_t age = now - last[i];
             ELLE_INFO("  %s: %s (last seen %llums ago)",
                       ElleIPC::GetServiceName((ELLE_SERVICE_ID)i),
-                      m_healthy[i] ? "HEALTHY" : "UNHEALTHY", age);
+                      healthy[i] ? "HEALTHY" : "UNHEALTHY", age);
         }
     }
 };

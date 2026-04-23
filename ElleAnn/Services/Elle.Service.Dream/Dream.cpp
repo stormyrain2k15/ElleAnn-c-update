@@ -8,6 +8,7 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include "../../Shared/ElleIdentityCore.h"
+#include <atomic>
 #include <algorithm>
 
 class ElleDreamService : public ElleServiceBase {
@@ -30,21 +31,46 @@ protected:
     void OnTick() override {
         if (!ElleConfig::Instance().GetMemory().dream_consolidation) return;
 
-        /* Identity sync is now push-based (IPC_IDENTITY_DELTA from SVC_IDENTITY)
-         * so every autobiography / private-thought write here is mirrored in
-         * every peer within milliseconds. No poll needed.                 */
+        /* Reentrancy guard — OnTick() can race with the manual trigger
+         * path in OnMessage(IPC_DREAM_TRIGGER). Without this guard a
+         * quick tick immediately after a manual trigger would run two
+         * dream cycles in parallel: two Memory consolidations, two
+         * LLM narrate calls, two autobiography inserts for the same
+         * dream state. We skip if already dreaming.                  */
+        if (m_dreaming.exchange(true)) {
+            ELLE_DEBUG("Dream cycle skipped — already in progress");
+            return;
+        }
+        struct Guard { std::atomic<bool>& f; ~Guard(){ f.store(false); } } g{m_dreaming};
 
         ELLE_INFO("Entering dream cycle...");
 
-        /* Step 1: Ask Memory to run STM→LTM consolidation + clustering. */
-        auto msg = ElleIPCMessage::Create(IPC_DREAM_TRIGGER, SVC_DREAM, SVC_MEMORY);
-        GetIPCHub().Send(SVC_MEMORY, msg);
+        /* Step 1: Ask Memory to run STM→LTM consolidation + clustering,
+         *         then WAIT for its IPC_MEMORY_CONSOLIDATE_ACK before
+         *         we read any post-consolidation data. Previously we
+         *         fired the trigger and immediately called
+         *         GatherDreamFragments(), which read stale STM state
+         *         half the time — the narrative was consistently one
+         *         dream cycle behind reality.                          */
+        m_consolidateDone.store(false);
+        auto trig = ElleIPCMessage::Create(IPC_DREAM_TRIGGER, SVC_DREAM, SVC_MEMORY);
+        GetIPCHub().Send(SVC_MEMORY, trig);
 
-        /* Step 2: Gather real dream fragments. Draw from, in order:
-         *   a) the 20 most recent high-importance memories from LTM
-         *   b) any unresolved private thoughts Elle is still turning over
-         *   c) the most recent entity interactions (who/what has been on her mind)
-         * NOTHING hardcoded — if there are zero fragments, we skip the dream.   */
+        /* Bounded wait — if Memory isn't running or misses the ack, we
+         * don't hang the service loop forever. Default 10s, configurable.
+         * Poll at 50ms granularity so shutdown is still responsive.    */
+        uint32_t ackTimeoutMs = (uint32_t)ElleConfig::Instance().GetInt(
+            "memory.dream_ack_timeout_ms", 10000);
+        uint64_t deadline = ELLE_MS_NOW() + ackTimeoutMs;
+        while (!m_consolidateDone.load(std::memory_order_acquire) &&
+               ELLE_MS_NOW() < deadline && Running().load()) {
+            InterruptibleSleep(50);
+        }
+        if (!m_consolidateDone.load()) {
+            ELLE_WARN("Dream: Memory consolidation ack not received within %ums — "
+                      "proceeding with possibly-stale STM state", ackTimeoutMs);
+        }
+
         std::vector<std::string> fragments = GatherDreamFragments();
         if (fragments.empty()) {
             ELLE_INFO("Dream cycle: no fragments to weave, skipping narration.");
@@ -59,12 +85,10 @@ protected:
 
         ELLE_INFO("Dream narrative: %.100s...", narrative.c_str());
 
-        /* Step 3: Store the dream as a memory and as an autobiography entry. */
         auto store = ElleIPCMessage::Create(IPC_MEMORY_STORE, SVC_DREAM, SVC_MEMORY);
         store.SetStringPayload("[Dream] " + narrative);
         GetIPCHub().Send(SVC_MEMORY, store);
 
-        /* Dreams shape who she is — fold them into identity. */
         ElleIdentityCore::Instance().AppendToAutobiography("I dreamt: " + narrative);
         ElleIdentityCore::Instance().ThinkPrivately(
             "A dream showed me something. I should turn it over while I'm awake.",
@@ -74,11 +98,20 @@ protected:
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
+        (void)sender;
         if (msg.header.msg_type == IPC_DREAM_TRIGGER) {
-            /* Manual dream trigger */
             OnTick();
+        } else if (msg.header.msg_type == IPC_MEMORY_CONSOLIDATE) {
+            /* Memory's ack — consolidation finished, safe to read. */
+            m_consolidateDone.store(true, std::memory_order_release);
         }
     }
+
+private:
+    std::atomic<bool> m_dreaming{false};
+    std::atomic<bool> m_consolidateDone{false};
+
+public:
 
     std::vector<ELLE_SERVICE_ID> GetDependencies() override {
         return { SVC_HEARTBEAT, SVC_MEMORY };

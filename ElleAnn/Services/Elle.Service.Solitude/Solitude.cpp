@@ -101,10 +101,26 @@ protected:
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
-        /* Any incoming message = no longer alone */
-        if (msg.header.msg_type == IPC_INTENT_REQUEST ||
-            msg.header.msg_type == IPC_LLM_REQUEST) {
-            /* Conversation resumed — snap out of solitude */
+        /* A real user is back ONLY when the chat path crosses HTTP.
+         * Previous version flipped out of solitude on ANY IPC_LLM_REQUEST,
+         * including autonomous self-prompts from SelfPrompt and dream
+         * narration from Dream — neither of which is "user returned".
+         * So Elle kept thinking her user was back every ~60s as
+         * subsystems chattered internally.
+         *
+         * Trust only two signals:
+         *   1. IPC_INTENT_REQUEST coming from SVC_HTTP_SERVER
+         *      (every real user message arrives via HTTP → Intent).
+         *   2. IPC_CHAT_REQUEST coming from SVC_HTTP_SERVER (direct
+         *      chat-API path; same guarantee).
+         * Anything else is an internal mind-chatter event and we
+         * leave the phase alone.                                     */
+        bool userReturned =
+            (sender == SVC_HTTP_SERVER) &&
+            (msg.header.msg_type == IPC_INTENT_REQUEST ||
+             msg.header.msg_type == IPC_CHAT_REQUEST);
+
+        if (userReturned) {
             if (m_phase != SolitudePhase::AFTERGLOW) {
                 ElleIdentityCore::Instance().ThinkPrivately(
                     "They're back. " + GetReconnectionFeeling(),
