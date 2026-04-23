@@ -358,6 +358,22 @@ Fix: added `<TreatWarningAsError>false</TreatWarningAsError>` +
 `Elle.Lua.Behavioral.vcxproj`. A single comment above the ItemGroup
 explains the scope. Our own C++ surface keeps /W4 /WX.
 
+### MSBuild /WX regression canary (Feb 2026)
+Added a new `wx-pattern-canary` job to `.github/workflows/elleann-build.yml`.
+Runs on `ubuntu-latest` in <1s and fails fast on any reintroduction of
+the three mass patterns that cost us three manual MSBuild rounds:
+
+1. Bare `(uint32_t)22NN` IPC opcode casts (→ C2664 narrowing at `ElleIPCMessage::Create`)
+2. `std::filesystem::path::u8string()` outside `.c_str()` contexts
+   (→ C++20 `std::u8string` ≠ `std::string`, implicit conversion broken)
+3. `std::transform(..., ::tolower)` / `::toupper` (→ C4244 inside `<algorithm>`)
+
+All three currently scan clean on the tree. Whitelist is a single grep —
+no separate config file to drift. This is additive to the existing
+MSBuild job (which already runs `/WX`) — the canary just surfaces these
+specific categories in seconds instead of minutes, with an error
+message pointing to the exact fix.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

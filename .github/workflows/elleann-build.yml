@@ -170,6 +170,81 @@ jobs:
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────────────────
+  # MSBuild /WX regression canary — runs on Linux in <1s BEFORE the slow
+  # Windows MSBuild job. Catches the narrow set of pattern-level latent
+  # bugs that cost us three manual back-and-forth rounds to surface:
+  #
+  #   1. Bare `(uint32_t)22xx /* IPC_X_* */` casts fed into
+  #      `ElleIPCMessage::Create(ELLE_IPC_MSG_TYPE, …)` — implicit enum
+  #      narrowing that /WX rejects as C2664.
+  #   2. `std::filesystem::path::u8string()` feeding `vector<string>` init
+  #      lists or `json` values — C++20 made u8string return std::u8string,
+  #      not std::string, so the implicit conversion broke under /WX.
+  #   3. Bare `::tolower` / `::toupper` passed to `std::transform(...)` —
+  #      instantiates the algorithm template with int→char inside the STL,
+  #      firing C4244 at <algorithm>(…) under /WX. Use the unsigned-char
+  #      lambda form instead.
+  #
+  # All three were real fixes in Feb 2026; any reintroduction breaks the
+  # CI inside ~1s instead of 3min of MSBuild on Windows. Whitelist lives
+  # entirely in this grep — no separate config file to drift out of sync.
+  # ────────────────────────────────────────────────────────────────────────
+  wx-pattern-canary:
+    name: MSBuild /WX Pattern Canary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for known /WX-breaking patterns
+        run: |
+          set -u
+          SCAN_DIRS=(ElleAnn/Shared ElleAnn/Services ElleAnn/Lua/Elle.Lua.Behavioral)
+          exit_code=0
+
+          echo "::group::Pattern 1 — (uint32_t)22NN IPC opcode casts"
+          HITS_1=$(grep -rn --include='*.cpp' --include='*.h' \
+              -E '\(uint32_t\)22[0-9][0-9]' "${SCAN_DIRS[@]}" 2>/dev/null || true)
+          if [ -n "$HITS_1" ]; then
+              echo "::error::Bare (uint32_t)22NN found — cast as (ELLE_IPC_MSG_TYPE)22NN instead."
+              echo "$HITS_1"
+              exit_code=1
+          else
+              echo "clean"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Pattern 2 — .u8string() in vector<string>/json init lists"
+          # Any .u8string() inside a brace-init-list is suspicious. We
+          # allow .u8string() only when it's fed into a .c_str() call (e.g.
+          # for printf logging), which is already narrowed to the caller's
+          # encoding expectation.
+          HITS_2=$(grep -rn --include='*.cpp' --include='*.h' \
+              -E '\.u8string\(\)' "${SCAN_DIRS[@]}" 2>/dev/null \
+              | grep -vE '\.u8string\(\)\.c_str\(\)' || true)
+          if [ -n "$HITS_2" ]; then
+              echo "::error::.u8string() outside .c_str() context — use .string() for string-typed sinks."
+              echo "$HITS_2"
+              exit_code=1
+          else
+              echo "clean"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Pattern 3 — std::transform(..., ::tolower/::toupper)"
+          HITS_3=$(grep -rn --include='*.cpp' --include='*.h' \
+              -E 'std::transform\([^)]*,\s*::(tolower|toupper)\s*\)' \
+              "${SCAN_DIRS[@]}" 2>/dev/null || true)
+          if [ -n "$HITS_3" ]; then
+              echo "::error::Bare ::tolower/::toupper in std::transform — use [](unsigned char c){return (char)std::tolower(c);} lambda."
+              echo "$HITS_3"
+              exit_code=1
+          else
+              echo "clean"
+          fi
+          echo "::endgroup::"
+
+          exit $exit_code
+
+  # ────────────────────────────────────────────────────────────────────────
   # Static hygiene — sln ↔ disk, XML well-formedness.
   # ────────────────────────────────────────────────────────────────────────
   sln-integrity:
