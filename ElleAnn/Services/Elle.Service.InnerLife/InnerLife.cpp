@@ -416,15 +416,42 @@ protected:
         auto expr = m_engine.ShouldExpress();
         if (expr.should_express && expr.urgency > 0.5f) {
             ELLE_INFO("Inner life expression: %.80s...", expr.expression.c_str());
-            /* Send to cognitive service for potential expression */
-            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT, SVC_INNER_LIFE, SVC_COGNITIVE);
-            msg.SetStringPayload("[Inner expression] " + expr.expression);
-            GetIPCHub().Send(SVC_COGNITIVE, msg);
+            /* Previously this went IPC_SELF_PROMPT → SVC_COGNITIVE, which
+             * Cognitive does not handle. Now we submit a real autonomous
+             * intent so QueueWorker → Cognitive picks it up as a proper
+             * binary ELLE_INTENT_RECORD, and mirror the raw expression to
+             * SelfPrompt which owns the IPC_SELF_PROMPT opcode.          */
+            ELLE_INTENT_RECORD it{};
+            it.type         = INTENT_EMOTIONAL_EXPRESSION;
+            it.status       = INTENT_PENDING;
+            it.urgency      = expr.urgency;
+            it.confidence   = 0.7f;
+            it.required_trust = 0;
+            it.timeout_ms   = 60000;
+            std::string text = "[Inner expression] " + expr.expression;
+            strncpy_s(it.description, text.c_str(), ELLE_MAX_MSG - 1);
+            strncpy_s(it.parameters, "origin=innerlife", ELLE_MAX_MSG - 1);
+            ElleDB::SubmitIntent(it);
+
+            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT, SVC_INNER_LIFE, SVC_SELF_PROMPT);
+            msg.SetStringPayload(text);
+            GetIPCHub().Send(SVC_SELF_PROMPT, msg);
         }
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
-        /* Process post-response authenticity checks */
+        /* Post-response authenticity check — Cognitive emits
+         * IPC_POST_RESPONSE once per turn with the full context. */
+        if (msg.header.msg_type == IPC_POST_RESPONSE) {
+            try {
+                auto j = nlohmann::json::parse(msg.GetStringPayload());
+                std::string userMsg   = j.value("user_message", std::string(""));
+                std::string elleReply = j.value("elle_response", std::string(""));
+                m_engine.PostResponseCheck(userMsg, elleReply);
+            } catch (const std::exception& e) {
+                ELLE_WARN("InnerLife failed to parse IPC_POST_RESPONSE: %s", e.what());
+            }
+        }
     }
 
     std::vector<ELLE_SERVICE_ID> GetDependencies() override {

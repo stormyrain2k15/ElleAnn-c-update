@@ -444,6 +444,16 @@ typedef enum ELLE_IPC_MSG_TYPE {
      * Conflating both on IPC_WORLD_STATE made WorldModel misparse JSON
      * strings as ELLE_WORLD_ENTITY structs and vice-versa. This channel
      * is always a string payload consumed only by HTTPServer's WS fan-out. */
+    /* Bonding interaction event — Cognitive emits one per completed
+     * chat turn. Payload is a JSON string {userMsg, elleReply,
+     * conversationDepth, emotionalIntensity}. Bonding routes it into
+     * ProcessInteraction(). Previously ProcessInteraction had no live
+     * call path and the relationship never evolved.                  */
+    IPC_INTERACTION_RECORDED,
+    /* Post-response reflection — Cognitive emits this after it sends
+     * a reply, so InnerLife can evaluate authenticity / resonance
+     * without another detour. Payload: JSON string with turn context.   */
+    IPC_POST_RESPONSE,
     IPC_WORLD_EVENT
 } ELLE_IPC_MSG_TYPE;
 

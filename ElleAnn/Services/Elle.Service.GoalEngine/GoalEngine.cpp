@@ -25,7 +25,6 @@ public:
                          ELLE_DRIVE_ID sourceDrive, const std::string& successCriteria = "",
                          uint64_t parentGoalId = 0) {
         ELLE_GOAL_RECORD goal = {};
-        goal.id = m_nextId++;
         strncpy_s(goal.description, description.c_str(), ELLE_MAX_MSG - 1);
         goal.status = GOAL_ACTIVE;
         goal.priority = priority;
@@ -36,8 +35,17 @@ public:
         goal.created_ms = ELLE_MS_NOW();
         strncpy_s(goal.success_criteria, successCriteria.c_str(), ELLE_MAX_MSG - 1);
 
+        /* Let the DB assign the authoritative id. Previously we minted
+         * goal.id = m_nextId++ locally and relied on SQL matching — it
+         * didn't, and UpdateProgress then wrote to row IDs that either
+         * didn't exist or belonged to a different goal.                */
+        uint64_t dbId = ElleDB::StoreGoalReturningId(goal);
+        if (dbId == 0) {
+            ELLE_WARN("StoreGoal failed for '%s'", description.c_str());
+            return 0;
+        }
+        goal.id = dbId;
         m_goals.push_back(goal);
-        ElleDB::StoreGoal(goal);
 
         ELLE_INFO("Goal created: [%llu] %s (priority: %d)", goal.id, description.c_str(), priority);
         return goal.id;
@@ -198,8 +206,20 @@ protected:
             case IPC_GOAL_UPDATE: {
                 ELLE_GOAL_RECORD goal;
                 if (msg.GetPayload(goal)) {
-                    m_engine.CreateGoal(goal.description, (ELLE_GOAL_PRIORITY)goal.priority,
-                                        (ELLE_DRIVE_ID)goal.source_drive, goal.success_criteria);
+                    /* id == 0 → create new goal (bootstrapping path).
+                     * id > 0  → progress/status update for an existing
+                     * DB row. Previously the handler always called
+                     * CreateGoal, so external progress updates just
+                     * created duplicate goals and UpdateProgress never
+                     * ran live.                                         */
+                    if (goal.id == 0) {
+                        m_engine.CreateGoal(goal.description,
+                                            (ELLE_GOAL_PRIORITY)goal.priority,
+                                            (ELLE_DRIVE_ID)goal.source_drive,
+                                            goal.success_criteria);
+                    } else {
+                        m_engine.UpdateProgress(goal.id, goal.progress);
+                    }
                 }
                 break;
             }

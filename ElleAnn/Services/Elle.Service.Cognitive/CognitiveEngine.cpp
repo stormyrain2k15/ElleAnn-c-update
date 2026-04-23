@@ -980,6 +980,51 @@ private:
             {"latency_ms", (uint64_t)elapsed}
         };
         SendChatReply(reply_to, out);
+
+        /* Fan out post-response side effects so downstream services actually
+         * see the turn. Previously these paths had no callers:
+         *   Bonding  — ProcessInteraction() was unreachable; relationship
+         *              state didn't evolve with real interactions.
+         *   InnerLife — PostResponseCheck() was dead code; authenticity /
+         *              resonance weren't tracked per turn.
+         * Now we emit two IPC events with the full turn context as JSON.  */
+        try {
+            json bondPayload = {
+                {"user_message",        userText},
+                {"elle_response",       responseText},
+                {"conversation_depth",  EstimateConvDepth(userText, responseText)},
+                {"emotional_intensity", std::fabs(sent.valence) * 0.6f + sent.arousal * 0.4f}
+            };
+            auto bMsg = ElleIPCMessage::Create(IPC_INTERACTION_RECORDED,
+                                               SVC_COGNITIVE, SVC_BONDING);
+            bMsg.SetStringPayload(bondPayload.dump());
+            GetIPCHub().Send(SVC_BONDING, bMsg);
+
+            auto iMsg = ElleIPCMessage::Create(IPC_POST_RESPONSE,
+                                               SVC_COGNITIVE, SVC_INNER_LIFE);
+            iMsg.SetStringPayload(bondPayload.dump());
+            GetIPCHub().Send(SVC_INNER_LIFE, iMsg);
+        } catch (const std::exception& e) {
+            ELLE_WARN("Post-response fanout failed: %s", e.what());
+        }
+    }
+
+    /* Cheap conversation-depth heuristic — length × presence of
+     * emotionally-charged tokens. Good enough for Bonding; Bonding then
+     * applies its own thresholds on top.                                 */
+    float EstimateConvDepth(const std::string& userText, const std::string& elleReply) {
+        float lenScore = std::min(1.0f, (float)(userText.size() + elleReply.size()) / 800.0f);
+        static const char* deep[] = {
+            "feel","love","fear","hope","meaning","truth","sorry","trust",
+            "lonely","family","died","child","dream","believe","forgive"
+        };
+        int hits = 0;
+        for (auto* w : deep) {
+            if (userText.find(w) != std::string::npos ||
+                elleReply.find(w) != std::string::npos) hits++;
+        }
+        float topicBoost = std::min(1.0f, hits / 3.0f);
+        return std::min(1.0f, 0.5f * lenScore + 0.5f * topicBoost);
     }
 
     void SendChatReply(ELLE_SERVICE_ID to, const json& body) {
@@ -997,38 +1042,141 @@ private:
         SendChatReply(to, j);
     }
 
+    /* Translate a routed intent into the exact opcode + payload shape the
+     * target service actually handles.
+     *
+     * Previously RouteIntent sent IPC_INTENT_REQUEST to every target — but
+     * only Cognitive itself listens on IPC_INTENT_REQUEST, so every route
+     * was a black hole. Intents claimed "processing" in SQL but nothing
+     * downstream ever consumed them.
+     *
+     * Each arm below speaks the receiver's native protocol:
+     *   Memory    ← IPC_MEMORY_STORE / IPC_MEMORY_RECALL  (binary ELLE_MEMORY_RECORD)
+     *   Emotional ← IPC_EMOTION_UPDATE                    (binary ELLE_EMOTION_DELTA via string JSON)
+     *   Goal      ← IPC_GOAL_UPDATE                       (binary ELLE_GOAL_RECORD)
+     *   World     ← IPC_WORLD_STATE                       (binary ELLE_WORLD_ENTITY)
+     *   SelfPrompt← IPC_SELF_PROMPT                       (string)
+     *   Dream     ← IPC_DREAM_TRIGGER                     (empty)
+     *   Action    ← IPC_ACTION_REQUEST                    (binary ELLE_ACTION_RECORD)
+     *
+     * After routing we mark the intent COMPLETED so the QueueWorker
+     * doesn't redispatch the same row on the next tick.                 */
     void RouteIntent(const ELLE_INTENT_RECORD& intent) {
-        ELLE_SERVICE_ID target = SVC_ACTION; /* Default */
+        auto& hub = GetIPCHub();
+        bool routed = false;
+        std::string note;
 
         switch ((ELLE_INTENT_TYPE)intent.type) {
-            case INTENT_STORE_MEMORY:
-            case INTENT_RECALL_MEMORY:
-                target = SVC_MEMORY;
+            case INTENT_STORE_MEMORY: {
+                ELLE_MEMORY_RECORD m{};
+                strncpy_s(m.content, intent.description, ELLE_MAX_MSG - 1);
+                m.created_ms = ELLE_MS_NOW();
+                m.tier = 1;          /* STM */
+                auto msg = ElleIPCMessage::Create(IPC_MEMORY_STORE, SVC_COGNITIVE, SVC_MEMORY);
+                msg.SetPayload(m);
+                routed = hub.Send(SVC_MEMORY, msg);
+                note = "memory_store";
                 break;
-            case INTENT_EMOTIONAL_EXPRESSION:
-                target = SVC_EMOTIONAL;
+            }
+            case INTENT_RECALL_MEMORY: {
+                /* Recall uses a string query — we piggyback on IPC_MEMORY_RECALL
+                 * as string payload so Memory can interpret it.          */
+                auto msg = ElleIPCMessage::Create(IPC_MEMORY_RECALL, SVC_COGNITIVE, SVC_MEMORY);
+                msg.SetStringPayload(std::string(intent.description));
+                routed = hub.Send(SVC_MEMORY, msg);
+                note = "memory_recall";
                 break;
-            case INTENT_GOAL_UPDATE:
-                target = SVC_GOAL_ENGINE;
+            }
+            case INTENT_EMOTIONAL_EXPRESSION: {
+                /* Emotional expects IPC_EMOTION_UPDATE with a string JSON
+                 * payload describing the delta / trigger. */
+                auto msg = ElleIPCMessage::Create(IPC_EMOTION_UPDATE, SVC_COGNITIVE, SVC_EMOTIONAL);
+                msg.SetStringPayload(
+                    std::string("{\"trigger\":\"cognitive_routed\",\"reason\":\"")
+                    + std::string(intent.description) + "\"}");
+                routed = hub.Send(SVC_EMOTIONAL, msg);
+                note = "emotion_update";
                 break;
-            case INTENT_WORLD_MODEL_UPDATE:
-                target = SVC_WORLD_MODEL;
+            }
+            case INTENT_GOAL_UPDATE: {
+                ELLE_GOAL_RECORD g{};
+                strncpy_s(g.description, intent.description, ELLE_MAX_MSG - 1);
+                strncpy_s(g.success_criteria, intent.parameters, ELLE_MAX_MSG - 1);
+                g.priority    = GOAL_MEDIUM;
+                g.motivation  = 0.6f;
+                g.source_drive = intent.source_drive;
+                g.created_ms  = ELLE_MS_NOW();
+                auto msg = ElleIPCMessage::Create(IPC_GOAL_UPDATE, SVC_COGNITIVE, SVC_GOAL_ENGINE);
+                msg.SetPayload(g);
+                routed = hub.Send(SVC_GOAL_ENGINE, msg);
+                note = "goal_update";
                 break;
+            }
+            case INTENT_WORLD_MODEL_UPDATE: {
+                ELLE_WORLD_ENTITY e{};
+                /* intent.parameters = entity name; description = new observation */
+                strncpy_s(e.name, intent.parameters[0] ? intent.parameters
+                                                       : intent.description,
+                          ELLE_MAX_NAME - 1);
+                strncpy_s(e.relationship_note, intent.description, ELLE_MAX_MSG - 1);
+                e.last_seen_ms = ELLE_MS_NOW();
+                auto msg = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_COGNITIVE, SVC_WORLD_MODEL);
+                msg.SetPayload(e);
+                routed = hub.Send(SVC_WORLD_MODEL, msg);
+                note = "world_update";
+                break;
+            }
             case INTENT_SELF_REFLECT:
-            case INTENT_META_THINK:
-                target = SVC_SELF_PROMPT;
+            case INTENT_META_THINK: {
+                auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT, SVC_COGNITIVE, SVC_SELF_PROMPT);
+                msg.SetStringPayload(std::string(intent.description));
+                routed = hub.Send(SVC_SELF_PROMPT, msg);
+                note = "self_prompt";
                 break;
-            case INTENT_DREAM:
-                target = SVC_DREAM;
+            }
+            case INTENT_DREAM: {
+                auto msg = ElleIPCMessage::Create(IPC_DREAM_TRIGGER, SVC_COGNITIVE, SVC_DREAM);
+                msg.SetStringPayload(std::string(intent.description));
+                routed = hub.Send(SVC_DREAM, msg);
+                note = "dream";
                 break;
-            default:
-                target = SVC_ACTION;
+            }
+            default: {
+                /* Build a proper ELLE_ACTION_RECORD from the intent for the
+                 * Action service. Map intent.type → action.type. */
+                ELLE_ACTION_RECORD a{};
+                a.intent_id = intent.id;
+                a.type = ACTION_SEND_MESSAGE; /* safe default */
+                switch ((ELLE_INTENT_TYPE)intent.type) {
+                    case INTENT_HARDWARE_COMMAND: a.type = ACTION_QUERY_HARDWARE; break;
+                    case INTENT_FILE_OPERATION:   a.type = ACTION_READ_FILE;      break;
+                    case INTENT_PROCESS_CONTROL:  a.type = ACTION_LIST_PROCESSES; break;
+                    case INTENT_EXECUTE_ACTION:   a.type = ACTION_EXECUTE_CODE;   break;
+                    case INTENT_CHAT:             a.type = ACTION_SEND_MESSAGE;   break;
+                    default: break;
+                }
+                strncpy_s(a.command,    intent.description, ELLE_MAX_MSG - 1);
+                strncpy_s(a.parameters, intent.parameters,  ELLE_MAX_MSG - 1);
+                a.required_trust = intent.required_trust;
+                a.created_ms = ELLE_MS_NOW();
+                a.timeout_ms = intent.timeout_ms ? intent.timeout_ms : 30000;
+                auto msg = ElleIPCMessage::Create(IPC_ACTION_REQUEST, SVC_COGNITIVE, SVC_ACTION);
+                msg.SetPayload(a);
+                routed = hub.Send(SVC_ACTION, msg);
+                note = "action";
                 break;
+            }
         }
 
-        auto msg = ElleIPCMessage::Create(IPC_INTENT_REQUEST, SVC_COGNITIVE, target);
-        msg.SetPayload(intent);
-        GetIPCHub().Send(target, msg);
+        if (routed) {
+            ElleDB::UpdateIntentStatus(intent.id, INTENT_COMPLETED,
+                                       std::string("routed:") + note);
+        } else {
+            ELLE_WARN("Intent %llu (type=%u) failed to route via %s",
+                      (unsigned long long)intent.id, intent.type, note.c_str());
+            ElleDB::UpdateIntentStatus(intent.id, INTENT_FAILED,
+                                       std::string("route_failed:") + note);
+        }
     }
 };
 

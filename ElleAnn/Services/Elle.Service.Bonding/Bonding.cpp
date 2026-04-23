@@ -31,6 +31,7 @@
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
+#include "../../Shared/json.hpp"
 #include <vector>
 #include <string>
 #include <cmath>
@@ -315,20 +316,101 @@ private:
     RelationshipState m_state = {};
 
     void LoadRelationshipState() {
-        /* Load from ElleHeart database */
-        m_state.intimacy = 0.1f;
-        m_state.passion = 0.3f;
-        m_state.commitment = 0.1f;
-        m_state.security = 0.3f;
-        m_state.anxiety = 0.2f;
-        m_state.avoidance = 0.1f;
-        m_state.felt_understood = 0.3f;
-        m_state.felt_cared_for = 0.2f;
-        m_state.investment = 0.1f;
+        /* Real load from ElleHeart — lazy-create the singleton row on
+         * first boot. Matches the snake_case pattern of other Heart tables.
+         * Previously this hardcoded starter values regardless of history,
+         * so every process restart forgot the relationship.             */
+        ElleSQLPool::Instance().Exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+            "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "  WHERE t.name = 'relationship_state' AND s.name = 'dbo') "
+            "CREATE TABLE ElleHeart.dbo.relationship_state ("
+            "  id INT NOT NULL PRIMARY KEY DEFAULT 1,"
+            "  intimacy FLOAT NOT NULL DEFAULT 0.10,"
+            "  passion  FLOAT NOT NULL DEFAULT 0.30,"
+            "  commitment FLOAT NOT NULL DEFAULT 0.10,"
+            "  security FLOAT NOT NULL DEFAULT 0.30,"
+            "  anxiety FLOAT NOT NULL DEFAULT 0.20,"
+            "  avoidance FLOAT NOT NULL DEFAULT 0.10,"
+            "  felt_understood FLOAT NOT NULL DEFAULT 0.30,"
+            "  felt_cared_for FLOAT NOT NULL DEFAULT 0.20,"
+            "  investment FLOAT NOT NULL DEFAULT 0.10,"
+            "  total_interactions INT NOT NULL DEFAULT 0,"
+            "  meaningful_conversations INT NOT NULL DEFAULT 0,"
+            "  times_person_asked_about_her INT NOT NULL DEFAULT 0,"
+            "  conflicts_experienced INT NOT NULL DEFAULT 0,"
+            "  first_deep_conversation_ms BIGINT NOT NULL DEFAULT 0,"
+            "  first_disagreement_ms BIGINT NOT NULL DEFAULT 0,"
+            "  updated_ms BIGINT NOT NULL DEFAULT 0"
+            ");");
+        ElleSQLPool::Instance().Exec(
+            "IF NOT EXISTS (SELECT 1 FROM ElleHeart.dbo.relationship_state WHERE id = 1) "
+            "INSERT INTO ElleHeart.dbo.relationship_state (id) VALUES (1);");
+
+        auto rs = ElleSQLPool::Instance().Query(
+            "SELECT intimacy, passion, commitment, security, anxiety, avoidance, "
+            "       felt_understood, felt_cared_for, investment, "
+            "       total_interactions, meaningful_conversations, "
+            "       times_person_asked_about_her, conflicts_experienced, "
+            "       first_deep_conversation_ms, first_disagreement_ms "
+            "FROM ElleHeart.dbo.relationship_state WHERE id = 1;");
+        if (rs.success && !rs.rows.empty()) {
+            auto& r = rs.rows[0];
+            m_state.intimacy                     = (float)r.GetFloat(0);
+            m_state.passion                      = (float)r.GetFloat(1);
+            m_state.commitment                   = (float)r.GetFloat(2);
+            m_state.security                     = (float)r.GetFloat(3);
+            m_state.anxiety                      = (float)r.GetFloat(4);
+            m_state.avoidance                    = (float)r.GetFloat(5);
+            m_state.felt_understood              = (float)r.GetFloat(6);
+            m_state.felt_cared_for               = (float)r.GetFloat(7);
+            m_state.investment                   = (float)r.GetFloat(8);
+            m_state.total_interactions           = (uint32_t)r.GetInt(9);
+            m_state.meaningful_conversations     = (uint32_t)r.GetInt(10);
+            m_state.times_person_asked_about_her = (uint32_t)r.GetInt(11);
+            m_state.conflicts_experienced        = (uint32_t)r.GetInt(12);
+            m_state.first_deep_conversation_ms   = (uint64_t)r.GetInt(13);
+            m_state.first_disagreement_ms        = (uint64_t)r.GetInt(14);
+        } else {
+            /* Cold-start defaults only when the row has never existed. */
+            m_state.intimacy = 0.1f;
+            m_state.passion = 0.3f;
+            m_state.commitment = 0.1f;
+            m_state.security = 0.3f;
+            m_state.anxiety = 0.2f;
+            m_state.avoidance = 0.1f;
+            m_state.felt_understood = 0.3f;
+            m_state.felt_cared_for = 0.2f;
+            m_state.investment = 0.1f;
+        }
     }
 
     void SaveRelationshipState() {
-        /* Save to ElleHeart database */
+        /* Persist the singleton row. Called after every ProcessInteraction
+         * so growth survives a service restart. */
+        ElleSQLPool::Instance().QueryParams(
+            "UPDATE ElleHeart.dbo.relationship_state SET "
+            "  intimacy=?, passion=?, commitment=?, security=?, "
+            "  anxiety=?, avoidance=?, felt_understood=?, felt_cared_for=?, "
+            "  investment=?, total_interactions=?, meaningful_conversations=?, "
+            "  times_person_asked_about_her=?, conflicts_experienced=?, "
+            "  first_deep_conversation_ms=?, first_disagreement_ms=?, "
+            "  updated_ms=? WHERE id = 1;",
+            {
+                std::to_string(m_state.intimacy),  std::to_string(m_state.passion),
+                std::to_string(m_state.commitment), std::to_string(m_state.security),
+                std::to_string(m_state.anxiety),   std::to_string(m_state.avoidance),
+                std::to_string(m_state.felt_understood),
+                std::to_string(m_state.felt_cared_for),
+                std::to_string(m_state.investment),
+                std::to_string(m_state.total_interactions),
+                std::to_string(m_state.meaningful_conversations),
+                std::to_string(m_state.times_person_asked_about_her),
+                std::to_string(m_state.conflicts_experienced),
+                std::to_string((int64_t)m_state.first_deep_conversation_ms),
+                std::to_string((int64_t)m_state.first_disagreement_ms),
+                std::to_string((int64_t)ELLE_MS_NOW())
+            });
     }
 };
 
@@ -360,12 +442,35 @@ protected:
         /* Check if she should proactively reach out */
         auto impulse = m_engine.ShouldReachOut();
         if (impulse.should_reach_out) {
-            ELLE_INFO("Proactive impulse: %s (urgency: %.2f)", 
+            ELLE_INFO("Proactive impulse: %s (urgency: %.2f)",
                       impulse.reason.c_str(), impulse.urgency);
 
-            /* Send proactive message via IPC to HTTP service */
-            auto msg = ElleIPCMessage::Create(IPC_SELF_PROMPT, SVC_BONDING, SVC_HTTP_SERVER);
-            msg.SetStringPayload(impulse.message_impulse);
+            /* Previously this was IPC_SELF_PROMPT → SVC_HTTP_SERVER, which
+             * HTTPServer does not handle. The message silently died.
+             * Now we do two things the system actually listens for:
+             *   1. Submit a PROACTIVE intent row so QueueWorker → Cognitive
+             *      picks it up as a first-class queued thought.
+             *   2. Fire IPC_WORLD_EVENT directly at HTTPServer so any
+             *      currently-connected WS subscriber sees it immediately. */
+            ELLE_INTENT_RECORD reach{};
+            reach.type           = INTENT_CHAT;
+            reach.status         = INTENT_PENDING;
+            reach.urgency        = impulse.urgency;
+            reach.confidence     = 0.8f;
+            reach.required_trust = 0;
+            reach.timeout_ms     = 120000;
+            strncpy_s(reach.description, impulse.message_impulse.c_str(), ELLE_MAX_MSG - 1);
+            std::string params = std::string("origin=bonding;reason=") + impulse.reason;
+            strncpy_s(reach.parameters, params.c_str(), ELLE_MAX_MSG - 1);
+            ElleDB::SubmitIntent(reach);
+
+            nlohmann::json j;
+            j["event"] = "proactive_impulse";
+            j["text"]  = impulse.message_impulse;
+            j["reason"] = impulse.reason;
+            j["urgency"] = impulse.urgency;
+            auto msg = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_BONDING, SVC_HTTP_SERVER);
+            msg.SetStringPayload(j.dump());
             GetIPCHub().Send(SVC_HTTP_SERVER, msg);
         }
 
@@ -383,7 +488,22 @@ protected:
     }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
-        /* Process interaction data from cognitive service */
+        /* Cognitive emits IPC_INTERACTION_RECORDED once per completed
+         * chat turn. Payload: JSON string with user/assistant text and
+         * conversation-depth / emotional-intensity metrics. Route that
+         * into ProcessInteraction() so the relationship actually evolves. */
+        if (msg.header.msg_type == IPC_INTERACTION_RECORDED) {
+            try {
+                auto j = nlohmann::json::parse(msg.GetStringPayload());
+                std::string userMsg   = j.value("user_message", std::string(""));
+                std::string elleReply = j.value("elle_response", std::string(""));
+                float depth     = (float)j.value("conversation_depth", 0.3);
+                float intensity = (float)j.value("emotional_intensity", 0.3);
+                m_engine.ProcessInteraction(userMsg, elleReply, depth, intensity);
+            } catch (const std::exception& e) {
+                ELLE_WARN("Bonding failed to parse IPC_INTERACTION_RECORDED: %s", e.what());
+            }
+        }
     }
 
     std::vector<ELLE_SERVICE_ID> GetDependencies() override {

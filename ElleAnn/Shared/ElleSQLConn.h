@@ -207,6 +207,10 @@ namespace ElleDB {
 
     /* Goals */
     bool StoreGoal(const ELLE_GOAL_RECORD& goal);
+    /* StoreGoal + return the DB-assigned IDENTITY id so callers don't
+     * have to invent their own in-memory id and then desync from the
+     * actual row. Returns 0 on failure.                                 */
+    uint64_t StoreGoalReturningId(const ELLE_GOAL_RECORD& goal);
     bool UpdateGoalProgress(uint64_t goalId, float progress);
     bool GetActiveGoals(std::vector<ELLE_GOAL_RECORD>& out);
 

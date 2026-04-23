@@ -146,10 +146,24 @@ private:
             storeMsg.SetStringPayload(std::string("[Self-thought] ") + resp.content);
             GetIPCHub().Send(SVC_MEMORY, storeMsg);
 
-            /* May generate follow-up intents */
-            auto intentMsg = ElleIPCMessage::Create(IPC_INTENT_REQUEST, SVC_SELF_PROMPT, SVC_COGNITIVE);
-            intentMsg.SetStringPayload(resp.content);
-            GetIPCHub().Send(SVC_COGNITIVE, intentMsg);
+            /* Self-thoughts become real queued intents — SubmitIntent writes
+             * a PENDING row to ElleCore.dbo.IntentQueue. QueueWorker then
+             * claims it atomically and hands it to Cognitive as a proper
+             * binary ELLE_INTENT_RECORD. Previously we fired IPC_INTENT_REQUEST
+             * with a string payload directly at Cognitive — but Cognitive
+             * reads GetPayload(intent) (a struct), so the string was
+             * interpreted as struct bytes and silently dropped.         */
+            ELLE_INTENT_RECORD newIntent{};
+            newIntent.type           = INTENT_SELF_REFLECT;
+            newIntent.status         = INTENT_PENDING;
+            newIntent.source_drive   = 0;   /* autonomous */
+            newIntent.urgency        = 0.3f;
+            newIntent.confidence     = 0.7f;
+            newIntent.required_trust = 0;
+            newIntent.timeout_ms     = 60000;
+            strncpy_s(newIntent.description, resp.content, ELLE_MAX_MSG - 1);
+            strncpy_s(newIntent.parameters, "origin=selfprompt", ELLE_MAX_MSG - 1);
+            ElleDB::SubmitIntent(newIntent);
         }
     }
 

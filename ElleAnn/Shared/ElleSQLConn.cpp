@@ -1126,11 +1126,21 @@ static void EnsureGoalsTable() {
 }
 
 bool StoreGoal(const ELLE_GOAL_RECORD& goal) {
+    return StoreGoalReturningId(goal) != 0;
+}
+
+uint64_t StoreGoalReturningId(const ELLE_GOAL_RECORD& goal) {
     EnsureGoalsTable();
-    return ElleSQLPool::Instance().QueryParams(
+    /* INSERT ... OUTPUT INSERTED.id so the DB's IDENTITY value flows back
+     * to the caller in one round trip. GoalEngine used to assign its own
+     * in-memory id via ++m_nextId and then hope that matched the SQL row;
+     * the two drifted immediately and UpdateProgress() hit the wrong
+     * row (or no row at all).                                           */
+    auto rs = ElleSQLPool::Instance().QueryParams(
         "INSERT INTO ElleCore.dbo.goals "
         "(description, status, priority, progress, motivation, source_drive, "
         " parent_goal_id, success_criteria, created_ms, deadline_ms, attempts) "
+        "OUTPUT INSERTED.id "
         "VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, '0'), ?, ?, NULLIF(?, '0'), ?);",
         {
             std::string(goal.description),
@@ -1144,7 +1154,9 @@ bool StoreGoal(const ELLE_GOAL_RECORD& goal) {
             std::to_string((int64_t)ELLE_MS_NOW()),
             std::to_string((int64_t)goal.deadline_ms),
             std::to_string(goal.attempts)
-        }).success;
+        });
+    if (!rs.success || rs.rows.empty()) return 0;
+    return (uint64_t)rs.rows[0].GetInt(0);
 }
 
 bool UpdateGoalProgress(uint64_t goalId, float progress) {

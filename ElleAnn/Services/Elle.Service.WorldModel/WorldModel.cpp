@@ -13,7 +13,17 @@
 class WorldModel {
 public:
     bool Initialize() {
-        ELLE_INFO("World model initialized");
+        /* Hydrate from SQL so the in-memory entity list starts warm, not
+         * cold on every process restart. Previously Initialize just
+         * logged and returned — so even though entities were persisted
+         * via StoreEntity, the next boot forgot all of them.             */
+        std::vector<ELLE_WORLD_ENTITY> rows;
+        if (ElleDB::GetAllEntities(rows)) {
+            m_entities = std::move(rows);
+            ELLE_INFO("World model initialized (hydrated %zu entities)", m_entities.size());
+        } else {
+            ELLE_INFO("World model initialized (cold start, no entities)");
+        }
         return true;
     }
 
