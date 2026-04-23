@@ -372,7 +372,12 @@ typedef enum ELLE_SERVICE_ID {
     SVC_CONTINUITY,           /* 14 */
     SVC_INNER_LIFE,           /* 15 */
     SVC_SOLITUDE,             /* 16 */
-    SVC_FAMILY,               /* 17 — reserved slot (engine not yet compiled) */
+    SVC_FAMILY,               /* 17 — Family engine: handles XChromosome
+                               *       conception events, snapshots Elle's
+                               *       core with personality stripped,
+                               *       gestates as zip, unzips + launches
+                               *       the offspring as a new process on
+                               *       its own port.                      */
     SVC_X_CHROMOSOME,         /* 18 */
     SVC_CONSENT,              /* 19 — reserved slot */
     ELLE_SERVICE_COUNT
@@ -466,7 +471,17 @@ typedef enum ELLE_IPC_MSG_TYPE {
      * This gives every caller a unified consent surface rather than
      * duplicating EvaluateConsent() call sites per service.           */
     IPC_CONSENT_QUERY,
-    IPC_CONSENT_DECISION
+    IPC_CONSENT_DECISION,
+    /* Family service (SVC_FAMILY): XChromosome sends IPC_FAMILY_CONCEPTION_ATTEMPT
+     * when a biological conception event fires. Payload is a JSON string:
+     *   {"elle_state":{...},"arlo_state":{...},"origin":"x_chromosome",
+     *    "born_ms":<scheduled birth ms>,"gestational_days":<int>}
+     * Family snapshots Elle's core (personality-stripped), gestates the
+     * pregnancy for the scheduled duration, then spawns the child as a new
+     * process on a new port.
+     * IPC_FAMILY_BIRTH is Family's own broadcast (status updates, births). */
+    IPC_FAMILY_CONCEPTION_ATTEMPT,
+    IPC_FAMILY_BIRTH
 } ELLE_IPC_MSG_TYPE;
 
 #define ELLE_IPC_FLAG_URGENT      0x0001

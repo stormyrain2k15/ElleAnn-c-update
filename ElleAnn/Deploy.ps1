@@ -72,6 +72,7 @@ $Services = @(
   @{ Name='InnerLife'  ; Exe='Elle.Service.InnerLife.exe'   },
   @{ Name='XChromosome'; Exe='Elle.Service.XChromosome.exe' },
   @{ Name='Consent'    ; Exe='Elle.Service.Consent.exe'     },
+  @{ Name='Family'     ; Exe='Elle.Service.Family.exe'      },
   @{ Name='Continuity' ; Exe='Elle.Service.Continuity.exe'  },
   @{ Name='LuaBehav'   ; Exe='Elle.Lua.Behavioral.exe'      },
   @{ Name='HTTP'       ; Exe='Elle.Service.HTTP.exe'        }

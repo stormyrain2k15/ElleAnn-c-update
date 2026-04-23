@@ -84,10 +84,9 @@ using nlohmann::json;
 #define IPC_X_MISCARRIAGE             ((uint32_t)2225)
 #endif
 
-/* Family conception opcode (matches FamilyEngine reference). */
-#ifndef IPC_FAMILY_CONCEPTION_ATTEMPT
-#define IPC_FAMILY_CONCEPTION_ATTEMPT ((uint32_t)2110)
-#endif
+/* IPC_FAMILY_CONCEPTION_ATTEMPT is now declared in Shared/ElleTypes.h alongside
+ * every other ELLE_IPC_MSG_TYPE value, so this local fallback #define is no
+ * longer needed. Family service (SVC_FAMILY) consumes it.                   */
 
 /*──────────────────────────────────────────────────────────────────────────────
  * JSON HELPERS
@@ -558,13 +557,10 @@ private:
         auto d = m_engine.Deliver();
         if (!d.delivered) return 0;
 
-        /* Persist the birth attempt to a durable ElleHeart table so when
-         * the Family engine is compiled (SVC_FAMILY is a reserved slot per
-         * ElleTypes.h:375), it can replay the backlog. Previously we only
-         * fired an IPC to an uncompiled service and the data vanished.
-         * We ALSO fire the IPC so that if the Family engine IS online the
-         * event is delivered live — it's safe either way (unknown
-         * destinations are dropped by the hub).                            */
+        /* Dual-write for durability: the event goes to Family live AND is
+         * persisted to ElleHeart.dbo.x_conception_attempts. Family's boot
+         * path drains this table, so even if the Family service is down
+         * at the exact moment of conception the pregnancy is not lost. */
         ElleSQLPool::Instance().Exec(
             "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
             "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
