@@ -2,6 +2,7 @@
  * ElleConfig.cpp — Central Configuration Loader Implementation
  ******************************************************************************/
 #include "ElleConfig.h"
+#include "ElleLogger.h"     /* ELLE_WARN / ELLE_INFO macros used below */
 #include <fstream>
 #include <sstream>
 #include <algorithm>

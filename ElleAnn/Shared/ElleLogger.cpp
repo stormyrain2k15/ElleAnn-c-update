@@ -3,6 +3,7 @@
  ******************************************************************************/
 #include "ElleLogger.h"
 #include "ElleSQLConn.h"
+#include "ElleQueueIPC.h"   /* for ElleIPC::GetServiceName() in FormatLogLine */
 #include <cstdarg>
 #include <ctime>
 #include <iomanip>

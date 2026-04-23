@@ -13,6 +13,7 @@
 #include "json.hpp"
 #include "ElleJsonExtract.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <sstream>
 #include <iomanip>
@@ -32,6 +33,8 @@ namespace {
  * optimistic local apply already produced.
  *──────────────────────────────────────────────────────────────────────────────*/
 static void SendMutate(const std::string& op, const json& args) {
+    auto* hub = ElleIdentityCore::GetRegisteredHub();
+    if (!hub) return;    /* no hub registered — unit-test / early-boot path */
     json payload = {
         {"op", op},
         {"args", args}
@@ -44,10 +47,12 @@ static void SendMutate(const std::string& op, const json& args) {
      * still happened; the mutation will be reconciled on next service
      * restart via LoadFromDatabase (the local apply also wrote to SQL in
      * pre-fabric days — we keep SQL writes in SVC_IDENTITY only now). */
-    GetIPCHub().Send(SVC_IDENTITY, msg);
+    hub->Send(SVC_IDENTITY, msg);
 }
 
 static void BroadcastDelta(const std::string& op, const json& args, uint64_t seq) {
+    auto* hub = ElleIdentityCore::GetRegisteredHub();
+    if (!hub) return;
     json payload = {
         {"op", op},
         {"args", args},
@@ -56,9 +61,24 @@ static void BroadcastDelta(const std::string& op, const json& args, uint64_t seq
     auto msg = ElleIPCMessage::Create(IPC_IDENTITY_DELTA, SVC_IDENTITY, (ELLE_SERVICE_ID)0);
     msg.SetStringPayload(payload.dump());
     msg.header.flags |= ELLE_IPC_FLAG_BROADCAST;
-    GetIPCHub().Broadcast(msg);
+    hub->Broadcast(msg);
 }
 } /* anonymous namespace */
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Hub registration. Stored outside the class to keep the header free of
+ * <atomic> / ElleQueueIPC.h. A raw pointer is correct here — the hub is
+ * owned by ElleServiceBase and outlives every ElleIdentityCore call.
+ *──────────────────────────────────────────────────────────────────────────────*/
+static std::atomic<ElleIPCHub*> s_identityHub{ nullptr };
+
+void ElleIdentityCore::SetIPCHub(ElleIPCHub* hub) {
+    s_identityHub.store(hub, std::memory_order_release);
+}
+
+ElleIPCHub* ElleIdentityCore::GetRegisteredHub() {
+    return s_identityHub.load(std::memory_order_acquire);
+}
 
 ElleIdentityCore& ElleIdentityCore::Instance() {
     static ElleIdentityCore inst;

@@ -44,6 +44,9 @@
       <ModuleDefinitionFile>Memory.def</ModuleDefinitionFile>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
+      <!-- Pure-MASM DLL: see notes in Elle.ASM.Crypto.vcxproj. -->
+      <AdditionalOptions>/NOENTRY %(AdditionalOptions)</AdditionalOptions>
+      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
     </Link>
   </ItemDefinitionGroup>
 

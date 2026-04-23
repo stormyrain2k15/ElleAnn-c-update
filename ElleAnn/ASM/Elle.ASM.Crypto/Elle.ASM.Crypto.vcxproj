@@ -44,6 +44,14 @@
       <ModuleDefinitionFile>Crypto.def</ModuleDefinitionFile>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
+      <!-- Pure-MASM DLL: no C runtime, no DllMain. /NOENTRY tells the
+           linker not to look up _DllMainCRTStartup (or any entry point)
+           and /NODEFAULTLIB stops it from dragging in the CRT libs that
+           would demand one. The OS treats /NOENTRY DLLs as having no
+           per-process init — fine here, these DLLs only export pure
+           stateless functions. -->
+      <AdditionalOptions>/NOENTRY %(AdditionalOptions)</AdditionalOptions>
+      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
     </Link>
   </ItemDefinitionGroup>
 

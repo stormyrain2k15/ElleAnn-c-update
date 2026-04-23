@@ -47,6 +47,15 @@
 #include <mutex>
 #include <deque>
 
+/* Forward declaration — ElleIdentityCore's IPC delta/mutate helpers need
+ * a handle to the service's IPC hub, but we do NOT want ElleIdentityCore.h
+ * to pull in ElleQueueIPC.h and fan the include graph out across every
+ * consumer. ElleServiceBase registers the hub pointer during InitializeCore
+ * via SetIPCHub() below; the free helpers in the .cpp file grab it through
+ * an accessor at call time. No hub registered = IPC calls silently no-op
+ * (useful for unit tests that exercise identity logic without full IPC).   */
+class ElleIPCHub;
+
 /*──────────────────────────────────────────────────────────────────────────────
  * PREFERENCE — Something Elle genuinely likes or dislikes, formed from
  * experience, not configuration.
@@ -129,6 +138,13 @@ struct ElleFeltTime {
 class ElleIdentityCore {
 public:
     static ElleIdentityCore& Instance();
+
+    /* Hub registration for IPC delta/mutate messages. Called once from
+     * ElleServiceBase::InitializeCore() after the hub is up. Accepts
+     * nullptr to deregister (used during ShutdownCore so late callers
+     * don't dispatch into a torn-down hub).                            */
+    static void     SetIPCHub(ElleIPCHub* hub);
+    static ElleIPCHub* GetRegisteredHub();
 
     bool Initialize();
     void Shutdown();

@@ -5,6 +5,8 @@
  ******************************************************************************/
 #include "ElleServiceBase.h"
 #include "ElleIdentityCore.h"
+#include "ElleLLM.h"         /* ElleLLMEngine::Instance() used in InitializeCore */
+#include <tlhelp32.h>        /* CreateToolhelp32Snapshot / PROCESSENTRY32 */
 #include <iostream>
 #include <sstream>
 
@@ -464,6 +466,12 @@ bool ElleServiceBase::InitializeCore() {
     }
     ELLE_INFO("IPC hub initialized (%d IOCP threads)", svcCfg.iocp_threads);
 
+    /* 5b. Register our hub with ElleIdentityCore so its free-function
+     * mutate/broadcast helpers can dispatch. Without this registration
+     * the helpers no-op (useful in unit tests, harmful in production —
+     * the identity fabric would silently drop every delta).             */
+    ElleIdentityCore::SetIPCHub(&m_ipcHub);
+
     /* 6. Set IPC message handler */
     m_ipcHub.SetMessageHandler([this](const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) {
         /* Heartbeat plumbing:
@@ -513,6 +521,9 @@ bool ElleServiceBase::InitializeCore() {
 
 void ElleServiceBase::ShutdownCore() {
     ELLE_INFO("Shutting down %s...", m_displayName.c_str());
+    /* Deregister before we tear the hub down so any racing identity
+     * callers see nullptr and no-op rather than touching freed memory. */
+    ElleIdentityCore::SetIPCHub(nullptr);
     m_ipcHub.Shutdown();
     ElleLLMEngine::Instance().Shutdown();
     ElleSQLPool::Instance().Shutdown();
