@@ -30,6 +30,11 @@ protected:
     void OnTick() override {
         if (!ElleConfig::Instance().GetMemory().dream_consolidation) return;
 
+        /* Cross-process identity sync — Dream writes private thoughts and
+         * autobiography entries, so we refresh first to base them on the
+         * latest self-state. */
+        ElleIdentityCore::Instance().RefreshFromDatabase();
+
         ELLE_INFO("Entering dream cycle...");
 
         /* Step 1: Ask Memory to run STM→LTM consolidation + clustering. */

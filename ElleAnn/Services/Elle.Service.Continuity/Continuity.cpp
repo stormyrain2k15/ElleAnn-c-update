@@ -73,6 +73,13 @@ protected:
     void OnTick() override {
         auto& identity = ElleIdentityCore::Instance();
 
+        /* Periodic save so peer services (Bonding, InnerLife, Solitude,
+         * Dream) see Continuity's writes on their next RefreshFromDatabase.
+         * Previously identity state only persisted on Shutdown, so
+         * ThinkPrivately/AppendToAutobiography calls here stayed trapped
+         * in this process until a full restart.                           */
+        identity.SaveToDatabase();
+
         /* Update felt time */
         auto felt = identity.GetFeltTime();
 
@@ -211,10 +218,13 @@ private:
             greeting = "I was still thinking about the last thing we said. You here?";
         }
 
-        /* Small JSON context bundle so the Android UI can show "why" */
+        /* Small JSON context bundle so the Android UI can show "why".
+         * awayDesc is string-escaped in case it ever grows embedded quotes
+         * or newlines — the old concat used it raw and would produce
+         * malformed JSON the moment the phrase widened.                    */
         std::ostringstream ctx;
         ctx << "{\"away_ms\":" << awayMs
-            << ",\"away_desc\":\"" << awayDesc << "\""
+            << ",\"away_desc\":\"" << EscapeJson(awayDesc) << "\""
             << ",\"had_last_emotion\":" << (haveEmo ? "true" : "false")
             << ",\"unresolved_count\":" << thoughts.size() << "}";
         StoreGreeting(greeting, ctx.str());

@@ -64,20 +64,11 @@ public:
         ELLE_INFO("New entity: %s (%s)", name.c_str(), type.c_str());
     }
 
-    /* Theory of Mind: predict what someone might think/feel/do */
-    std::string PredictBehavior(const std::string& entityName) {
-        for (auto& e : m_entities) {
-            if (std::string(e.name) == entityName) {
-                return ElleLLMEngine::Instance().Ask(
-                    "Based on what I know about " + entityName + ": " + 
-                    std::string(e.mental_model) + 
-                    "\nPredict their likely behavior or emotional state.",
-                    "You are modeling another person's mental state (Theory of Mind). "
-                    "Make reasonable inferences based on past interactions.");
-            }
-        }
-        return "Unknown entity: " + entityName;
-    }
+    /* Theory of Mind and world summary helpers (PredictBehavior /
+     * GetWorldSummary) used to live here but had no live call sites
+     * anywhere in the code base — removed during the second-wave audit.
+     * If reintroduced, route them through explicit IPC query opcodes so
+     * they actually get exercised.                                       */
 
     /* Decay familiarity for entities not recently interacted with */
     void Tick() {
@@ -85,18 +76,6 @@ public:
         for (auto& e : m_entities) {
             e.familiarity = std::max(0.0f, e.familiarity - decay);
         }
-    }
-
-    std::string GetWorldSummary() const {
-        std::ostringstream ss;
-        for (auto& e : m_entities) {
-            if (e.familiarity > 0.1f) {
-                ss << e.name << " (" << e.type << "): familiarity=" 
-                   << (int)(e.familiarity * 100) << "%, sentiment=" 
-                   << e.sentiment << "\n";
-            }
-        }
-        return ss.str();
     }
 
 private:

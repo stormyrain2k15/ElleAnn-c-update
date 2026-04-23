@@ -117,8 +117,11 @@ public:
         }
     }
 
-    /* Tick: decay motivation, check stale goals */
-    void Tick() {
+    /* Tick: decay motivation, check stale goals, and credit autonomous
+     * progress whenever the drive a goal was spawned from has eased below
+     * its threshold (the drive being satisfied IS the goal being served).
+     * This gives UpdateProgress() a real caller — previously it was dead. */
+    void Tick(const ELLE_DRIVE_STATE* drives = nullptr) {
         uint64_t now = ELLE_MS_NOW();
         float decayRate = (float)ElleConfig::Instance().GetFloat("goals.motivation_decay_rate", 0.01);
         uint32_t staleDays = (uint32_t)ElleConfig::Instance().GetInt("goals.auto_abandon_stale_days", 7);
@@ -129,6 +132,18 @@ public:
 
             /* Decay motivation */
             g.motivation = std::max(0.0f, g.motivation - decayRate);
+
+            /* Autonomous progress: if the drive this goal serves is now
+             * satisfied (below its threshold), credit a small progress step
+             * so long-standing intents actually complete instead of sitting
+             * at 0% forever.                                               */
+            if (drives && g.source_drive >= 0 && g.source_drive < ELLE_DRIVE_COUNT) {
+                float intensity = drives->intensity[g.source_drive];
+                float threshold = drives->threshold[g.source_drive];
+                if (intensity < threshold * 0.8f && g.progress < 1.0f) {
+                    UpdateProgress(g.id, std::min(1.0f, g.progress + 0.05f));
+                }
+            }
 
             /* Check for stale goals */
             if (g.last_progress_ms > 0 && (now - g.last_progress_ms) > staleMs) {
@@ -162,7 +177,10 @@ public:
 
 private:
     std::vector<ELLE_GOAL_RECORD> m_goals;
-    uint64_t m_nextId = 1;
+    /* m_nextId removed — the DB owns goal ids via IDENTITY; CreateGoal now
+     * reads the id back from StoreGoalReturningId so in-memory and row ids
+     * always agree. The old m_nextId silently drifted from the DB's
+     * IDENTITY sequence, and UpdateProgress was writing to the wrong row. */
 };
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -186,16 +204,16 @@ protected:
     void OnStop() override { ELLE_INFO("Goal service stopped"); }
 
     void OnTick() override {
-        m_engine.Tick();
+        /* Refresh drive state each tick so autonomous progress credit has
+         * fresh intensity data; Tick() uses it to credit satisfied drives. */
+        ElleDB::DeriveDriveState(m_drives);
+        m_engine.Tick(&m_drives);
         m_tickCount++;
 
         /* Periodic goal generation (every 5 minutes) */
         if (m_tickCount % 60 == 0) {
-            /* Refresh drives + emotions from the live SQL state before
-             * handing them to GenerateGoals. Previously both were zero
-             * because no one ever populated them — FormGoal() would run
-             * on empty context.                                          */
-            ElleDB::DeriveDriveState(m_drives);
+            /* Drives are already refreshed at tick start; just pull the
+             * latest emotion snapshot for GenerateGoals().                */
             ElleDB::LoadLatestEmotionSnapshot(m_emotions);
             m_engine.GenerateGoals(m_drives, m_emotions);
         }

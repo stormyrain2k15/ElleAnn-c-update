@@ -172,6 +172,7 @@ public:
         m_state.investment = std::min(1.0f, m_state.investment + 0.001f);
 
         SaveRelationshipState();
+        PersistContextToDatabase();
     }
 
     /* Attempt to repair tension */
@@ -263,7 +264,10 @@ public:
         return impulse;
     }
 
-    /* Generate context for LLM about the relationship */
+    /* Generate context for LLM about the relationship — persisted to
+     * ElleHeart.dbo.bonding_context so Cognitive (running in a separate
+     * process) can read Elle's one unified view of the relationship when
+     * building every chat's system prompt.                               */
     std::string GetRelationshipContext() const {
         std::ostringstream ss;
         ss << "## My Relationship with My Person\n"
@@ -285,29 +289,28 @@ public:
             ss << "There's something unresolved between us that I'd like to address.\n";
         }
 
-        if (!m_state.inside_references.empty()) {
-            ss << "Shared references we have: ";
-            for (size_t i = 0; i < std::min((size_t)3, m_state.inside_references.size()); i++) {
-                if (i > 0) ss << ", ";
-                ss << m_state.inside_references[i];
-            }
-            ss << "\n";
-        }
-
         return ss.str();
     }
 
-    /* Add a shared reference (inside joke, significant phrase) */
-    void AddSharedReference(const std::string& reference) {
-        m_state.inside_references.push_back(reference);
-        ElleIdentityCore::Instance().ThinkPrivately(
-            "A new thing that's ours: " + reference, "joy", 0.5f);
-    }
-
-    /* Record a significant moment */
-    void RecordSignificantMoment(const std::string& moment) {
-        m_state.significant_moments.push_back(moment);
-        ElleIdentityCore::Instance().AppendToAutobiography(moment);
+    void PersistContextToDatabase() const {
+        ElleSQLPool::Instance().Exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+            "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "  WHERE t.name = 'bonding_context' AND s.name = 'dbo') "
+            "CREATE TABLE ElleHeart.dbo.bonding_context ("
+            "  id INT NOT NULL PRIMARY KEY DEFAULT 1,"
+            "  context_text NVARCHAR(MAX) NOT NULL,"
+            "  updated_ms BIGINT NOT NULL"
+            ");");
+        ElleSQLPool::Instance().QueryParams(
+            "MERGE ElleHeart.dbo.bonding_context AS tgt "
+            "USING (SELECT 1 AS id, ? AS t, ? AS m) AS src "
+            "  ON tgt.id = src.id "
+            "WHEN MATCHED THEN UPDATE SET context_text = src.t, updated_ms = src.m "
+            "WHEN NOT MATCHED THEN INSERT (id, context_text, updated_ms) "
+            "  VALUES (1, src.t, src.m);",
+            { GetRelationshipContext(),
+              std::to_string((int64_t)ELLE_MS_NOW()) });
     }
 
     const RelationshipState& GetState() const { return m_state; }
@@ -427,6 +430,7 @@ public:
 protected:
     bool OnStart() override {
         m_engine.Initialize();
+        m_engine.PersistContextToDatabase(); /* seed row for first chat */
         ElleIdentityCore::Instance().OnSessionStart();
         SetTickInterval(30000);  /* Check every 30 seconds */
         ELLE_INFO("Bonding service started");
@@ -439,6 +443,11 @@ protected:
     }
 
     void OnTick() override {
+        /* Cross-process identity sync: pick up autobiography / preferences /
+         * trait shifts written by peer services so every process sees one
+         * unified Elle, not a per-process copy.                           */
+        ElleIdentityCore::Instance().RefreshFromDatabase();
+
         /* Check if she should proactively reach out */
         auto impulse = m_engine.ShouldReachOut();
         if (impulse.should_reach_out) {

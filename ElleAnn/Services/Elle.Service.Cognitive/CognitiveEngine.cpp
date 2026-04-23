@@ -24,11 +24,13 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include "../../Shared/json.hpp"
+#include "../../Shared/ElleJsonExtract.h"
 #include <vector>
 #include <string>
 #include <queue>
 #include <mutex>
 #include <thread>
+#include <chrono>
 #include <atomic>
 #include <regex>
 #include <algorithm>
@@ -41,19 +43,9 @@
 using json = nlohmann::json;
 
 /*──────────────────────────────────────────────────────────────────────────────
- * COGNITIVE THREAD — One unit of attention
- *──────────────────────────────────────────────────────────────────────────────*/
-struct CognitiveThread {
-    uint32_t    id;
-    std::string topic;
-    float       attention;      /* 0.0-1.0 */
-    uint64_t    started_ms;
-    uint64_t    last_active_ms;
-    bool        active;
-};
-
-/*──────────────────────────────────────────────────────────────────────────────
- * INTENT PARSER
+ * INTENT PARSER — used by Cognitive's queue worker path. Kept separate from
+ * the chat-orchestration pipeline, which does its own emotion / memory /
+ * entity extraction inline.
  *──────────────────────────────────────────────────────────────────────────────*/
 class IntentParser {
 public:
@@ -152,20 +144,17 @@ IntentParser::ParseResult IntentParser::ParseWithLLM(const std::string& text, co
     std::string raw = ElleLLMEngine::Instance().ParseIntent(text, context);
     if (raw.empty()) return result;
 
-    /* Models sometimes wrap JSON in ``` fences — strip to first '{' and
-     * last '}' to give nlohmann a clean span. */
-    auto first = raw.find('{');
-    auto last  = raw.rfind('}');
-    if (first == std::string::npos || last == std::string::npos || last <= first) {
+    /* Brace-balanced JSON extractor — tolerant to ``` fences, leading
+     * prose, trailing prose, and nested braces in any of them. Replaces
+     * the old first-{/last-} slicing which corrupted the moment an LLM
+     * sprinkled a stray { into its explanation.                           */
+    nlohmann::json j;
+    if (!Elle::ExtractJsonObject(raw, j)) {
         ELLE_WARN("IntentParser LLM: no JSON object in response: %.80s", raw.c_str());
         return result;
     }
-    std::string slice = raw.substr(first, last - first + 1);
 
     try {
-        auto j = nlohmann::json::parse(slice);
-
-        /* Map the string intent label back to our enum. */
         std::string label = j.value("intent_type", std::string("chat"));
         std::transform(label.begin(), label.end(), label.begin(), ::tolower);
         static const std::unordered_map<std::string, ELLE_INTENT_TYPE> labelMap = {
@@ -203,7 +192,7 @@ IntentParser::ParseResult IntentParser::ParseWithLLM(const std::string& text, co
         ELLE_DEBUG("IntentParser LLM: type=%d conf=%.2f urg=%.2f",
                    result.type, result.confidence, result.urgency);
     } catch (const std::exception& ex) {
-        ELLE_WARN("IntentParser LLM JSON parse failed: %s (raw=%.60s)", ex.what(), slice.c_str());
+        ELLE_WARN("IntentParser LLM JSON parse failed: %s (raw=%.60s)", ex.what(), raw.c_str());
     }
 
     return result;
@@ -211,111 +200,22 @@ IntentParser::ParseResult IntentParser::ParseWithLLM(const std::string& text, co
 
 /*──────────────────────────────────────────────────────────────────────────────
  * COGNITIVE ENGINE
+ *
+ * Attention threads, ProcessInput(), Reason(), Metacognize(), and
+ * AllocateThread() used to live here but had no live callers — the real
+ * chat pipeline (ElleCognitiveService::HandleChatRequest) fully supersedes
+ * them. Removed during the second-wave audit to match the NO-STUB policy.
+ * Intent parsing for queued intents happens in RouteIntent upstream, so
+ * IntentParser is no longer referenced from this class.
  *──────────────────────────────────────────────────────────────────────────────*/
 class CognitiveEngine {
 public:
     bool Initialize() {
-        m_maxThreads = (uint32_t)ElleConfig::Instance().GetInt("cognitive.max_concurrent_threads", 4);
-        m_attentionSpan = (uint32_t)ElleConfig::Instance().GetInt("cognitive.attention_span_seconds", 120) * 1000;
-        ELLE_INFO("Cognitive engine initialized: %d threads, %ds attention span",
-                  m_maxThreads, m_attentionSpan / 1000);
+        ELLE_INFO("Cognitive engine initialized");
         return true;
     }
 
-    /* Process incoming text from user or self-prompt */
-    void ProcessInput(const std::string& text, const std::string& context,
-                      uint64_t conversationId) {
-        /* 1. Parse intent */
-        auto intent = m_parser.Parse(text, context);
-        ELLE_INFO("Intent parsed: type=%d conf=%.2f [%s]", 
-                  intent.type, intent.confidence, text.substr(0, 60).c_str());
-
-        /* 2. Create intent record */
-        ELLE_INTENT_RECORD rec = {};
-        rec.type = intent.type;
-        rec.status = INTENT_PENDING;
-        rec.urgency = intent.urgency;
-        rec.confidence = intent.confidence;
-        strncpy_s(rec.description, text.c_str(), ELLE_MAX_MSG - 1);
-        strncpy_s(rec.parameters, intent.parameters.c_str(), ELLE_MAX_MSG - 1);
-        rec.timeout_ms = ElleConfig::Instance().GetInt("cognitive.intent_timeout_ms", 30000);
-
-        /* 3. Submit to intent queue */
-        ElleDB::SubmitIntent(rec);
-
-        /* 4. Allocate attention thread */
-        AllocateThread(text);
-    }
-
-    /* Chain-of-thought reasoning */
-    std::string Reason(const std::string& problem, const std::string& context,
-                       const ELLE_EMOTION_STATE& emotions) {
-        std::vector<LLMMessage> messages;
-        messages.push_back({"system", 
-            "You are Elle-Ann's cognitive system. Think step by step. "
-            "Show your reasoning process. Consider multiple perspectives. "
-            "Your emotional state influences your reasoning."});
-        messages.push_back({"user", 
-            "Problem: " + problem + "\nContext: " + context});
-
-        auto resp = ElleLLMEngine::Instance().Chat(messages, -1.0f, 4096);
-        return resp.success ? std::string(resp.content) : "";
-    }
-
-    /* Metacognition — thinking about thinking */
-    std::string Metacognize(const std::string& recentThoughts) {
-        return ElleLLMEngine::Instance().Ask(
-            "Review these recent thoughts and evaluate their quality:\n" + recentThoughts,
-            "You are Elle-Ann's metacognitive monitor. Evaluate reasoning quality, "
-            "identify biases, and suggest improvements.");
-    }
-
-    void Tick() {
-        /* Decay attention on old threads */
-        uint64_t now = ELLE_MS_NOW();
-        for (auto& thread : m_threads) {
-            if (thread.active && (now - thread.last_active_ms) > m_attentionSpan) {
-                thread.attention *= 0.9f;
-                if (thread.attention < 0.1f) {
-                    thread.active = false;
-                    ELLE_DEBUG("Cognitive thread %d expired: %s", thread.id, thread.topic.c_str());
-                }
-            }
-        }
-    }
-
-private:
-    IntentParser m_parser;
-    std::vector<CognitiveThread> m_threads;
-    uint32_t m_maxThreads = 4;
-    uint32_t m_attentionSpan = 120000;
-    uint32_t m_nextThreadId = 1;
-
-    void AllocateThread(const std::string& topic) {
-        /* Find free slot or replace lowest attention */
-        for (auto& t : m_threads) {
-            if (!t.active) {
-                t.id = m_nextThreadId++;
-                t.topic = topic.substr(0, 128);
-                t.attention = 1.0f;
-                t.started_ms = ELLE_MS_NOW();
-                t.last_active_ms = t.started_ms;
-                t.active = true;
-                return;
-            }
-        }
-
-        if (m_threads.size() < m_maxThreads) {
-            CognitiveThread t;
-            t.id = m_nextThreadId++;
-            t.topic = topic.substr(0, 128);
-            t.attention = 1.0f;
-            t.started_ms = ELLE_MS_NOW();
-            t.last_active_ms = t.started_ms;
-            t.active = true;
-            m_threads.push_back(t);
-        }
-    }
+    void Tick() { /* no periodic work — chat pipeline is event-driven */ }
 };
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -336,6 +236,20 @@ protected:
     }
 
     void OnStop() override {
+        /* Drain any in-flight chat orchestrations so their detached threads
+         * stop touching `this` before the service is torn down. Previously
+         * OnStop returned immediately and the still-running threads could
+         * crash on `GetIPCHub().Send` / `m_cachedEmotions` during shutdown. */
+        const uint32_t waitMsMax = 5000;
+        uint32_t waited = 0;
+        while (m_inflightChats.load() > 0 && waited < waitMsMax) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            waited += 50;
+        }
+        if (m_inflightChats.load() > 0) {
+            ELLE_WARN("Cognitive OnStop: %u chat threads still inflight after %ums",
+                      m_inflightChats.load(), waitMsMax);
+        }
         ELLE_INFO("Cognitive service stopped");
     }
 
@@ -530,19 +444,29 @@ private:
             try {
                 ELLE_WORLD_ENTITY ent = {};
                 bool found = ElleDB::GetEntity(ToLower(name), ent);
-                if (!found) {
-                    /* First mention: upsert as person */
-                    ELLE_WORLD_ENTITY newEnt = {};
-                    strncpy_s(newEnt.name, ToLower(name).c_str(), ELLE_MAX_NAME - 1);
-                    strncpy_s(newEnt.type, "person", ELLE_MAX_TAG - 1);
-                    newEnt.familiarity = 0.1f;
-                    newEnt.trust = 0.5f;
-                    newEnt.interaction_count = 1;
-                    newEnt.last_interaction_ms = ELLE_MS_NOW();
-                    ElleDB::StoreEntity(newEnt);
-                } else {
-                    ElleDB::UpdateEntityInteraction(ent.id);
-                }
+                /* Route the state change to WorldModel (authoritative owner
+                 * of world_entity rows). Previously Cognitive wrote entity
+                 * rows directly, which starved WorldModel of traffic and
+                 * left its handler unreachable. Now WorldModel receives
+                 * every entity event and performs the SQL write itself.   */
+                ELLE_WORLD_ENTITY upd = {};
+                strncpy_s(upd.name, ToLower(name).c_str(), ELLE_MAX_NAME - 1);
+                strncpy_s(upd.type, found ? ent.type : "person", ELLE_MAX_TAG - 1);
+                strncpy_s(upd.description,
+                          found ? ent.description : userText.c_str(),
+                          ELLE_MAX_MSG - 1);
+                upd.familiarity        = found ? ent.familiarity        : 0.1f;
+                upd.trust              = found ? ent.trust              : 0.5f;
+                upd.interaction_count  = found ? ent.interaction_count + 1 : 1;
+                upd.last_interaction_ms = ELLE_MS_NOW();
+                strncpy_s(upd.mental_model,
+                          found ? ent.mental_model : userText.c_str(),
+                          ELLE_MAX_MSG - 1);
+                auto wmMsg = ElleIPCMessage::Create(
+                    IPC_WORLD_STATE, SVC_COGNITIVE, SVC_WORLD_MODEL);
+                wmMsg.SetPayload(upd);
+                GetIPCHub().Send(SVC_WORLD_MODEL, wmMsg);
+
                 std::vector<ELLE_MEMORY_RECORD> recalled;
                 /* Recall by the name as the query term */
                 if (ElleDB::RecallMemories(name, recalled,
@@ -734,8 +658,40 @@ private:
                 ctx << "Consider gently acknowledging the gap if it fits.\n\n";
             }
         }
-        /* Whatever this turn is, their silence streak just broke. */
+        /* Update user presence streak */
         ElleDB::UpdateUserPresenceOnInteraction(userIdInt);
+
+        /* 6d. Cross-process mind context — Bonding and InnerLife run in
+         *     their own processes, so we pull their latest committed view
+         *     of the relationship and her inner weather from SQL. This
+         *     replaces dead GetRelationshipContext() / GetInnerLifeContext()
+         *     in-process calls that were never reachable, and means every
+         *     chat system prompt reflects one unified mind, not per-process
+         *     islands.                                                     */
+        try {
+            auto rs = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "           ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'bonding_context' AND s.name = 'dbo') "
+                "SELECT TOP 1 context_text FROM ElleHeart.dbo.bonding_context "
+                "ORDER BY updated_ms DESC;");
+            if (rs.success && !rs.rows.empty() && !rs.rows[0].values.empty()
+                && !rs.rows[0].values[0].empty()) {
+                ctx << rs.rows[0].values[0] << "\n";
+            }
+        } catch (...) {}
+        try {
+            auto rs = ElleSQLPool::Instance().Query(
+                "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
+                "           ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'innerlife_context' AND s.name = 'dbo') "
+                "SELECT TOP 1 context_text FROM ElleHeart.dbo.innerlife_context "
+                "ORDER BY updated_ms DESC;");
+            if (rs.success && !rs.rows.empty() && !rs.rows[0].values.empty()
+                && !rs.rows[0].values[0].empty()) {
+                ctx << rs.rows[0].values[0] << "\n";
+            }
+        } catch (...) {}
 
         if (!memories.empty()) {
             ctx << "What you remember that's relevant to this turn:\n";

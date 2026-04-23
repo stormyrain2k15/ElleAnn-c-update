@@ -64,23 +64,6 @@ public:
         }
     }
 
-    /* Call a Lua function by name */
-    bool Call(const std::string& func, int nargs = 0, int nresults = 0) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        lua_getglobal(m_L, func.c_str());
-        if (!lua_isfunction(m_L, -1)) {
-            lua_pop(m_L, 1);
-            return false;
-        }
-        /* Arguments should already be pushed before calling */
-        if (lua_pcall(m_L, nargs, nresults, 0) != LUA_OK) {
-            ELLE_ERROR("Lua error in %s: %s", func.c_str(), lua_tostring(m_L, -1));
-            lua_pop(m_L, 1);
-            return false;
-        }
-        return true;
-    }
-
     /* Evaluate Lua expression and return result as string */
     std::string Eval(const std::string& code) {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -101,40 +84,10 @@ public:
         return result;
     }
 
-    /* Call personality shaping function */
-    std::string ShapeResponse(const std::string& rawResponse, float valence, float arousal) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        lua_getglobal(m_L, "shape_personality");
-        if (!lua_isfunction(m_L, -1)) { lua_pop(m_L, 1); return rawResponse; }
-        lua_pushstring(m_L, rawResponse.c_str());
-        lua_pushnumber(m_L, valence);
-        lua_pushnumber(m_L, arousal);
-        if (lua_pcall(m_L, 3, 1, 0) != LUA_OK) {
-            ELLE_ERROR("Lua shape_personality error: %s", lua_tostring(m_L, -1));
-            lua_pop(m_L, 1);
-            return rawResponse;
-        }
-        std::string result = lua_tostring(m_L, -1) ? lua_tostring(m_L, -1) : rawResponse;
-        lua_pop(m_L, 1);
-        return result;
-    }
-
-    /* Score an intent */
-    float ScoreIntent(const std::string& intentType, float urgency, float driveIntensity) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        lua_getglobal(m_L, "score_intent");
-        if (!lua_isfunction(m_L, -1)) { lua_pop(m_L, 1); return urgency; }
-        lua_pushstring(m_L, intentType.c_str());
-        lua_pushnumber(m_L, urgency);
-        lua_pushnumber(m_L, driveIntensity);
-        if (lua_pcall(m_L, 3, 1, 0) != LUA_OK) {
-            lua_pop(m_L, 1);
-            return urgency;
-        }
-        float score = (float)lua_tonumber(m_L, -1);
-        lua_pop(m_L, 1);
-        return score;
-    }
+    /* Call(), ShapeResponse(), ScoreIntent() were dead C++ wrappers with
+     * no live callers anywhere in the codebase — the service's OnMessage
+     * only routes Eval() and reload events. Removed during the second-
+     * wave audit to keep the public surface honest.                     */
 
     /* Hot-reload all scripts */
     void ReloadScripts() {
@@ -158,16 +111,48 @@ private:
         });
         lua_setfield(m_L, -2, "log");
 
-        /* elle.get_emotion(name) → float */
+        /* elle.get_emotion(name) → float in [0,1]
+         *
+         * Reads the most recent emotion snapshot from SQL. Valid names:
+         *   "valence", "arousal", "dominance", or any dimension index 0..N-1
+         *   as a string (e.g. "0" for the first dimension).
+         * Returns the live value. The old placeholder always returned 0.5
+         * and silently poisoned every behavioural script that relied on it. */
         lua_pushcfunction(m_L, [](lua_State* L) -> int {
-            lua_pushnumber(L, 0.5); /* Placeholder — real impl queries emotional engine */
+            const char* name = luaL_checkstring(L, 1);
+            ELLE_EMOTION_STATE e{};
+            if (!ElleDB::LoadLatestEmotionSnapshot(e)) {
+                lua_pushnumber(L, 0.0);
+                return 1;
+            }
+            double v = 0.0;
+            if      (!strcmp(name, "valence"))   v = e.valence;
+            else if (!strcmp(name, "arousal"))   v = e.arousal;
+            else if (!strcmp(name, "dominance")) v = e.dominance;
+            else {
+                /* Numeric index into the dimensions array. */
+                char* endp = nullptr;
+                long idx = strtol(name, &endp, 10);
+                if (endp != name && idx >= 0 && idx < ELLE_EMOTION_COUNT) {
+                    v = e.dimensions[idx];
+                }
+            }
+            lua_pushnumber(L, v);
             return 1;
         });
         lua_setfield(m_L, -2, "get_emotion");
 
-        /* elle.get_trust() → int */
+        /* elle.get_trust() → int in [0,100]
+         *
+         * Reads the live trust score from ElleSystem.dbo.TrustState. Old
+         * stub returned 5 forever, regardless of any actual trust events. */
         lua_pushcfunction(m_L, [](lua_State* L) -> int {
-            lua_pushinteger(L, 5); /* Placeholder */
+            ELLE_TRUST_STATE ts{};
+            if (ElleDB::GetTrustState(ts)) {
+                lua_pushinteger(L, (lua_Integer)ts.score);
+            } else {
+                lua_pushinteger(L, 0);
+            }
             return 1;
         });
         lua_setfield(m_L, -2, "get_trust");

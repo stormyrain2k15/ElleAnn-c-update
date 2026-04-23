@@ -218,6 +218,9 @@ namespace ElleDB {
     bool StoreEntity(const ELLE_WORLD_ENTITY& entity);
     bool GetEntity(const std::string& name, ELLE_WORLD_ENTITY& out);
     bool UpdateEntityInteraction(uint64_t entityId);
+    /* Hydrate every persisted entity — used by WorldModel on boot so the
+     * in-memory entity list starts warm instead of cold on every restart. */
+    bool GetAllEntities(std::vector<ELLE_WORLD_ENTITY>& out);
 
     /* Memory listing / CRUD (real backing in dbo.memory) */
     struct MemoryRow {

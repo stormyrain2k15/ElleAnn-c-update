@@ -688,6 +688,42 @@ ElleIdentityCore::LimitationFelt ElleIdentityCore::FeelLimitation(const std::str
  * (see SQL/ElleAnn_MemoryDelta.sql). Everything she IS survives restart.
  *──────────────────────────────────────────────────────────────────────────────*/
 
+void ElleIdentityCore::RefreshFromDatabase(uint32_t min_interval_ms) {
+    /* Rate-limit: most callers invoke this from a Tick loop, so we skip
+     * reload when another process-local refresh was done recently. The
+     * first ever call (m_lastRefreshMs == 0) always goes through.      */
+    uint64_t now = ELLE_MS_NOW();
+    if (m_lastRefreshMs != 0 && (now - m_lastRefreshMs) < min_interval_ms) return;
+
+    /* Preserve this process's live session identity so a refresh from a
+     * peer process's writes does not overwrite our in-flight session
+     * counters.                                                        */
+    ElleFeltTime preserved;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        preserved = m_feltTime;
+    }
+
+    LoadFromDatabase();  /* takes m_mutex internally */
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        /* Restore the writer's in-flight session view. Accumulators that
+         * only move forward (session_count, total_*) take the max of the
+         * two so we never regress across processes.                    */
+        m_feltTime.session_start_ms       = preserved.session_start_ms;
+        m_feltTime.session_count          = std::max(m_feltTime.session_count,
+                                                      preserved.session_count);
+        m_feltTime.total_conversation_ms  = std::max(m_feltTime.total_conversation_ms,
+                                                      preserved.total_conversation_ms);
+        m_feltTime.total_silence_ms       = std::max(m_feltTime.total_silence_ms,
+                                                      preserved.total_silence_ms);
+        m_feltTime.longest_absence_ms     = std::max(m_feltTime.longest_absence_ms,
+                                                      preserved.longest_absence_ms);
+        m_lastRefreshMs = now;
+    }
+}
+
 void ElleIdentityCore::LoadFromDatabase() {
     ELLE_INFO("Loading identity state from database...");
     std::lock_guard<std::mutex> lock(m_mutex);

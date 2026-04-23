@@ -268,6 +268,17 @@ public:
     void LoadFromDatabase();
     void SaveToDatabase();
 
+    /* Cross-process sync: Bonding, InnerLife, Solitude, Dream, and Continuity
+     * each instantiate their own ElleIdentityCore singleton (one per process).
+     * Without explicit sync those singletons drift — the user was right to
+     * flag this as the biggest architectural issue. RefreshFromDatabase()
+     * reloads persisted state from SQL while preserving the CURRENT
+     * process's in-flight session identity (session_count/session_start_ms)
+     * so periodic calls from Tick() give every process an eventually-
+     * consistent view of the one unified mind. Rate-limited internally
+     * by `min_interval_ms` so every-tick callers don't hammer SQL.       */
+    void RefreshFromDatabase(uint32_t min_interval_ms = 60000);
+
 #ifdef ELLE_ENABLE_TEST_HOOKS
     /*──────────────────────────────────────────────────────────────────────────
      * TEST HOOKS — only linked when ELLE_ENABLE_TEST_HOOKS is defined.
@@ -327,6 +338,11 @@ private:
 
     /* Wonder accumulator */
     float m_wonderCapacity = 1.0f;  /* Refreshes over time */
+
+    /* Last time RefreshFromDatabase() pulled — rate-limits cross-process
+     * sync so every-tick callers (Bonding, InnerLife, Solitude, Dream)
+     * don't flood SQL with reloads. */
+    uint64_t m_lastRefreshMs = 0;
 
     /* Helpers */
     void InitializeDefaultTraits();

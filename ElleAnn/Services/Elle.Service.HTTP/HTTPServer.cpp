@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <regex>
 #include <atomic>
+#include <thread>
 #include <cstring>
 #include <chrono>
 #include <fstream>
@@ -640,12 +641,36 @@ protected:
         }
         if (m_acceptThread.joinable()) m_acceptThread.join();
 
-        /* Close all WS clients */
+        /* Close all WS clients so their read loops unblock. */
         {
             std::lock_guard<std::mutex> lock(m_wsMutex);
             for (auto& c : m_wsClients) {
                 if (c->socket != INVALID_SOCKET) closesocket(c->socket);
+                c->alive = false;
             }
+        }
+
+        /* Drain-fence: wait for detached HTTP request handlers and detached
+         * WebSocket read loops to finish touching `this` before we return.
+         * Previously OnStop only joined the accept thread — detached
+         * handlers and WS readers kept running against member state during
+         * teardown, which manifested as shutdown crashes under traffic.
+         * 10s cap is generous; at that point we warn and proceed to avoid
+         * a frozen stop.                                                   */
+        const uint32_t waitMsMax = 10000;
+        uint32_t waited = 0;
+        while ((m_activeHttpHandlers.load() > 0 || m_activeWsClients.load() > 0)
+               && waited < waitMsMax) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            waited += 50;
+        }
+        if (m_activeHttpHandlers.load() > 0 || m_activeWsClients.load() > 0) {
+            ELLE_WARN("HTTP OnStop: %u handler(s) / %u ws reader(s) still live after %ums",
+                      m_activeHttpHandlers.load(), m_activeWsClients.load(), waitMsMax);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_wsMutex);
             m_wsClients.clear();
         }
 

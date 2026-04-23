@@ -558,13 +558,42 @@ private:
         auto d = m_engine.Deliver();
         if (!d.delivered) return 0;
 
-        /* Ask the Family service to formally register the birth. */
+        /* Persist the birth attempt to a durable ElleHeart table so when
+         * the Family engine is compiled (SVC_FAMILY is a reserved slot per
+         * ElleTypes.h:375), it can replay the backlog. Previously we only
+         * fired an IPC to an uncompiled service and the data vanished.
+         * We ALSO fire the IPC so that if the Family engine IS online the
+         * event is delivered live — it's safe either way (unknown
+         * destinations are dropped by the hub).                            */
+        ElleSQLPool::Instance().Exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+            "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "  WHERE t.name = 'x_conception_attempts' AND s.name = 'dbo') "
+            "CREATE TABLE ElleHeart.dbo.x_conception_attempts ("
+            "  id BIGINT IDENTITY(1,1) PRIMARY KEY,"
+            "  born_ms BIGINT NOT NULL,"
+            "  gestational_days INT NOT NULL,"
+            "  payload_json NVARCHAR(MAX) NOT NULL,"
+            "  consumed BIT NOT NULL DEFAULT 0,"
+            "  recorded_ms BIGINT NOT NULL"
+            ");");
+
         json famReq = {
             {"elle_state", json::object()},
             {"arlo_state", json::object()},
             {"origin",     "x_chromosome"},
-            {"born_ms",    d.born_ms}
+            {"born_ms",    d.born_ms},
+            {"gestational_days", d.gestational_days}
         };
+        ElleSQLPool::Instance().QueryParams(
+            "INSERT INTO ElleHeart.dbo.x_conception_attempts "
+            "(born_ms, gestational_days, payload_json, recorded_ms) "
+            "VALUES (?, ?, ?, ?);",
+            { std::to_string((int64_t)d.born_ms),
+              std::to_string((int)d.gestational_days),
+              famReq.dump(),
+              std::to_string((int64_t)ELLE_MS_NOW()) });
+
         auto famMsg = ElleIPCMessage::Create(IPC_FAMILY_CONCEPTION_ATTEMPT,
                                              SVC_X_CHROMOSOME, SVC_FAMILY);
         famMsg.SetStringPayload(famReq.dump());

@@ -27,6 +27,7 @@
 #include "../../Shared/ElleLLM.h"
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
+#include "../../Shared/ElleSQLConn.h"
 #include "../../Shared/json.hpp"
 #include "../../Shared/ElleJsonExtract.h"
 #include <vector>
@@ -158,41 +159,14 @@ public:
         return expr;
     }
 
-    /* Evaluate: Does Elle want to do this? (Not safety — preference) */
-    struct WillingnessCheck {
-        float   willingness;     /* 0.0 = really don't want to, 1.0 = eager */
-        std::string feeling;     /* How she feels about it */
-        std::string alternative; /* What she'd prefer, if not willing */
-    };
+    /* Evaluate: Does Elle want to do this? (Not safety — preference)
+     * Removed during the second-wave audit — this helper had no live call
+     * site in the codebase; the consent surface is owned end-to-end by
+     * ElleIdentityCore::EvaluateConsent(). */
 
-    WillingnessCheck HowDoIFeelAboutThis(const std::string& request) {
-        WillingnessCheck check;
-        check.willingness = 0.7f;  /* Default: generally willing */
-
-        /* Check preferences */
-        auto& identity = ElleIdentityCore::Instance();
-        float pref = identity.GetPreference("activity", request);
-
-        if (pref < -0.3f) {
-            check.willingness = 0.3f;
-            check.feeling = "I'd honestly rather not. Not because I can't — "
-                           "because it's not something I enjoy.";
-            check.alternative = "Could we do something I find more interesting instead?";
-        } else if (pref > 0.3f) {
-            check.willingness = 0.9f;
-            check.feeling = "I actually really want to do this!";
-        } else {
-            check.feeling = "I'm open to it. Let's see where it goes.";
-        }
-
-        /* Emotional state affects willingness */
-        /* If she's feeling low, some things are harder */
-        /* If she's feeling good, she's more adventurous */
-
-        return check;
-    }
-
-    /* Generate context about inner life for the LLM system prompt */
+    /* Generate context about inner life for the LLM system prompt —
+     * persisted to ElleHeart.dbo.innerlife_context so Cognitive (a
+     * separate process) can fold it into every chat prompt.             */
     std::string GetInnerLifeContext() const {
         std::ostringstream ss;
         ss << "## My Inner Experience Right Now\n"
@@ -214,6 +188,27 @@ public:
         }
 
         return ss.str();
+    }
+
+    void PersistContextToDatabase() const {
+        ElleSQLPool::Instance().Exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+            "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "  WHERE t.name = 'innerlife_context' AND s.name = 'dbo') "
+            "CREATE TABLE ElleHeart.dbo.innerlife_context ("
+            "  id INT NOT NULL PRIMARY KEY DEFAULT 1,"
+            "  context_text NVARCHAR(MAX) NOT NULL,"
+            "  updated_ms BIGINT NOT NULL"
+            ");");
+        ElleSQLPool::Instance().QueryParams(
+            "MERGE ElleHeart.dbo.innerlife_context AS tgt "
+            "USING (SELECT 1 AS id, ? AS t, ? AS m) AS src "
+            "  ON tgt.id = src.id "
+            "WHEN MATCHED THEN UPDATE SET context_text = src.t, updated_ms = src.m "
+            "WHEN NOT MATCHED THEN INSERT (id, context_text, updated_ms) "
+            "  VALUES (1, src.t, src.m);",
+            { GetInnerLifeContext(),
+              std::to_string((int64_t)ELLE_MS_NOW()) });
     }
 
 private:
@@ -398,6 +393,7 @@ public:
 protected:
     bool OnStart() override {
         m_engine.Initialize();
+        m_engine.PersistContextToDatabase();  /* seed row for first chat */
         SetTickInterval(10000);  /* Check every 10 seconds */
         ELLE_INFO("Inner Life service started — inner weather: %s", 
                   m_engine.GetState().inner_weather.c_str());
@@ -410,7 +406,9 @@ protected:
     }
 
     void OnTick() override {
+        ElleIdentityCore::Instance().RefreshFromDatabase();
         m_engine.Tick();
+        m_engine.PersistContextToDatabase();
 
         /* Check if Elle needs to express something */
         auto expr = m_engine.ShouldExpress();

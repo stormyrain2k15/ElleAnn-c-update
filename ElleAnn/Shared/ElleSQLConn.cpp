@@ -996,6 +996,32 @@ bool UpdateEntityInteraction(uint64_t entityId) {
         { std::to_string(ELLE_MS_NOW()), std::to_string(entityId) }).success;
 }
 
+bool GetAllEntities(std::vector<ELLE_WORLD_ENTITY>& out) {
+    /* Hydrate every row so WorldModel boots warm. No LIMIT — these are
+     * Elle's known people/concepts/places; the list shouldn't balloon. */
+    out.clear();
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT id, name, entity_type, description, familiarity, sentiment, "
+        "       trust, interaction_count, last_interaction_ms, mental_model "
+        "FROM ElleCore.dbo.world_entity ORDER BY last_interaction_ms DESC;");
+    if (!rs.success) return false;
+    for (auto& row : rs.rows) {
+        ELLE_WORLD_ENTITY e{};
+        e.id = (uint64_t)row.GetInt(0);
+        strncpy_s(e.name,        row.values.size() > 1 ? row.values[1].c_str() : "", ELLE_MAX_NAME - 1);
+        strncpy_s(e.type,        row.values.size() > 2 ? row.values[2].c_str() : "", ELLE_MAX_TAG  - 1);
+        strncpy_s(e.description, row.values.size() > 3 ? row.values[3].c_str() : "", ELLE_MAX_MSG  - 1);
+        e.familiarity         = (float)row.GetFloat(4);
+        e.sentiment           = (float)row.GetFloat(5);
+        e.trust               = (float)row.GetFloat(6);
+        e.interaction_count   = (uint32_t)row.GetInt(7);
+        e.last_interaction_ms = (uint64_t)row.GetInt(8);
+        strncpy_s(e.mental_model, row.values.size() > 9 ? row.values[9].c_str() : "", ELLE_MAX_MSG - 1);
+        out.push_back(e);
+    }
+    return true;
+}
+
 bool StoreEntity(const ELLE_WORLD_ENTITY& entity) {
     /* Upsert by name (lowercased). */
     std::string lowered = entity.name;
