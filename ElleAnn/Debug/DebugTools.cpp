@@ -85,13 +85,23 @@ void PrintIntentQueue() {
               << std::setw(10) << "Conf" << "  Description\n";
     std::cout << std::string(80, '-') << "\n";
 
+    if (!rs.success) {
+        std::cout << "  [query failed: " << rs.error << "]\n";
+        return;
+    }
+
+    /* Bounded column access so a schema drift or a NULL that decayed to
+     * an empty-string value doesn't index out-of-bounds. Audit #130. */
+    auto col = [](const SQLRow& r, size_t i) -> std::string {
+        return (i < r.values.size()) ? r.values[i] : std::string("?");
+    };
     for (auto& row : rs.rows) {
-        std::cout << std::setw(8) << row.values[0]
-                  << std::setw(10) << row.values[1]
-                  << std::setw(10) << row.values[2]
-                  << std::setw(8) << row.values[3]
-                  << std::setw(10) << row.values[4]
-                  << "  " << row.values[5] << "\n";
+        std::cout << std::setw(8) << col(row, 0)
+                  << std::setw(10) << col(row, 1)
+                  << std::setw(10) << col(row, 2)
+                  << std::setw(8)  << col(row, 3)
+                  << std::setw(10) << col(row, 4)
+                  << "  " << col(row, 5) << "\n";
     }
 }
 
@@ -107,13 +117,21 @@ void PrintActionQueue() {
               << std::setw(8) << "Trust" << "  Command\n";
     std::cout << std::string(80, '-') << "\n";
 
+    if (!rs.success) {
+        std::cout << "  [query failed: " << rs.error << "]\n";
+        return;
+    }
+
+    auto col = [](const SQLRow& r, size_t i) -> std::string {
+        return (i < r.values.size()) ? r.values[i] : std::string("?");
+    };
     for (auto& row : rs.rows) {
-        std::cout << std::setw(8) << row.values[0]
-                  << std::setw(10) << row.values[1]
-                  << std::setw(10) << row.values[2]
-                  << std::setw(10) << row.values[3]
-                  << std::setw(8) << row.values[5]
-                  << "  " << row.values[4] << "\n";
+        std::cout << std::setw(8) << col(row, 0)
+                  << std::setw(10) << col(row, 1)
+                  << std::setw(10) << col(row, 2)
+                  << std::setw(10) << col(row, 3)
+                  << std::setw(8)  << col(row, 5)
+                  << "  " << col(row, 4) << "\n";
     }
 }
 
@@ -177,34 +195,58 @@ void DisplayEmotions() {
         "SELECT TOP 1 Dimensions, Valence, Arousal, Dominance, TickCount "
         "FROM ElleKnowledge.dbo.EmotionHistory ORDER BY TimestampMs DESC");
 
+    if (!rs.success) {
+        std::cout << "Query failed: " << rs.error << "\n";
+        return;
+    }
     if (rs.rows.empty()) {
         std::cout << "No emotion data available.\n";
         return;
     }
 
     auto& row = rs.rows[0];
-    std::cout << "Valence: " << row.values[1] 
-              << "  Arousal: " << row.values[2]
-              << "  Dominance: " << row.values[3]
-              << "  Tick: " << row.values[4] << "\n\n";
+    /* Guard every column access -- the schema could drift, or NULLs
+     * could degrade to empty strings. Audit #130: debug tooling must
+     * not crash on imperfect data.                                   */
+    auto col = [&](size_t i) -> std::string {
+        return (i < row.values.size()) ? row.values[i] : std::string("?");
+    };
+    std::cout << "Valence: "   << col(1)
+              << "  Arousal: " << col(2)
+              << "  Dominance: " << col(3)
+              << "  Tick: "    << col(4) << "\n\n";
 
-    // Parse dimensions CSV
-    std::string dims = row.values[0];
+    /* Parse dimensions CSV defensively. One bad token used to throw
+     * std::invalid_argument mid-display and crash the whole tool.    */
     std::vector<float> values;
+    values.reserve(128);
+    const std::string dims = col(0);
     std::stringstream ss(dims);
     std::string token;
     while (std::getline(ss, token, ',')) {
-        values.push_back(std::stof(token));
+        try {
+            values.push_back(std::stof(token));
+        } catch (const std::exception&) {
+            values.push_back(0.0f);
+        }
     }
 
-    // Display as bar chart
-    for (size_t i = 0; i < values.size() && i < 102; i++) {
+    const size_t kNames = sizeof(emotionNames) / sizeof(emotionNames[0]);
+    const size_t limit  = std::min<size_t>(values.size(), kNames);
+    for (size_t i = 0; i < limit; i++) {
         if (values[i] < 0.01f) continue; // Skip inactive
-        
+
         std::cout << std::setw(18) << std::left << emotionNames[i] << " ";
         int bars = (int)(values[i] * 40);
+        if (bars < 0)  bars = 0;
+        if (bars > 40) bars = 40;
         for (int b = 0; b < bars; b++) std::cout << "#";
         std::cout << " " << std::fixed << std::setprecision(2) << values[i] << "\n";
+    }
+    if (values.size() > kNames) {
+        std::cout << "  [note: row carried " << values.size()
+                  << " dimensions, names table has " << kNames
+                  << " -- extras ignored]\n";
     }
 }
 

@@ -1,0 +1,21 @@
+# Wav2Lip / GFPGAN runtime dependencies.
+#
+# Install these into the SAME Python environment as the worker.
+# Versions should match your Wav2Lip checkout -- the upstream project
+# is sensitive to particular torch / librosa / opencv combinations.
+#
+# Kept OUT of `requirements.txt` so that a minimal mode of the worker
+# (TTS-only verification, claim-response contract testing, smoke runs
+# against a stub Wav2Lip) can be installed without pulling torch.
+#
+# Audit item #126 (Feb 2026): split runtime vs heavy model deps so the
+# minimal gate can bootstrap in seconds.
+
+torch>=1.13,<2.5
+numpy>=1.24
+opencv-python>=4.7
+librosa==0.10.1
+tqdm>=4.65
+
+# Optional face-enhancement pass. Only required when GFPGAN_SCRIPT is set.
+# gfpgan>=1.3

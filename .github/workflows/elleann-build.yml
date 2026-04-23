@@ -582,3 +582,55 @@ jobs:
                 'all ADD columns are guarded.')
           PY
 
+  # ────────────────────────────────────────────────────────────────────────
+  # cppcheck static analysis.
+  #
+  # Catches a different class of bug than MSBuild warnings: uninitialised
+  # reads, null-deref, signed-vs-unsigned compares, useless self-
+  # assignments, dead code, API misuse. Runs as a separate ubuntu job
+  # (cppcheck on Windows runners is flaky and 10x slower).
+  #
+  # Settings:
+  #   --enable=warning,performance,portability -- no `style` noise, no
+  #   `information` chatter. The first three cover real defects.
+  #   --error-exitcode=1 promotes any finding to a job failure.
+  #   --suppress patterns limit the noise in the handful of areas where
+  #   the codebase deliberately takes a reinterpret_cast shortcut.
+  #   -I Shared teaches cppcheck where the common headers live.
+  #   --inline-suppr lets us narrowly silence findings at the call site
+  #   with `// cppcheck-suppress <id>` when there's a real reason.
+  # ────────────────────────────────────────────────────────────────────────
+  cppcheck:
+    name: C++ Static Analysis (cppcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+          cppcheck --version
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --enable=warning,performance,portability \
+            --inline-suppr \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --suppress=unknownMacro \
+            --suppress=preprocessorErrorDirective \
+            --suppress=internalAstError \
+            --suppress=ConfigurationNotChecked \
+            --suppress=memsetClassFloat \
+            --suppress=invalidPointerCast \
+            --suppress='*:ElleAnn/Shared/json.hpp' \
+            --suppress='*:ElleAnn/Lua/lua54/*' \
+            -I ElleAnn/Shared \
+            -I ElleAnn/Services \
+            --std=c++17 \
+            --platform=win64 \
+            -j 2 \
+            ElleAnn/Shared \
+            ElleAnn/Services \
+            ElleAnn/Lua/Elle.Lua.Behavioral
+

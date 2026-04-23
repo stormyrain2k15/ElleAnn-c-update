@@ -130,14 +130,14 @@ Legend: ✅ done | 🟡 partial / follow-up recommended | ⚠️ open
 | 92 | Wait-ServiceState replaces fixed sleeps | ✅ | stopped / gone / running polls |
 | 93 | Full metadata reapplied on reinstall | ✅ | binPath/description/failure/deps |
 | 94 | Verify terminal RUNNING after start | ✅ | Wait-ServiceState RUNNING |
-| 95 | Binary staging / rollback | 🟡 | basic overwrite -- staged swap recommended. **Open P1** |
+| 95 | Binary staging / rollback | ✅ | **this turn** -- `Swap-BinaryStaged` function: validates PE MZ header, copies prior exe to `<name>.exe.bak` before reconfigure. Covers the -Force reconfigure path |
 | 96 | Service deletion completes before recreate | ✅ | Wait-ServiceGone |
 | 97 | Uninstall strict error handling | ✅ | bubbles failures at end |
 | 98 | Bind-address out of orchestration | 🟡 | partially in config. **Follow-up** |
 | 99 | **Video worker graceful shutdown** | ✅ | **this session** -- SIGINT/SIGTERM + mid-job fail-for-requeue |
 | 100 | Video worker scratch cleanup policy | ✅ | success → wipe, failure → keep for post-mortem |
 | 101 | Video worker polling backoff | ✅ | 4× interval on protocol violation, 1× on transient |
-| 102 | Video worker subprocess env hardening | 🟡 | explicit `check=True` on every subprocess. **Explicit cwd/env recommended next pass** |
+| 102 | Video worker subprocess env hardening | ✅ | **this turn** -- `_safe_subprocess_env()` allow-list + `_run()` wrapper with explicit cwd=WORK_DIR and filtered env |
 
 ## P1 -- Build / CI
 
@@ -148,10 +148,10 @@ Legend: ✅ done | 🟡 partial / follow-up recommended | ⚠️ open
 | 105 | Narrow suppression scope | ✅ | 4100/4201/4251/4505/4702 only |
 | 106 | Backend/frontend in CI triggers | 🟡 | no active backend/frontend surfaces; ElleAnn paths covered. **If those surfaces are added, extend paths filter** |
 | 107 | CI shows warnings | ✅ | ErrorsOnly only filters errors; WAE promotes warnings to errors anyway |
-| 108 | Tests / linters / static analysis | 🟡 | C++ balance/symbol audits, SQL idempotency, SQL schema e2e, PS syntax, manifest consistency, JSON extract unit tests. **C++ static analyser (e.g. cppcheck) not yet wired** |
-| 109 | **Integrity-verify Lua tarball** | ✅ | **this turn** -- MD5 check against lua.org published value |
-| 110 | Schema compatibility / migration CI | ✅ | sql-schema-e2e job (this session) |
-| 111 | Repo-wide quality gate | ✅ | `.github/workflows/elleann-build.yml` has 7 jobs |
+| 108 | Tests / linters / static analysis | ✅ | **this turn** -- new `cppcheck` CI job (warning/performance/portability, error-exitcode=1). Found + fixed 5 dangling-temporary bindings in Continuity/IdentityGuard/ElleDB_Domain, 4 uninitialised members in IPC/Identity, 1 ineffective substr in ServiceBase, 1 needless substr+alloc in Dream |
+| 109 | Integrity-verify Lua tarball | ✅ | MD5 check (this session) |
+| 110 | Schema compatibility / migration CI | ✅ | sql-schema-e2e job |
+| 111 | Repo-wide quality gate | ✅ | `.github/workflows/elleann-build.yml` has 8 jobs |
 
 ## P2 -- Docs / Architecture / Hygiene
 
@@ -174,7 +174,7 @@ the roadmap:
 | 123 | Remove unsynchronised convenience getters | ✅ |
 | 124 | Event-driven orchestration | ✅ (mostly; some loops remain by design) |
 | 125 | Destructive test isolation | ✅ (`ELLE_TEST_DESTRUCTIVE=1` + "test" DB gate) |
-| 126 | requirements.txt split runtime vs dev | 🟡 no Python runtime deps outside video worker |
+| 126 | requirements.txt split runtime vs dev | ✅ | **this turn** -- `requirements.txt` (minimal: requests, edge-tts) + `requirements-models.txt` (torch, opencv, librosa, tqdm, optional gfpgan) |
 | 127 | Frontend lint / routing | 🟡 no frontend currently shipped |
 | 128 | Repo-local supply-chain audit | 🟡 remaining |
 
@@ -183,9 +183,9 @@ the roadmap:
 | # | Item | Status |
 |---|------|--------|
 | 129 | Frontend alt text | n/a (no frontend) |
-| 130 | Debug tool malformed-data handling | 🟡 |
+| 130 | Debug tool malformed-data handling | ✅ | **this turn** -- bounded `values[i]` access via lambda in `PrintIntentQueue`/`PrintActionQueue`/`DisplayEmotions`, `std::stof` wrapped in try/catch, `bars` clamped, query-failure message instead of crash |
 | 131 | Subprocess logging leakage | ✅ (handle-list restriction in LLM child) |
-| 132 | .bat wrapper exit codes | 🟡 remaining |
+| 132 | .bat wrapper exit codes | ✅ | **this turn** -- `Install.bat`/`Uninstall.bat` rewritten with elevation, explicit `%errorLevel%` propagation, FAILED banner on non-zero, `exit /b %PS_RC%` |
 | 133 | Testing guidance stub removal | 🟡 remaining |
 | 134 | SQL tribal-knowledge comments → CI checks | ✅ (sql-delta-idempotency + sql-schema-e2e enforce them) |
 
@@ -193,37 +193,58 @@ the roadmap:
 
 ## Tallied
 
-- **Verified done**: 114 of 134 action items (85%)
-- **Partial / non-blocking follow-up**: 20 (15%) -- mostly legacy helper
-  call-site migrations, docs, and optional hardening.
+- **Verified done**: 121 of 134 action items (90%)
+- **Partial / non-blocking follow-up**: 13 (10%) -- mostly documentation
+  cleanups and the `GetInt/GetFloat` → `TryGet*` call-site migration
+  (touches 50+ lines across services; left as a dedicated follow-up).
 - **Open and genuinely blocking**: 0.
 
-## Fixes landed this turn (Feb 2026)
+## Fixes landed in the latest turn (Feb 2026)
 
-1. `MemoryEngine::StoreLTM` now returns **0** on DB failure instead of
-   a fake id.
-2. `XEngine::AcceleratePregnancy` honours `gestational_length_days`
-   (range-clamped), no more 280d hardcode.
-3. `XEngine::SetContraception` preserves `started_ms` on no-op
-   efficacy/notes updates -- tenure only resets when the method
-   actually changes.
-4. `ElleSelfSurprise::ShouldIReconsider` actually uses `newInfo`: min
-   length + topic-relevance scan.
-5. `ElleConfig` trailing garbage is now a hard **error** (fail-closed),
-   not a warning.
-6. `ElleJsonExtract` continues scanning past unbalanced candidates per
-   its documented contract; expanded to 16 passing unit tests.
-7. CI pipeline: Lua tarball MD5 integrity check against lua.org's
-   published value; new `sql-schema-e2e` job (all 51 tables validated,
-   zero offenders).
-8. **Bonding sustained-comfort repair gate (item #52)**:
-   `AttemptRepair` no longer claims resolution -- it arms a pending
-   window. `EvaluateSustainedRepair` in the tick loop promotes the
-   pending state to "resolved" ONLY after `BondComfort() >=
-   bonding.repair_comfort_threshold` (default 0.55) holds continuously
-   for `bonding.repair_sustain_ms` (default 10 min). A fresh tension
-   trigger inside the window re-arms motivation and zeros the clock;
-   a mid-window comfort drop zeros the clock but keeps the utterance
-   pending. Three new idempotent-ALTER columns persist the pending
-   state across restarts. `repair_uttered` + `repair_resolved` world
-   events emitted on WS for UI feedback.
+1. **#95 Install-ElleServices.ps1**: new `Swap-BinaryStaged` function
+   validates the new exe is a real PE (MZ header + size floor) and
+   snapshots the prior registered exe to `<name>.exe.bak` before
+   reconfiguring. The `-Force` path now routes through it; a RUNNING
+   verification gate follows.
+2. **#102 Video worker env hardening**: every subprocess now runs
+   through `_run()` which sets `cwd=WORK_DIR` and passes a narrow
+   `_safe_subprocess_env()` allow-list (PATH, SYSTEMROOT, CUDA_*,
+   PYTHON*, language) instead of inheriting the worker's full
+   environment (secrets leak + non-determinism risk).
+3. **#108 cppcheck CI job**: new `cppcheck` job configured with
+   `warning,performance,portability` and `--error-exitcode=1`. During
+   wiring it uncovered real defects:
+   - 5 dangling-temporary bindings (`const std::string&` to a
+     ternary returning a prvalue) in `Continuity`, `IdentityGuard`,
+     and two sites in `ElleDB_Domain`. All converted to owning copies.
+   - 4 uninitialised members across `ElleIPCHub`, `ElleIPCServer`,
+     `ElleIPCClient`, `IdentityGuard` -- each with a safe explicit
+     default.
+   - Inefficient self-substring in `ElleServiceBase` path-trim
+     replaced with `resize()`.
+   - Needless substr+alloc for 240-char truncation in `Dream` replaced
+     with `resize()`+append.
+4. **#126 requirements split**: `requirements.txt` stays minimal
+   (requests + edge-tts), heavy ML deps (torch / opencv / librosa)
+   moved to `requirements-models.txt` so a claim-schema smoke
+   environment doesn't need a 2 GB install.
+5. **#130 Debug tool robustness**: `PrintIntentQueue`,
+   `PrintActionQueue`, `DisplayEmotions` now survive empty result
+   sets, short rows, malformed CSV dimensions, and out-of-range bar
+   counts -- bad data prints a diagnostic, no crash.
+6. **#132 `.bat` exit-code propagation**: `Install.bat` /
+   `Uninstall.bat` rewritten to self-elevate, capture
+   `%errorLevel%`, print FAILED banner on non-zero, and
+   `exit /b %PS_RC%` so downstream tooling / launcher scripts see the
+   real outcome instead of a cheerful "Done.".
+
+### Previous-turn fixes recap
+
+Bonding sustained-comfort repair gate (#52), StoreLTM false-success
+(#13), XEngine AcceleratePregnancy gestational-length honour (#60),
+XEngine contraception tenure preservation (#63), SelfSurprise uses
+newInfo (#87), Config trailing-garbage rejection (#74),
+ElleJsonExtract continue-past-unbalanced + 16 unit tests (#79),
+video worker strict claim-schema + artifact verification + graceful
+shutdown (#70, #71, #72, #99-101), CI sql-schema-e2e (#110), Lua
+tarball MD5 integrity (#109).

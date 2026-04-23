@@ -129,7 +129,7 @@ private:
             for (auto& r : rs.rows) {
                 if (r.values.empty() || r.values[0].empty()) continue;
                 std::string c = r.values[0];
-                if (c.size() > 240) c = c.substr(0, 240) + "…";
+                if (c.size() > 240) { c.resize(240); c += "\xE2\x80\xA6"; /* ellipsis */ }
                 out.push_back(c);
             }
         }

@@ -144,11 +144,11 @@ public:
     uint32_t ConnectedClients() const;
 
 private:
-    ELLE_SERVICE_ID m_serviceId;
+    ELLE_SERVICE_ID m_serviceId = (ELLE_SERVICE_ID)0;
     HANDLE          m_hIOCP = nullptr;
     std::string     m_pipeName;
     std::atomic<bool> m_running{false};
-    uint32_t        m_maxInstances;
+    uint32_t        m_maxInstances = 0;
 
     IPCMessageHandler m_handler;
 
@@ -182,8 +182,8 @@ public:
     void OnIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytesTransferred, DWORD error);
 
 private:
-    ELLE_SERVICE_ID m_myService;
-    ELLE_SERVICE_ID m_targetService;
+    ELLE_SERVICE_ID m_myService = (ELLE_SERVICE_ID)0;
+    ELLE_SERVICE_ID m_targetService = (ELLE_SERVICE_ID)0;
     HANDLE          m_hIOCP = nullptr;
     std::unique_ptr<EllePipeConnection> m_conn;
     IPCMessageHandler m_handler;
@@ -223,7 +223,7 @@ public:
     uint64_t MessagesReceived() const { return m_received; }
 
 private:
-    ELLE_SERVICE_ID m_serviceId;
+    ELLE_SERVICE_ID m_serviceId = (ELLE_SERVICE_ID)0;
     HANDLE          m_hIOCP = nullptr;
     bool            m_initialized = false;
     std::atomic<bool> m_running{false};

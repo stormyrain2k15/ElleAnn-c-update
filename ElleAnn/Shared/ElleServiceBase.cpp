@@ -439,7 +439,10 @@ bool ElleServiceBase::InitializeCore() {
     std::string exeDir(exePath);
     size_t lastSlash = exeDir.find_last_of("\\/");
     if (lastSlash != std::string::npos) {
-        exeDir = exeDir.substr(0, lastSlash + 1);
+        /* Truncate in place -- was `exeDir = exeDir.substr(0, ...)`
+         * which cppcheck flags as an ineffective self-substring
+         * assignment. Same semantics, no temporary std::string.   */
+        exeDir.resize(lastSlash + 1);
         configPath = exeDir + "elle_master_config.json";
     }
 

@@ -190,9 +190,9 @@ private:
             "ORDER BY created_ms DESC;",
             { std::to_string(cutoff) });
         if (rs.success && !rs.rows.empty()) {
-            const std::string& existing = rs.rows[0].values.empty()
-                                            ? std::string()
-                                            : rs.rows[0].values[0];
+            std::string existing = rs.rows[0].values.empty()
+                                     ? std::string()
+                                     : rs.rows[0].values[0];
             ELLE_INFO("Reconnection greeting already queued within window — reusing: %.80s",
                       existing.c_str());
             return;

@@ -144,9 +144,9 @@ protected:
             m_originalHash = currentHash;
         } else {
             const std::string& expected = rs.rows[0].values[0];
-            const std::string& algo     = rs.rows[0].values.size() > 1
-                                            ? rs.rows[0].values[1]
-                                            : std::string("sha256");
+            std::string algo = rs.rows[0].values.size() > 1
+                                 ? rs.rows[0].values[1]
+                                 : std::string("sha256");
             if (algo != "sha256") {
                 ELLE_ERROR("Identity: trusted hash uses unsupported algorithm '%s'",
                            algo.c_str());
@@ -247,7 +247,7 @@ private:
     std::string m_identityPath;
     std::string m_originalHash;
     std::string m_configHash;
-    uint32_t    m_checkInterval;
+    uint32_t    m_checkInterval = 60000;
     std::vector<std::string> m_watchedPaths;
 
     bool ComputeIdentityHash(std::string& outHash) {

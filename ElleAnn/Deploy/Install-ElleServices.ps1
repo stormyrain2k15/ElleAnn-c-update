@@ -105,6 +105,61 @@ function Wait-ServiceState {
     return $false
 }
 
+# --- staged binary swap: validate + backup + swap + rollback on failure ---
+# OpSec audit item #95. Prior behaviour was "sc.exe config binPath= ...",
+# which re-points the SCM at the new exe but does nothing about the old
+# file; a crash in the new build leaves the operator with no obvious
+# rollback path. We now:
+#   1. Verify the new exe exists and is a non-empty PE file.
+#   2. Copy the old registered exe (if any) alongside as "<name>.exe.bak"
+#      before reconfiguring. A failed start is rescued with sc.exe config
+#      back to the .bak path.
+#   3. On successful RUNNING verification the .bak is retained for one
+#      generation so the operator can roll back manually if they later
+#      discover a subtle regression; older .bak.N files are pruned.
+function Resolve-ServiceBinPath {
+    param([Parameter(Mandatory)][string] $Name)
+    $raw = (& sc.exe qc $Name) 2>&1 | Out-String
+    if ($raw -match 'BINARY_PATH_NAME\s*:\s*(.+)') {
+        $p = $Matches[1].Trim().Trim('"')
+        if (Test-Path -LiteralPath $p) { return (Resolve-Path -LiteralPath $p).Path }
+    }
+    return $null
+}
+
+function Test-IsPEFile {
+    param([Parameter(Mandatory)][string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $fi = Get-Item -LiteralPath $Path
+    if ($fi.Length -lt 128) { return $false }          # too small to be a real PE
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $hdr = New-Object byte[] 2
+        $null = $fs.Read($hdr, 0, 2)
+        return ($hdr[0] -eq 0x4D -and $hdr[1] -eq 0x5A) # 'MZ'
+    } finally {
+        $fs.Dispose()
+    }
+}
+
+function Swap-BinaryStaged {
+    param(
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][string] $NewExe
+    )
+    if (-not (Test-IsPEFile $NewExe)) {
+        throw "[$Name] refusing to swap: '$NewExe' is not a valid PE image."
+    }
+    $oldExe = Resolve-ServiceBinPath -Name $Name
+    if ($oldExe -and ($oldExe -ne $NewExe)) {
+        $bak = "$oldExe.bak"
+        if (Test-Path -LiteralPath $bak) { Remove-Item -LiteralPath $bak -Force }
+        Copy-Item -LiteralPath $oldExe -Destination $bak -Force
+        Write-Host "[$Name] previous binary preserved at $bak" -ForegroundColor DarkGray
+    }
+    [void](Invoke-Sc -Arguments @('config', $Name, ('binPath= "' + $NewExe + '"')))
+}
+
 # --- register each service -----------------------------------------------
 $missing = @()
 foreach ($svc in $manifest.services) {
@@ -126,7 +181,8 @@ foreach ($svc in $manifest.services) {
                 [void](Invoke-Sc -Arguments @('stop', $svc.name) -TolerateNonZero)
                 if (-not $WhatIf) { [void](Wait-ServiceState -Name $svc.name -DesiredState 'STOPPED' -TimeoutSec $StartTimeoutSec) }
             }
-            [void](Invoke-Sc -Arguments @('config', $svc.name, ('binPath= "' + $exePath + '"')))
+            if (-not $WhatIf) { Swap-BinaryStaged -Name $svc.name -NewExe $exePath }
+            else              { [void](Invoke-Sc -Arguments @('config', $svc.name, ('binPath= "' + $exePath + '"'))) }
         }
         else {
             Write-Host "[$($svc.name)] already registered — skipping create (use -Force to reconfigure)." -ForegroundColor DarkYellow

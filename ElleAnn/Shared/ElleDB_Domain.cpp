@@ -604,7 +604,7 @@ bool GetRecentLogs(std::vector<ELLE_LOG_ENTRY>& out, uint32_t count,
         e.level        = (uint32_t)row.GetInt(0);
         e.source_svc   = (uint32_t)row.GetInt(1);
         e.timestamp_ms = (uint64_t)row.GetInt(2);
-        const std::string& m = row.values.size() > 3 ? row.values[3] : std::string();
+        const std::string m = row.values.size() > 3 ? row.values[3] : std::string();
         strncpy_s(e.message, m.c_str(), ELLE_MAX_MSG - 1);
         out.push_back(e);
     }
@@ -635,7 +635,7 @@ bool GetWorkerStatuses(std::vector<ELLE_SERVICE_STATUS>& out) {
     for (auto& row : rs.rows) {
         ELLE_SERVICE_STATUS s = {};
         s.service_id         = (uint32_t)row.GetInt(0);
-        const std::string& nm = row.values.size() > 1 ? row.values[1] : std::string();
+        const std::string nm = row.values.size() > 1 ? row.values[1] : std::string();
         strncpy_s(s.name, nm.c_str(), ELLE_MAX_NAME - 1);
         s.running            = (uint32_t)row.GetInt(2);
         s.healthy            = (uint32_t)row.GetInt(3);
@@ -646,7 +646,7 @@ bool GetWorkerStatuses(std::vector<ELLE_SERVICE_STATUS>& out) {
         s.cpu_percent        = (float)row.GetFloat(8);
         s.memory_bytes       = (uint64_t)row.GetInt(9);
         s.thread_count       = (uint32_t)row.GetInt(10);
-        const std::string& st = row.values.size() > 11 ? row.values[11] : std::string();
+        const std::string st = row.values.size() > 11 ? row.values[11] : std::string();
         strncpy_s(s.status_text, st.c_str(), sizeof(s.status_text) - 1);
         out.push_back(s);
     }

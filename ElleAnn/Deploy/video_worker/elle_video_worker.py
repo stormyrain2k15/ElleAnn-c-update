@@ -226,18 +226,50 @@ def _verify_artifact(p: Path, label: str) -> None:
 
 
 # --- pipeline steps --------------------------------------------------------
+def _safe_subprocess_env() -> dict:
+    """Return a minimal, explicit environment for our subprocesses.
+
+    Audit item #102: previously we inherited the worker's entire
+    environment into ffmpeg / wav2lip / gfpgan invocations. That's a
+    leak of every unrelated secret the operator set (API tokens,
+    cloud credentials, etc.) and a vector for a tampered env var to
+    influence a deterministic pipeline. We now pass a small
+    allow-listed set.
+    """
+    keep = {"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
+            "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+            "CUDA_VISIBLE_DEVICES", "CUDA_HOME", "CUDNN_HOME",
+            "PYTHONPATH", "PYTHONHOME",
+            "LANG", "LC_ALL", "LC_CTYPE"}
+    return {k: v for k, v in os.environ.items() if k in keep}
+
+
+def _run(cmd, **kwargs) -> None:
+    """subprocess.run wrapper with hardened defaults.
+
+    - `check=True` (any caller can still pass check=False to override).
+    - Explicit cwd defaulting to WORK_DIR so relative paths written by
+      ffmpeg land somewhere we own, never the caller's cwd-du-jour.
+    - Explicit env from `_safe_subprocess_env()` so secrets don't leak
+      into third-party processes.
+    """
+    kwargs.setdefault("check", True)
+    kwargs.setdefault("cwd", str(WORK_DIR))
+    kwargs.setdefault("env", _safe_subprocess_env())
+    subprocess.run(cmd, **kwargs)
+
+
+
 def synth_tts(text: str, out_wav: Path) -> None:
     """Text -> WAV. Falls back to pyttsx3 if edge-tts isn't installed."""
     if TTS_ENGINE == "edge-tts":
         # edge-tts produces mp3 by default -- ask for wav via --output then convert.
         mp3 = out_wav.with_suffix(".mp3")
-        subprocess.run(
+        _run(
             ["edge-tts", "--voice", VOICE_NAME, "--text", text, "--write-media", str(mp3)],
-            check=True,
         )
-        subprocess.run(
+        _run(
             [FFMPEG_BIN, "-y", "-i", str(mp3), "-ar", "16000", "-ac", "1", str(out_wav)],
-            check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -269,7 +301,7 @@ def run_wav2lip(avatar: Path, wav: Path, out_mp4: Path) -> None:
         "--nosmooth",
     ]
     log.info("wav2lip: %s", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    _run(cmd)
 
 
 def run_gfpgan(in_mp4: Path, out_mp4: Path) -> None:
@@ -284,17 +316,16 @@ def run_gfpgan(in_mp4: Path, out_mp4: Path) -> None:
     frames_dir.mkdir(exist_ok=True)
     enhanced_dir.mkdir(exist_ok=True)
 
-    subprocess.run(
+    _run(
         [FFMPEG_BIN, "-y", "-i", str(in_mp4), str(frames_dir / "frame_%05d.png")],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    subprocess.run(
+    _run(
         [sys.executable, GFPGAN_SCRIPT,
          "-i", str(frames_dir), "-o", str(enhanced_dir), "-s", "2"],
-        check=True,
     )
     # Reassemble (assume 25 fps -- Wav2Lip's default).
-    subprocess.run(
+    _run(
         [FFMPEG_BIN, "-y",
          "-framerate", "25",
          "-i", str(enhanced_dir / "restored_imgs" / "frame_%05d.png"),
@@ -302,7 +333,7 @@ def run_gfpgan(in_mp4: Path, out_mp4: Path) -> None:
          "-c:v", "libx264", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0",
          str(out_mp4)],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     shutil.rmtree(frames_dir, ignore_errors=True)
     shutil.rmtree(enhanced_dir, ignore_errors=True)
