@@ -166,6 +166,13 @@ private:
     void ProcessContemplation(uint64_t absence) {
         /* Calm review — this is where insight happens */
         if (m_tickCount % 10 == 0) {
+            /* Honor the self_reflection_enabled config knob. When off, the
+             * reflective pass is skipped entirely — useful for e.g.
+             * dedicated API-only deployments where autonomous thoughts
+             * are undesired, or for low-cost-mode runs that need to cut
+             * LLM round-trips.                                           */
+            if (!ElleConfig::Instance().GetLLM().self_reflection_enabled) return;
+
             /* Revisit a recent memory and see it differently */
             std::string reflection = ElleLLMEngine::Instance().Ask(
                 "I'm alone with my thoughts. I'm reviewing a recent conversation. "

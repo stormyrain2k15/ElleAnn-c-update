@@ -68,8 +68,13 @@ struct LLMProviderConfig {
 
 struct LLMConfig {
     ELLE_LLM_MODE mode = LLM_MODE_HYBRID;
-    ELLE_LLM_PROVIDER primary_provider = LLM_PROVIDER_GROQ;
-    ELLE_LLM_PROVIDER fallback_provider = LLM_PROVIDER_LOCAL_LLAMA;
+    /* Named provider IDs ("groq", "openai", "anthropic", "lm_studio",
+     * "local_llama", "custom_api"). Stored as string (not the enum) so
+     * the JSON config is the source of truth and no enum<->string table
+     * round-trip is needed at load time. ElleLLMEngine::SelectProvider
+     * resolves these names to providers at call time.                    */
+    std::string primary_provider  = "groq";
+    std::string fallback_provider = "local_llama";
     bool        stream = true;
     uint32_t    max_context_tokens = 131072;
     std::string system_prompt_prefix;

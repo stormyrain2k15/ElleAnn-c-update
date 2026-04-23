@@ -36,6 +36,11 @@ protected:
     void OnTick() override {
         auto& cfg = ElleConfig::Instance();
         if (!cfg.GetBool("self_prompt.enabled", true)) return;
+        /* self_reflection_enabled is a top-level LLM gate — when false we
+         * skip the entire autonomous-prompting pass. Complements Solitude's
+         * own check; either switch being off disables this reflective
+         * branch.                                                         */
+        if (!cfg.GetLLM().self_reflection_enabled) return;
 
         uint64_t now = ELLE_MS_NOW();
         uint32_t minInterval = (uint32_t)cfg.GetInt("self_prompt.min_interval_seconds", 30) * 1000;

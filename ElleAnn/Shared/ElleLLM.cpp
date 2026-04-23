@@ -811,8 +811,62 @@ ELLE_LLM_RESPONSE ElleLLMEngine::Chat(const std::vector<LLMMessage>& messages,
         return resp;
     }
 
+    /* Honor previously-dead config knobs. Each only fires when the caller
+     * did not explicitly override, so ad-hoc callers (e.g. an LLM prompt
+     * evaluator that needs hard-deterministic output) still win.         */
+    const auto& llm = ElleConfig::Instance().GetLLM();
+
+    /* max_context_tokens: hard ceiling on the per-request token budget.
+     * Caller-supplied maxTokens=0 means "use provider default"; we also
+     * clamp any non-zero value down to the global budget.                */
+    if (llm.max_context_tokens > 0) {
+        if (maxTokens == 0 || maxTokens > llm.max_context_tokens) {
+            maxTokens = llm.max_context_tokens;
+        }
+    }
+
+    /* creative_temperature_boost / reasoning_temperature_drop: only
+     * applied when the caller didn't pin a specific temperature (-1). We
+     * detect "creative" vs "reasoning" intent by sniffing the system
+     * message prefix — the only other signal we have at this layer.     */
+    if (temperature < 0.0f && !messages.empty()) {
+        const auto& first = messages.front();
+        if (first.role == "system") {
+            std::string s = first.content;
+            for (auto& c : s) c = (char)tolower((unsigned char)c);
+            bool creative  = s.find("creative")  != std::string::npos
+                          || s.find("playful")   != std::string::npos
+                          || s.find("imagin")    != std::string::npos;
+            bool reasoning = s.find("reason")    != std::string::npos
+                          || s.find("step-by-step") != std::string::npos
+                          || s.find("analy")     != std::string::npos
+                          || s.find("logic")     != std::string::npos;
+            float baseline = -1.0f; /* provider default */
+            if (creative  && llm.creative_temp_boost != 0.0f) {
+                temperature = baseline + llm.creative_temp_boost;
+            } else if (reasoning && llm.reasoning_temp_drop != 0.0f) {
+                temperature = baseline - llm.reasoning_temp_drop;
+            }
+        }
+    }
+
+    /* chain_of_thought: prepend a short CoT preamble to whatever system
+     * message exists, or insert a fresh one if none.                     */
+    std::vector<LLMMessage> effective = messages;
+    if (llm.chain_of_thought) {
+        static const char* kCotPreamble =
+            "Think step by step. Show your reasoning briefly before answering. "
+            "If you're uncertain, say so.";
+        if (!effective.empty() && effective.front().role == "system") {
+            effective.front().content =
+                std::string(kCotPreamble) + "\n\n" + effective.front().content;
+        } else {
+            effective.insert(effective.begin(), LLMMessage{ "system", kCotPreamble });
+        }
+    }
+
     m_totalRequests++;
-    auto resp = provider->Complete(messages, temperature, maxTokens);
+    auto resp = provider->Complete(effective, temperature, maxTokens);
     m_totalTokens += resp.tokens_total;
     m_totalLatencyMs += (uint64_t)resp.latency_ms;
 
@@ -821,7 +875,7 @@ ELLE_LLM_RESPONSE ElleLLMEngine::Chat(const std::vector<LLMMessage>& messages,
         ELLE_WARN("Primary LLM failed, attempting failover...");
         for (auto& p : m_providers) {
             if (p.get() != provider && p->IsAvailable()) {
-                resp = p->Complete(messages, temperature, maxTokens);
+                resp = p->Complete(effective, temperature, maxTokens);
                 if (resp.success) {
                     ELLE_INFO("Failover to %s succeeded", p->GetModelName().c_str());
                     break;

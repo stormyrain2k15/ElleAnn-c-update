@@ -289,6 +289,16 @@ void ElleConfig::PopulateFromJSON(const JsonValue& root) {
         m_llm.creative_temp_boost = (float)llm["creative_temperature_boost"].float_val;
         m_llm.reasoning_temp_drop = (float)llm["reasoning_temperature_drop"].float_val;
 
+        /* Named-provider contract: parse these from JSON so SelectProvider
+         * actually honors the config. Defaults stay set on the struct so
+         * if the keys are missing the engine still picks sensible providers. */
+        if (llm.has("primary_provider") && !llm["primary_provider"].str_val.empty()) {
+            m_llm.primary_provider = llm["primary_provider"].str_val;
+        }
+        if (llm.has("fallback_provider") && !llm["fallback_provider"].str_val.empty()) {
+            m_llm.fallback_provider = llm["fallback_provider"].str_val;
+        }
+
         const auto& providers = llm["providers"];
         if (!providers.is_null()) {
             for (auto& [name, prov] : providers.obj_val) {

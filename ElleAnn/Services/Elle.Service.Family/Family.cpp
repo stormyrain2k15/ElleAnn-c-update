@@ -303,9 +303,11 @@ private:
          * we write next MUST be a sibling of every exe.                   */
         CopyFilesByExt(m_elleInstallRoot, staging, { L".exe", L".dll" });
 
-        /* Lua scripts are copied into staging/scripts. LuaHost tries
-         * <exe_dir>/scripts first (see LuaHost binding below), then falls
-         * back to the historical Lua/Elle.Lua.Behavioral/scripts path.   */
+        /* Lua scripts are copied into staging/scripts. LuaHost reads the
+         * scripts path from the `lua.scripts_directory` config key
+         * (LuaHost.cpp:376) — the child config written at birth sets
+         * that key to <childDir>\scripts so the child Lua service finds
+         * its snapshotted scripts.                                       */
         fs::path luaSrc = m_elleInstallRoot / "scripts";
         if (!fs::exists(luaSrc)) {
             luaSrc = m_elleInstallRoot.parent_path() / "Lua" / "Elle.Lua.Behavioral" / "scripts";
@@ -445,6 +447,14 @@ private:
                 {"port",         port},
                 {"bind_address", "127.0.0.1"},
                 {"cors_enabled", true}
+            }},
+            {"lua", {
+                /* Scripts were snapshotted to <childDir>\scripts. LuaHost
+                 * reads lua.scripts_directory from config (LuaHost.cpp:376);
+                 * without this override the child would fall back to the
+                 * default Lua\Elle.Lua.Behavioral\scripts path relative to
+                 * its CWD and find nothing.                              */
+                {"scripts_directory", (childDir / "scripts").u8string()}
             }},
             {"services", {
                 {"sql_pipes", {
