@@ -427,7 +427,7 @@ struct WSClient {
 };
 
 /* Strict int-from-header helper. Previously route handlers did
- *     int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+ *     int64_t id = req.PathLL("id");
  * which silently turns any non-numeric value into 0 AND throws
  * std::out_of_range if the header key is missing. This helper returns
  * `false` cleanly on either failure, so handlers can emit a real
@@ -1021,11 +1021,28 @@ private:
 
             HTTPRequest req = ParseRequest(raw);
 
-            /* If we have Content-Length, read remaining body */
+            /* If we have Content-Length, read remaining body. Strict parse:
+             * reject garbage / non-numeric values rather than silently
+             * treating the body as zero-length, and cap at max_upload_bytes
+             * so a multi-GB claim can't force an unbounded recv loop. An
+             * unparseable or negative length drops the request as 400.   */
             auto clIt = req.headers.find("content-length");
             if (clIt != req.headers.end()) {
-                size_t contentLen = 0;
-                try { contentLen = (size_t)std::stoull(clIt->second); } catch (...) {}
+                long long clSigned = 0;
+                if (!HTTPRequest::StrictParseLL(clIt->second, clSigned) ||
+                    clSigned < 0) {
+                    SendResponse(clientSocket,
+                                 HTTPResponse::Err(400, "invalid Content-Length"));
+                    return;
+                }
+                uint64_t capBytes = ElleConfig::Instance().GetHTTP().max_upload_bytes;
+                if (capBytes == 0) capBytes = 10ULL * 1024 * 1024; /* 10 MiB */
+                if ((uint64_t)clSigned > capBytes) {
+                    SendResponse(clientSocket,
+                                 HTTPResponse::Err(413, "payload too large"));
+                    return;
+                }
+                size_t contentLen = (size_t)clSigned;
                 while (req.body.size() < contentLen) {
                     int n = recv(clientSocket, buf, sizeof(buf), 0);
                     if (n <= 0) break;
@@ -1573,7 +1590,7 @@ private:
             });
         });
         m_router.Register("GET", "/api/memory/{id}", [](const HTTPRequest& req) {
-            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            int64_t id = req.PathLL("id");
             ElleDB::MemoryRow r;
             if (!ElleDB::GetMemory(id, r)) return HTTPResponse::Err(404, "memory not found");
             return HTTPResponse::OK({
@@ -1586,7 +1603,7 @@ private:
             });
         });
         m_router.Register("PUT", "/api/memory/{id}", [](const HTTPRequest& req) {
-            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            int64_t id = req.PathLL("id");
             json body = req.BodyJSON();
             ElleDB::MemoryRow existing;
             if (!ElleDB::GetMemory(id, existing)) return HTTPResponse::Err(404, "memory not found");
@@ -1598,7 +1615,7 @@ private:
             return HTTPResponse::OK({{"id", id}, {"updated", true}});
         });
         m_router.Register("DELETE", "/api/memory/{id}", [](const HTTPRequest& req) {
-            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            int64_t id = req.PathLL("id");
             if (!ElleDB::DeleteMemory(id)) return HTTPResponse::Err(500, "delete failed");
             return HTTPResponse::OK({{"id", id}, {"deleted", true}});
         });
@@ -1629,14 +1646,13 @@ private:
                 return HTTPResponse::Err(413, "payload too large");
             }
 
-            /* Validate the id strictly — atoll returns 0 on junk. */
+            /* Validate the id strictly — routed through PathLL so every
+             * path-id handler uses the same strict parser.               */
             auto idIt = req.headers.find("x-path-id");
             if (idIt == req.headers.end() || idIt->second.empty())
                 return HTTPResponse::Err(400, "missing memory id");
-            char* end = nullptr;
-            long long id = strtoll(idIt->second.c_str(), &end, 10);
-            if (!end || *end != '\0' || id <= 0)
-                return HTTPResponse::Err(400, "invalid memory id");
+            long long id = req.PathLL("id", 0);
+            if (id <= 0) return HTTPResponse::Err(400, "invalid memory id");
 
             std::string dir = "data\\memory_files";
             CreateDirectoryA("data", nullptr);
@@ -2264,7 +2280,7 @@ private:
         });
         m_router.Register("POST", "/api/ai/hardware/actions/{id}/ack", [](const HTTPRequest& req) {
             /* Android confirms delivery — mark the hardware_actions row consumed. */
-            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            int64_t id = req.PathLL("id");
             auto rs = ElleSQLPool::Instance().QueryParams(
                 "UPDATE ElleCore.dbo.hardware_actions "
                 "SET status = 'consumed', consumed_ms = ? "
@@ -2274,7 +2290,7 @@ private:
             return HTTPResponse::OK({{"id", id}, {"acked", true}});
         });
         m_router.Register("POST", "/api/ai/hardware/actions/{id}/result", [](const HTTPRequest& req) {
-            uint64_t actionId = std::atoll(req.headers.at("x-path-id").c_str());
+            uint64_t actionId = req.PathLL("id");
             json body = req.BodyJSON();
             std::string result = body.value("result", std::string("done"));
             uint32_t status = body.value("success", true) ? ACTION_COMPLETED_SUCCESS : ACTION_COMPLETED_FAILURE;
@@ -2721,7 +2737,7 @@ private:
          * timeline — unpacks the space-separated dimensions column into a
          * ranked list with indices so the UI can map to dimension labels.   */
         m_router.Register("GET", "/api/emotional-context/dimensions", [](const HTTPRequest& req) {
-            int64_t ts = std::atoll(req.QueryParam("t", "0").c_str());
+            int64_t ts = req.QueryLL("t", 0);
             int topN   = req.QueryInt("top", 5);
             if (topN <= 0 || topN > 102) topN = 5;
             /* Grab the snapshot closest (by absolute ms diff) to the requested
@@ -2807,7 +2823,7 @@ private:
             });
         });
         m_router.Register("POST", "/api/session/greeting/{id}/ack", [](const HTTPRequest& req) {
-            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            int64_t id = req.PathLL("id");
             auto rs = ElleSQLPool::Instance().QueryParams(
                 "UPDATE ElleCore.dbo.reconnection_greetings "
                 "SET consumed = 1 WHERE id = ?;",
@@ -3783,7 +3799,16 @@ private:
             if (rs.success) {
                 for (auto& r : rs.rows) {
                     std::string k = r.values.size() > 0 ? r.values[0] : "";
-                    uint64_t v = (uint64_t)std::atoll(r.values.size() > 1 ? r.values[1].c_str() : "0");
+                    /* Strict parse: garbage in the SQL cell yields 0
+                     * rather than propagating atoll's silent-coerce
+                     * behaviour into cache-stat dashboards.            */
+                    long long parsed = 0;
+                    uint64_t v = 0;
+                    if (r.values.size() > 1 &&
+                        HTTPRequest::StrictParseLL(r.values[1], parsed) &&
+                        parsed >= 0) {
+                        v = (uint64_t)parsed;
+                    }
                     if (k == "llm_cache_hits")   hits = v;
                     if (k == "llm_cache_misses") misses = v;
                     if (k == "llm_total_requests") total = v;
