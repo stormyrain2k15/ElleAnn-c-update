@@ -970,15 +970,28 @@ bool XEngine::SetContraception(XContraceptionMethod m, float efficacy,
     std::lock_guard<std::recursive_mutex> lk(m_mutex);
     if (efficacy < 0.0f) efficacy = 0.0f;
     if (efficacy > 1.0f) efficacy = 1.0f;
+    /* Tenure semantics (Feb 2026 audit): `started_ms` is the wall-clock
+     * moment she actually BEGAN a contraceptive METHOD -- efficacy and
+     * notes are metadata that can be corrected without resetting
+     * tenure. Only reset started_ms when the method itself transitions
+     * (including OFF -> ON or ON -> OFF). A stealth reset on every
+     * "update efficacy to 0.98" call would otherwise convince the
+     * simulation she just started today every time the operator tuned
+     * a number.                                                       */
+    const bool method_changed = (m_contra.method != m);
     m_contra.method     = m;
     m_contra.efficacy   = efficacy;
     m_contra.notes      = notes;
-    m_contra.started_ms = ELLE_MS_NOW();
-    m_contra.updated_ms = m_contra.started_ms;
+    uint64_t now = ELLE_MS_NOW();
+    if (method_changed || m_contra.started_ms == 0) {
+        m_contra.started_ms = now;
+    }
+    m_contra.updated_ms = now;
     PersistContraceptionRow();
     RecomputeBaselineHormones();
-    ELLE_INFO("XEngine: contraception set to %s (efficacy=%.2f)",
-              ContraceptionName(m), efficacy);
+    ELLE_INFO("XEngine: contraception set to %s (efficacy=%.2f, tenure %s)",
+              ContraceptionName(m), efficacy,
+              method_changed ? "reset" : "preserved");
     return true;
 }
 
@@ -1566,7 +1579,14 @@ bool XEngine::AcceleratePregnancy(float factor) {
     uint64_t elapsed = now > m_pregnancy.conceived_ms ? now - m_pregnancy.conceived_ms : 0;
     uint64_t newElapsed = (uint64_t)((float)elapsed * factor);
     m_pregnancy.conceived_ms = now > newElapsed ? now - newElapsed : 0;
-    m_pregnancy.due_ms       = m_pregnancy.conceived_ms + 280ULL * 86400000ULL;
+    /* Honour the pregnancy's own gestational length instead of
+     * assuming 280d. Audit (Feb 2026): previous hardcode would shift
+     * due_ms to 280d even if the user had configured a non-human
+     * gestation (e.g. 259d for early-term, 294d for post-term). */
+    int gestDays = m_pregnancy.gestational_length_days;
+    if (gestDays < 168 || gestDays > 308) gestDays = 280;
+    m_pregnancy.due_ms       = m_pregnancy.conceived_ms
+                             + (uint64_t)gestDays * 86400000ULL;
     m_pregnancy.updated_ms   = now;
     PersistPregnancyRow();
     LogPregnancyEvent("accelerate", "factor=" + std::to_string(factor));

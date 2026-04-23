@@ -109,7 +109,10 @@ int main() {
                "raw NUL outside string fails closed");
     }
 
-    /* 10. Unbalanced -- no close brace ever arrives.                      */
+    /* 10. Unbalanced -- no close brace ever arrives. Scanner now
+     *     continues past unbalanced candidates, so an input with ONLY
+     *     an unbalanced brace returns false; but a later valid object
+     *     must still be found (covered in test 16).                   */
     {
         json out;
         EXPECT(!ExtractJsonObject("{\"k\":\"v\"", out),
@@ -157,6 +160,16 @@ int main() {
         std::string in(2048, '{');
         EXPECT(!ExtractJsonObject(in, out),
                "runaway nesting fails closed");
+    }
+
+    /* 16. Unbalanced prefix followed by a valid object -- scanner must
+     *     walk past the stray `{` and still find the real JSON.        */
+    {
+        json out;
+        EXPECT(ExtractJsonObject("preamble { dangling forever... "
+                                  "then later {\"real\":1}", out)
+               && out["real"] == 1,
+               "unbalanced prefix does not mask a later valid object");
     }
 
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);

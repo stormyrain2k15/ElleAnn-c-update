@@ -197,7 +197,17 @@ uint64_t MemoryEngine::StoreLTM(const ELLE_MEMORY_RECORD& record) {
     if (mem.created_ms == 0) mem.created_ms = ELLE_MS_NOW();
 
     ComputePosition(mem);
-    ElleDB::StoreMemory(mem);
+    /* StoreMemory returns false on any ODBC / connection / constraint
+     * failure. Previously we ignored it and returned `mem.id` -- giving
+     * every caller a "durable" id that wasn't actually persisted. Now
+     * we surface the failure as id=0 so upstream code (HTTP, Cognitive,
+     * Dream consolidation) can refuse to tell the user "stored".      */
+    if (!ElleDB::StoreMemory(mem)) {
+        ELLE_ERROR("LTM store FAILED (id=%llu, content=%.50s...) -- "
+                   "returning 0 so caller can react",
+                   (unsigned long long)mem.id, mem.content);
+        return 0;
+    }
 
     ELLE_DEBUG("LTM stored: [%llu] %.50s...", mem.id, mem.content);
     return mem.id;

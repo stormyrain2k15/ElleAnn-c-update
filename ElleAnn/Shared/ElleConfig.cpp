@@ -291,14 +291,18 @@ bool ElleConfig::ParseJSON(const std::string& json, JsonValue& root) {
     root = parser.ParseValue();
     if (root.type != JsonType::Object) return false;
 
-    /* Trailing-garbage guard — after the root object there should be only
-     * whitespace. Previously this accepted any leading `{...}` and ignored
-     * whatever followed, which hid copy/paste errors that accidentally
-     * concatenated two config files into one. */
+    /* Trailing-garbage guard -- after the root object there should be only
+     * whitespace. Audit (Feb 2026): a warning is not enough, because a
+     * cat-two-configs-together accident would still be accepted with a
+     * half-hidden log line, and the second config's values would be
+     * silently discarded. Fail closed instead so the operator sees the
+     * problem at startup and fixes their file.                         */
     parser.SkipWhitespace();
     if (parser.pos < parser.src.size()) {
-        ELLE_WARN("Config JSON has trailing content after root object at offset %zu",
-                  parser.pos);
+        ELLE_ERROR("Config JSON has trailing content after root object at "
+                   "offset %zu -- refusing to load partial config",
+                   parser.pos);
+        return false;
     }
     return true;
 }

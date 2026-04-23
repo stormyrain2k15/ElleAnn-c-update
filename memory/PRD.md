@@ -301,6 +301,7 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 - `/app/memory/test_credentials.md` — N/A (no cloud auth).
 
 ## Reference Documents
+- **`/app/ElleAnn/AUDIT_SCOREBOARD.md` (Feb 2026) — honest line-by-line status of all 134 audit items**
 - `/app/ElleAnn/AUDIT_FIX_REPORT.md` (Wave 1)
 - `/app/ElleAnn/AUDIT_FIX_REPORT_APR22.md`
 - `/app/ElleAnn/AUDIT_WAVE2_COMPLETION.md`

@@ -222,12 +222,50 @@ std::string ElleSelfSurprise::Deliberate(const std::string& question, uint32_t t
  * OPINION REVISION — Growth through changing your mind
  *──────────────────────────────────────────────────────────────────────────────*/
 bool ElleSelfSurprise::ShouldIReconsider(const std::string& newInfo, const std::string& topic) {
-    /* Check if new information contradicts an existing preference/opinion */
-    float currentPref = ElleIdentityCore::Instance().GetPreference("opinion", topic);
-    if (std::abs(currentPref) < 0.1f) return false;  /* No strong opinion to revise */
+    /* Feb 2026 audit: the previous implementation ignored `newInfo`
+     * entirely and only inspected the magnitude of the current
+     * opinion. That made the function lie about its contract --
+     * "should I reconsider in light of this new info?" became "do I
+     * have a strong opinion?". We now use both:
+     *   1. No strong opinion (<0.1 magnitude)       -> nothing to revise.
+     *   2. Weak opinion (<0.4 magnitude)            -> don't churn on minor input.
+     *   3. Strong opinion AND newInfo is meaningful -> reconsider.
+     *      "Meaningful" is bounded below by a minimum length and
+     *      above by "the topic itself (or a stem of it) appears in
+     *      newInfo", so a random sentence about the weather can't
+     *      trigger reconsideration of an unrelated belief.          */
+    if (newInfo.empty() || topic.empty()) return false;
 
-    /* If she has a strong opinion AND new info challenges it, reconsider */
-    return std::abs(currentPref) > 0.4f;
+    float currentPref = ElleIdentityCore::Instance().GetPreference("opinion", topic);
+    if (std::abs(currentPref) < 0.1f) return false;  /* no strong opinion to revise */
+    if (std::abs(currentPref) < 0.4f) return false;  /* weak opinion -- don't churn */
+
+    /* Require some substance so a one-word response can't trigger a
+     * belief revision cascade.                                        */
+    constexpr size_t kMinNewInfoChars = 24;
+    if (newInfo.size() < kMinNewInfoChars) return false;
+
+    /* Topic relevance check, case-insensitive. Prefix tokens of the
+     * topic up to the first space or punctuation ensure phrases like
+     * "the ethics of lying" match text mentioning "ethics" or "lying".*/
+    auto toLower = [](std::string s) {
+        for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    };
+    const std::string lnew = toLower(newInfo);
+    const std::string ltop = toLower(topic);
+    if (lnew.find(ltop) != std::string::npos) return true;
+    size_t tokStart = 0;
+    while (tokStart < ltop.size()) {
+        size_t tokEnd = ltop.find_first_of(" \t,.;:!?", tokStart);
+        if (tokEnd == std::string::npos) tokEnd = ltop.size();
+        if (tokEnd - tokStart >= 4) { /* skip tiny function words */
+            std::string tok = ltop.substr(tokStart, tokEnd - tokStart);
+            if (lnew.find(tok) != std::string::npos) return true;
+        }
+        tokStart = tokEnd + 1;
+    }
+    return false;
 }
 
 void ElleSelfSurprise::RecordOpinionChange(const std::string& topic, const std::string& oldOp,

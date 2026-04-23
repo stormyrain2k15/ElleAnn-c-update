@@ -41,6 +41,12 @@ on:
 env:
   SOLUTION: ElleAnn/ElleAnn.sln
   LUA_VERSION: '5.4.6'
+  # MD5 published by lua.org on https://www.lua.org/ftp/ for lua-5.4.6.tar.gz.
+  # This is the upstream-authoritative integrity value (lua.org does not
+  # publish SHA-256); using it fails-closed against a MITM of the
+  # download. When bumping LUA_VERSION this hash MUST be updated in the
+  # same PR or the `Download Lua` step will fail.
+  LUA_MD5: 'f7f3eda79673c1c4ca4aedd65ae6ccea'
 
 jobs:
   build:
@@ -88,6 +94,17 @@ jobs:
           $url  = "https://www.lua.org/ftp/lua-$env:LUA_VERSION.tar.gz"
           $dest = "$env:RUNNER_TEMP/lua.tgz"
           Invoke-WebRequest $url -OutFile $dest
+          # Supply-chain integrity check. A silent MITM or lua.org
+          # compromise would otherwise feed arbitrary C into our build.
+          $got = (Get-FileHash $dest -Algorithm MD5).Hash.ToLower()
+          $want = '${{ env.LUA_MD5 }}'.ToLower()
+          if ($got -ne $want) {
+            Write-Host "::error::Lua tarball MD5 mismatch"
+            Write-Host "  got : $got"
+            Write-Host "  want: $want"
+            exit 1
+          }
+          Write-Host "Lua tarball MD5 verified: $got"
           New-Item -ItemType Directory -Force -Path ElleAnn/Lua/lua54 | Out-Null
           tar -xzf $dest -C "$env:RUNNER_TEMP"
           Copy-Item "$env:RUNNER_TEMP/lua-$env:LUA_VERSION/src" -Destination ElleAnn/Lua/lua54 -Recurse

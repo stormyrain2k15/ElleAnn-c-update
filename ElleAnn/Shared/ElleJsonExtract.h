@@ -87,7 +87,17 @@ inline bool ExtractJsonObject(const std::string& s, nlohmann::json& out) {
             }
         }
         if (aborted) return false;
-        if (end == std::string::npos) return false; /* unbalanced */
+        if (end == std::string::npos) {
+            /* Candidate ran off the end without closing. Per the
+             * documented contract ("tries the next `{` until
+             * something parses or the string is exhausted"), advance
+             * past THIS `{` and keep looking -- a later brace run may
+             * still balance (e.g. prose `{ dangling... {"real":1}`).
+             * Previously we returned false immediately, so well-formed
+             * JSON appearing after a stray brace was invisible.       */
+            i = start + 1;
+            continue;
+        }
         try {
             out = nlohmann::json::parse(s.substr(start, end - start + 1));
             return out.is_object();
