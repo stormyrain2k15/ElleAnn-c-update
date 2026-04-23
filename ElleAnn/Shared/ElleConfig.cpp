@@ -432,7 +432,13 @@ void ElleConfig::PopulateFromJSON(const JsonValue& root) {
         m_http.port = (uint32_t)http["port"].int_val;
         m_http.ws_path = http["websocket_path"].str_val;
         m_http.max_connections = (uint32_t)http["max_connections"].int_val;
-        m_http.auth_enabled = http["auth_enabled"].bool_val;
+        /* auth_enabled: honor the JSON-defined value ONLY when the key is
+         * actually present. Previously we wrote `http["auth_enabled"].bool_val`
+         * unconditionally, which flipped auth OFF whenever the key was
+         * missing — a silent fail-open. Missing key now keeps the struct
+         * default (true = fail-closed).                                   */
+        if (!http["auth_enabled"].is_null())
+            m_http.auth_enabled = http["auth_enabled"].bool_val;
         m_http.jwt_secret = http["jwt_secret"].str_val;
         m_http.jwt_expiry_hours = (uint32_t)http["jwt_expiry_hours"].int_val;
 

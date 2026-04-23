@@ -58,6 +58,14 @@ DictionaryLoader::State DictionaryLoader::GetState() const {
 }
 
 bool DictionaryLoader::StartLoad(uint32_t startIdx, uint32_t limit) {
+    /* Join the previous worker BEFORE flipping m_running. Otherwise a
+     * quick restart observer would see m_running=true while the old
+     * thread is still finalising its last PersistState(), creating a
+     * short window where two workers appear to be "running" to anything
+     * sampling the atomic. The exchange still prevents concurrent
+     * StartLoad callers from both winning.                              */
+    if (m_worker.joinable()) m_worker.join();
+
     if (m_running.exchange(true)) {
         ELLE_WARN("DictionaryLoader already running — request ignored");
         return false;
@@ -72,10 +80,6 @@ bool DictionaryLoader::StartLoad(uint32_t startIdx, uint32_t limit) {
     /* PersistState takes the lock itself — call AFTER releasing it. */
     PersistState();
 
-    /* Keep the worker joinable so Shutdown() can cleanly wait on it.
-     * Previously we detached the thread, so a process exit could race an
-     * in-flight SQL/HTTP call and leak the socket or crash on teardown. */
-    if (m_worker.joinable()) m_worker.join();
     m_worker = std::thread(&DictionaryLoader::WorkerRun, this, startIdx, limit);
     return true;
 }
@@ -130,11 +134,18 @@ void DictionaryLoader::WorkerRun(uint32_t startIdx, uint32_t limit) {
 
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_state.status = m_running ? "done" : "stopped";
+        /* "done" only when we processed everything AND nobody asked us to
+         * stop. "stopped" when Shutdown() flipped m_running=false while we
+         * were mid-run. "failed" is reserved for catastrophic paths that
+         * set m_state.error directly.                                    */
+        if (!m_running.load()) m_state.status = "stopped";
+        else if (!m_state.error.empty()) m_state.status = "failed";
+        else m_state.status = "done";
     }
     PersistState();
-    ELLE_INFO("DictionaryLoader run complete (loaded=%u failed=%u skipped=%u)",
-              m_state.loaded, m_state.failed, m_state.skipped);
+    ELLE_INFO("DictionaryLoader run complete (loaded=%u failed=%u skipped=%u status=%s)",
+              m_state.loaded, m_state.failed, m_state.skipped,
+              m_state.status.c_str());
     m_running = false;
 }
 

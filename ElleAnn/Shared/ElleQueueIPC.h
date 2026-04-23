@@ -101,7 +101,10 @@ private:
     ELLE_IOCP_OVERLAPPED m_readOvl;
     ELLE_IOCP_OVERLAPPED m_writeOvl;
     std::vector<uint8_t> m_readBuffer;    /* Reassembly buffer for msgs > ELLE_PIPE_BUFFER_SIZE */
-    std::vector<uint8_t> m_writeBuffer;
+    /* NOTE: per-connection write buffer was removed in Wave 5 — every async
+     * send now owns its wire bytes inside PendingWrite (heap-allocated,
+     * freed on IOCP completion). Keeping a dead m_writeBuffer invited
+     * future callers to reintroduce the use-after-free the audit killed. */
 
     /* Outstanding async-write payloads — ownership lives on the connection,
      * NOT the stack, so the buffer survives until the IOCP write completion

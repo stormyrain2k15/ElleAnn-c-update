@@ -90,6 +90,22 @@ bool ElleIPCMessage::Deserialize(const uint8_t* data, uint32_t len, ElleIPCMessa
     if (out.header.magic != ELLE_IPC_MAGIC) return false;
 
     uint32_t payloadSize = out.header.payload_size;
+
+    /* Framing guard: cap payload_size BEFORE we allocate. A corrupted or
+     * hostile sender can put 0xFFFFFFFF here and trick us into a 4 GiB
+     * allocation (OOM) or a payload.resize() on a size we never actually
+     * have on the wire. Cap lookup goes through ElleConfig so ops can
+     * raise the ceiling at runtime without rebuilding.                   */
+    uint32_t maxPayload = (uint32_t)ElleConfig::Instance().GetInt(
+        "services.named_pipes.max_payload_bytes", (int64_t)ELLE_IPC_MAX_PAYLOAD);
+    if (maxPayload == 0) maxPayload = ELLE_IPC_MAX_PAYLOAD;
+    if (payloadSize > maxPayload) {
+        ELLE_WARN("IPC frame rejected: payload_size=%u > cap=%u (svc=%u→%u)",
+                  payloadSize, maxPayload,
+                  (unsigned)out.header.source_svc,
+                  (unsigned)out.header.dest_svc);
+        return false;
+    }
     if (len < sizeof(ELLE_IPC_HEADER) + payloadSize) return false;
 
     if (payloadSize > 0) {
@@ -139,7 +155,7 @@ EllePipeConnection::EllePipeConnection() {
     ZeroMemory(&m_readOvl, sizeof(m_readOvl));
     ZeroMemory(&m_writeOvl, sizeof(m_writeOvl));
     m_readBuffer.resize(ELLE_PIPE_BUFFER_SIZE);
-    m_writeBuffer.resize(ELLE_PIPE_BUFFER_SIZE);
+    /* m_writeBuffer removed — PendingWrite owns wire bytes per-send. */
 }
 
 EllePipeConnection::~EllePipeConnection() {

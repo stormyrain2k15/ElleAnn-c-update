@@ -122,6 +122,64 @@ struct HTTPRequest {
         return it != queryParams.end() ? it->second : def;
     }
 
+    /*─────────────────────────────────────────────────────────────────────
+     * Strict numeric parsers. Every previous call site that did
+     *   std::atoi(req.QueryParam(...).c_str())
+     * silently mapped garbage or empty strings to 0, turning "bad input"
+     * into "act on id=0" — a class of bug that's how moderation endpoints
+     * end up hitting row 0 when a URL encoder drops a digit.
+     *
+     * These helpers:
+     *   • Return `def` when the value is missing.
+     *   • Return `def` when the value is present but not a clean integer
+     *     (i.e. strtoll must consume the entire string).
+     *   • Clamp out-of-range values to [INT32_MIN, INT32_MAX] for Int(),
+     *     so a 2^40 query param can't corrupt downstream int32 fields.
+     *───────────────────────────────────────────────────────────────────*/
+    static bool StrictParseLL(const std::string& s, long long& out) {
+        if (s.empty()) return false;
+        errno = 0;
+        char* end = nullptr;
+        long long v = std::strtoll(s.c_str(), &end, 10);
+        if (errno == ERANGE) return false;
+        if (!end || end == s.c_str() || *end != '\0') return false;
+        out = v;
+        return true;
+    }
+
+    int QueryInt(const std::string& key, int def = 0) const {
+        auto it = queryParams.find(key);
+        if (it == queryParams.end()) return def;
+        long long v = 0;
+        if (!StrictParseLL(it->second, v)) return def;
+        if (v < (long long)INT32_MIN) return INT32_MIN;
+        if (v > (long long)INT32_MAX) return INT32_MAX;
+        return (int)v;
+    }
+    long long QueryLL(const std::string& key, long long def = 0) const {
+        auto it = queryParams.find(key);
+        if (it == queryParams.end()) return def;
+        long long v = 0;
+        if (!StrictParseLL(it->second, v)) return def;
+        return v;
+    }
+    int PathInt(const std::string& param, int def = 0) const {
+        auto it = headers.find("x-path-" + param);
+        if (it == headers.end()) return def;
+        long long v = 0;
+        if (!StrictParseLL(it->second, v)) return def;
+        if (v < (long long)INT32_MIN) return INT32_MIN;
+        if (v > (long long)INT32_MAX) return INT32_MAX;
+        return (int)v;
+    }
+    long long PathLL(const std::string& param, long long def = 0) const {
+        auto it = headers.find("x-path-" + param);
+        if (it == headers.end()) return def;
+        long long v = 0;
+        if (!StrictParseLL(it->second, v)) return def;
+        return v;
+    }
+
     /* Attempt to parse body as JSON, return empty object on failure */
     json BodyJSON() const {
         if (body.empty()) return json::object();
@@ -246,7 +304,8 @@ public:
          * This was flagged as "no global middleware" — per-IP limiting is a
          * future step (needs the peer addr plumbed through accept), but a
          * single global counter already stops trivial flood abuse.        */
-        uint32_t rpm = ElleConfig::Instance().GetHTTP().rate_limit_rpm;
+        const auto& httpCfg = ElleConfig::Instance().GetHTTP();
+        uint32_t rpm = httpCfg.rate_limit_rpm;
         if (rpm > 0) {
             uint64_t now = ELLE_MS_NOW();
             std::lock_guard<std::mutex> lock(m_rlMutex);
@@ -258,6 +317,78 @@ public:
                 return HTTPResponse::Err(429, "rate limit exceeded");
             }
             m_rlCount++;
+        }
+
+        /*───────────────────────────────────────────────────────────────
+         * CENTRAL AUTH GATE — runs BEFORE any route handler.
+         *
+         * Policy:
+         *   • Activated when http.auth_enabled=true in config.
+         *   • GET/HEAD/OPTIONS are always allowed (read-only + preflight).
+         *   • Every other method must present either:
+         *       Authorization: Bearer <http.jwt_secret>
+         *     OR
+         *       x-admin-key: <http_server.admin_key | http.jwt_secret>
+         *   • The compare is constant-time so partial-guess attacks
+         *     can't be timed.
+         *   • When auth_enabled=true but no secret is configured, we
+         *     refuse writes with 503 instead of silently letting
+         *     anonymous requests through — fail-closed, not fail-open.
+         *
+         * Per-route fine-grained checks (e.g. x-admin-key on /morals)
+         * still run after this gate. This is defense in depth, not a
+         * replacement.
+         *──────────────────────────────────────────────────────────────*/
+        if (httpCfg.auth_enabled) {
+            const std::string& method = req.method;
+            bool isRead = (method == "GET" || method == "HEAD" ||
+                           method == "OPTIONS");
+            if (!isRead) {
+                const std::string& secret = httpCfg.jwt_secret;
+                std::string adminKey = ElleConfig::Instance().GetString(
+                    "http_server.admin_key", secret);
+                if (secret.empty() && adminKey.empty()) {
+                    return HTTPResponse::Err(503,
+                        "auth_enabled=true but no jwt_secret/admin_key configured");
+                }
+                auto constTimeEq = [](const std::string& a, const std::string& b) {
+                    if (a.size() != b.size()) return false;
+                    unsigned diff = 0;
+                    for (size_t i = 0; i < a.size(); ++i)
+                        diff |= (unsigned char)a[i] ^ (unsigned char)b[i];
+                    return diff == 0;
+                };
+                bool ok = false;
+                auto authIt = req.headers.find("authorization");
+                if (authIt != req.headers.end()) {
+                    static const std::string kBearer = "Bearer ";
+                    const std::string& v = authIt->second;
+                    if (v.size() > kBearer.size() &&
+                        std::equal(kBearer.begin(), kBearer.end(), v.begin(),
+                                   [](char x, char y){
+                                       return std::tolower((unsigned char)x) ==
+                                              std::tolower((unsigned char)y);
+                                   })) {
+                        std::string tok = v.substr(kBearer.size());
+                        /* trim leading whitespace just in case */
+                        while (!tok.empty() && (tok.front() == ' ' ||
+                                                tok.front() == '\t'))
+                            tok.erase(0, 1);
+                        if (!secret.empty() && constTimeEq(tok, secret)) ok = true;
+                    }
+                }
+                if (!ok) {
+                    auto keyIt = req.headers.find("x-admin-key");
+                    if (keyIt != req.headers.end() && !adminKey.empty() &&
+                        constTimeEq(keyIt->second, adminKey)) {
+                        ok = true;
+                    }
+                }
+                if (!ok) {
+                    return HTTPResponse::Err(401,
+                        "authentication required for mutating requests");
+                }
+            }
         }
 
         for (auto& e : m_routes) {
@@ -644,6 +775,28 @@ protected:
 
         ELLE_INFO("HTTP server listening on %s:%d (%zu routes, %u workers)",
                   cfg.bind_address.c_str(), cfg.port, m_router.Count(), workers);
+
+        /* Emit the runtime-active HTTP knobs so config drift is visible in
+         * logs. Previously we loaded every knob into HTTPConfig but never
+         * acknowledged at startup which ones were actually on — making
+         * "is CORS really enabled?" a spelunking exercise through code.  */
+        const std::string& adm = ElleConfig::Instance().GetString(
+            "http_server.admin_key", cfg.jwt_secret);
+        ELLE_INFO("HTTP policy: auth=%s cors=%s(%s) rate=%u/min "
+                  "maxConn=%u maxWsFrame=%u maxUpload=%u "
+                  "jwt_secret=%s admin_key=%s",
+                  cfg.auth_enabled ? "ON" : "OFF",
+                  cfg.cors_enabled ? "ON" : "OFF",
+                  cfg.cors_origins.empty() ? "*" : cfg.cors_origins.c_str(),
+                  cfg.rate_limit_rpm, cfg.max_concurrent_connections,
+                  cfg.max_ws_frame_bytes, cfg.max_upload_bytes,
+                  cfg.jwt_secret.empty() ? "UNSET" : "set",
+                  adm.empty() ? "UNSET" : "set");
+        if (cfg.auth_enabled && cfg.jwt_secret.empty() && adm.empty()) {
+            ELLE_WARN("auth_enabled=true but neither jwt_secret nor admin_key "
+                      "is configured — every mutating request will be rejected "
+                      "with 503. Set one in elle_master_config.json.");
+        }
         return true;
     }
 
@@ -1340,9 +1493,18 @@ private:
         /* ============== Memory — backed by dbo.memory ============== */
         m_router.Register("GET", "/api/memory/", [](const HTTPRequest& req) {
             std::string type = req.QueryParam("memory_type");
-            int limit  = std::max(1, std::atoi(req.QueryParam("limit",  "50").c_str()));
-            int offset = std::max(0, std::atoi(req.QueryParam("offset", "0").c_str()));
-            int typeI = type.empty() ? -1 : std::atoi(type.c_str());
+            int limit  = std::max(1, req.QueryInt("limit", 50));
+            int offset = std::max(0, req.QueryInt("offset", 0));
+            /* memory_type parses strictly — garbage yields -1 (="all types")
+             * so a typo in the query string doesn't silently filter on 0. */
+            int typeI = -1;
+            if (!type.empty()) {
+                long long tv = 0;
+                if (HTTPRequest::StrictParseLL(type, tv) &&
+                    tv >= INT32_MIN && tv <= INT32_MAX) {
+                    typeI = (int)tv;
+                }
+            }
             std::vector<ElleDB::MemoryRow> rows;
             if (!ElleDB::ListMemories(rows, typeI, (uint32_t)limit, (uint32_t)offset)) {
                 return HTTPResponse::Err(500, "SQL ListMemories failed");
@@ -1588,7 +1750,7 @@ private:
             });
         });
         m_router.Register("GET", "/api/tokens/conversations", [](const HTTPRequest& req) {
-            int limit = std::max(1, std::atoi(req.QueryParam("limit", "50").c_str()));
+            int limit = std::max(1, req.QueryInt("limit", 50));
             std::vector<ElleDB::ConversationRow> rows;
             if (!ElleDB::ListConversations(rows, (uint32_t)limit))
                 return HTTPResponse::Err(500, "ListConversations failed");
@@ -1603,7 +1765,7 @@ private:
             return HTTPResponse::OK(j);
         });
         m_router.Register("GET", "/api/tokens/conversations/{id}", [](const HTTPRequest& req) {
-            int32_t convId = std::atoi(req.headers.at("x-path-id").c_str());
+            int32_t convId = req.PathInt("id");
             ElleDB::ConversationRow c;
             if (!ElleDB::GetConversation(convId, c))
                 return HTTPResponse::Err(404, "conversation not found");
@@ -1614,7 +1776,7 @@ private:
             });
         });
         m_router.Register("POST", "/api/tokens/conversations/{id}/messages", [this](const HTTPRequest& req) {
-            int32_t convId = std::atoi(req.headers.at("x-path-id").c_str());
+            int32_t convId = req.PathInt("id");
             json body = req.BodyJSON();
             std::string content = body.value("content", body.value("message", ""));
             std::string role    = body.value("role", std::string("user"));
@@ -1628,8 +1790,8 @@ private:
             });
         });
         m_router.Register("GET", "/api/tokens/conversations/{id}/messages", [](const HTTPRequest& req) {
-            int32_t convId = std::atoi(req.headers.at("x-path-id").c_str());
-            int limit = std::max(1, std::atoi(req.QueryParam("limit", "50").c_str()));
+            int32_t convId = req.PathInt("id");
+            int limit = std::max(1, req.QueryInt("limit", 50));
             std::vector<ELLE_CONVERSATION_MSG> msgs;
             if (!ElleDB::GetConversationHistory((uint64_t)convId, msgs, (uint32_t)limit))
                 return HTTPResponse::Err(500, "GetConversationHistory failed");
@@ -1787,7 +1949,7 @@ private:
             }
         });
         m_router.Register("GET", "/api/video/avatar", [](const HTTPRequest& req) {
-            int32_t userId = std::atoi(req.QueryParam("user_id", "1").c_str());
+            int32_t userId = req.QueryInt("user_id", 1);
             ElleDB::UserAvatar a;
             if (!ElleDB::GetDefaultAvatar(userId, a))
                 return HTTPResponse::OK({{"avatar", nullptr}, {"note", "no avatar configured"}});
@@ -1801,7 +1963,7 @@ private:
             });
         });
         m_router.Register("GET", "/api/video/avatars", [](const HTTPRequest& req) {
-            int32_t userId = std::atoi(req.QueryParam("user_id", "1").c_str());
+            int32_t userId = req.QueryInt("user_id", 1);
             std::vector<ElleDB::UserAvatar> avs;
             ElleDB::ListAvatars(userId, avs);
             json arr = json::array();
@@ -1918,7 +2080,7 @@ private:
             }
         });
         m_router.Register("GET", "/api/ai/self-prompts", [](const HTTPRequest& req) {
-            int limit = std::max(1, std::atoi(req.QueryParam("limit", "20").c_str()));
+            int limit = std::max(1, req.QueryInt("limit", 20));
             auto rs = ElleSQLPool::Instance().QueryParams(
                 "SELECT TOP (?) id, prompt, ISNULL(source,''), created_ms "
                 "FROM ElleCore.dbo.ai_self_prompts ORDER BY id DESC;",
@@ -2351,7 +2513,7 @@ private:
         };
         m_router.Register("GET", "/api/education/subjects", [subjectToJson](const HTTPRequest& req) {
             std::string category = req.QueryParam("category", "");
-            uint32_t limit = (uint32_t)std::atoi(req.QueryParam("limit", "50").c_str());
+            uint32_t limit = (uint32_t)req.QueryInt("limit", 50);
             std::vector<ElleDB::LearnedSubject> subs;
             if (!ElleDB::ListSubjects(subs, category, limit))
                 return HTTPResponse::Err(500, "subjects query failed");
@@ -2360,7 +2522,7 @@ private:
             return HTTPResponse::OK({{"subjects", arr}, {"total", (int64_t)arr.size()}});
         });
         m_router.Register("GET", "/api/education/subjects/{id}", [subjectToJson](const HTTPRequest& req) {
-            int32_t id = std::atoi(req.headers.at("x-path-id").c_str());
+            int32_t id = req.PathInt("id");
             ElleDB::LearnedSubject s;
             if (!ElleDB::GetSubject(id, s)) return HTTPResponse::Err(404, "subject not found");
 
@@ -2405,7 +2567,7 @@ private:
             } catch (const std::exception& e) { return HTTPResponse::Err(500, e.what()); }
         });
         m_router.Register("PUT", "/api/education/subjects/{id}", [](const HTTPRequest& req) {
-            int32_t id = std::atoi(req.headers.at("x-path-id").c_str());
+            int32_t id = req.PathInt("id");
             try {
                 json body = req.BodyJSON();
                 ElleDB::LearnedSubject patch;
@@ -2427,7 +2589,7 @@ private:
             } catch (const std::exception& e) { return HTTPResponse::Err(500, e.what()); }
         });
         m_router.Register("POST", "/api/education/subjects/{id}/references", [](const HTTPRequest& req) {
-            int32_t id = std::atoi(req.headers.at("x-path-id").c_str());
+            int32_t id = req.PathInt("id");
             try {
                 json body = req.BodyJSON();
                 ElleDB::EducationReference r;
@@ -2444,7 +2606,7 @@ private:
             } catch (const std::exception& e) { return HTTPResponse::Err(500, e.what()); }
         });
         m_router.Register("POST", "/api/education/subjects/{id}/milestones", [](const HTTPRequest& req) {
-            int32_t id = std::atoi(req.headers.at("x-path-id").c_str());
+            int32_t id = req.PathInt("id");
             try {
                 json body = req.BodyJSON();
                 ElleDB::LearningMilestone m;
@@ -2530,9 +2692,9 @@ private:
         });
         m_router.Register("GET", "/api/emotional-context/history", [](const HTTPRequest& req) {
             /* Time-series of the V/A/D trajectory. Default last 24 h. */
-            uint32_t hours = (uint32_t)std::atoi(req.QueryParam("hours", "24").c_str());
+            uint32_t hours = (uint32_t)req.QueryInt("hours", 24);
             if (hours == 0 || hours > 24 * 30) hours = 24;
-            uint32_t maxPoints = (uint32_t)std::atoi(req.QueryParam("points", "500").c_str());
+            uint32_t maxPoints = (uint32_t)req.QueryInt("points", 500);
             if (maxPoints == 0 || maxPoints > 5000) maxPoints = 500;
 
             std::vector<ElleDB::EmotionHistoryPoint> pts;
@@ -2560,7 +2722,7 @@ private:
          * ranked list with indices so the UI can map to dimension labels.   */
         m_router.Register("GET", "/api/emotional-context/dimensions", [](const HTTPRequest& req) {
             int64_t ts = std::atoll(req.QueryParam("t", "0").c_str());
-            int topN   = std::atoi(req.QueryParam("top", "5").c_str());
+            int topN   = req.QueryInt("top", 5);
             if (topN <= 0 || topN > 102) topN = 5;
             /* Grab the snapshot closest (by absolute ms diff) to the requested
              * timestamp. If t=0, just use the most recent.                  */
@@ -2801,9 +2963,9 @@ private:
         });
 
         m_router.Register("GET", "/api/x/history", [](const HTTPRequest& req) {
-            uint32_t hours = (uint32_t)std::atoi(req.QueryParam("hours", "72").c_str());
+            uint32_t hours = (uint32_t)req.QueryInt("hours", 72);
             if (hours == 0 || hours > 24 * 60) hours = 72;
-            uint32_t maxPoints = (uint32_t)std::atoi(req.QueryParam("points", "500").c_str());
+            uint32_t maxPoints = (uint32_t)req.QueryInt("points", 500);
             if (maxPoints == 0 || maxPoints > 5000) maxPoints = 500;
             uint64_t since = ELLE_MS_NOW() - (uint64_t)hours * 3600000ULL;
 
@@ -3172,7 +3334,7 @@ private:
         });
 
         m_router.Register("GET", "/api/x/symptoms", [](const HTTPRequest& req) {
-            uint32_t hours = (uint32_t)std::atoi(req.QueryParam("hours", "24").c_str());
+            uint32_t hours = (uint32_t)req.QueryInt("hours", 24);
             if (hours == 0 || hours > 24 * 90) hours = 24;
             std::string origin = req.QueryParam("origin", "");
             std::string q =
@@ -3223,7 +3385,7 @@ private:
         });
 
         m_router.Register("GET", "/api/x/pregnancy/events", [](const HTTPRequest& req) {
-            int limit = std::atoi(req.QueryParam("limit", "100").c_str());
+            int limit = req.QueryInt("limit", 100);
             if (limit <= 0 || limit > 500) limit = 100;
             auto rs = ElleSQLPool::Instance().Query(
                 "SELECT TOP " + std::to_string(limit) + " "
@@ -3378,7 +3540,7 @@ private:
             });
         });
         m_router.Register("GET", "/api/server/console", [](const HTTPRequest& req) {
-            int limit = std::max(1, std::atoi(req.QueryParam("limit", "100").c_str()));
+            int limit = std::max(1, req.QueryInt("limit", 100));
             std::string level = req.QueryParam("level");
             std::string sql =
                 "SELECT TOP (?) id, level, service, message, created_ms "
@@ -3534,7 +3696,7 @@ private:
             return HTTPResponse::Created({{"slot_number", slot}, {"stored", true}});
         });
         m_router.Register("DELETE", "/api/models/slots/{slot_number}", [](const HTTPRequest& req) {
-            int slot = std::atoi(req.headers.at("x-path-slot_number").c_str());
+            int slot = req.PathInt("slot_number");
             auto rs = ElleSQLPool::Instance().QueryParams(
                 "DELETE FROM ElleCore.dbo.model_slots WHERE slot_number = ?;",
                 { std::to_string(slot) });
@@ -3542,7 +3704,7 @@ private:
             return HTTPResponse::OK({{"slot_number", slot}, {"removed", true}});
         });
         m_router.Register("POST", "/api/models/slots/{slot_number}/ping", [](const HTTPRequest& req) {
-            int slot = std::atoi(req.headers.at("x-path-slot_number").c_str());
+            int slot = req.PathInt("slot_number");
             auto rs = ElleSQLPool::Instance().QueryParams(
                 "SELECT endpoint FROM ElleCore.dbo.model_slots WHERE slot_number = ?;",
                 { std::to_string(slot) });

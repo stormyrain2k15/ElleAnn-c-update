@@ -47,6 +47,11 @@ extern "C" {
 #define ELLE_MAX_DRIVES         12
 #define ELLE_MAX_QUEUE_DEPTH    1024
 #define ELLE_PIPE_BUFFER_SIZE   65536
+/* Hard cap on any single IPC frame payload. Deserialize() rejects frames
+ * claiming more than this so a malicious or corrupted header cannot force
+ * an unbounded std::vector allocation on the receive path. Overridable via
+ * services.named_pipes.max_payload_bytes in config.                       */
+#define ELLE_IPC_MAX_PAYLOAD    (16u * 1024u * 1024u)   /* 16 MiB */
 #define ELLE_IOCP_THREADS       4
 
 /*──────────────────────────────────────────────────────────────────────────────
