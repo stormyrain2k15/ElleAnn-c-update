@@ -630,3 +630,12 @@ credentials.json
 # Legacy Python reference — explicitly not part of ElleAnn (pure C++/MASM/Lua).
 # Keep any local copy outside the repo.
 ElleAnn_PythonRef/
+-e 
+# Environment and credential files
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
