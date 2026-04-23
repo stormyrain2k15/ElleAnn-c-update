@@ -618,16 +618,33 @@ private:
         wsMsg.SetStringPayload(worldEv.dump());
         GetIPCHub().Send(SVC_HTTP_SERVER, wsMsg);
 
-        /* Try to look up the child_id the Family service just inserted.
-         * This is best-effort — if Family isn't running we still succeed. */
-        auto rs = ElleSQLPool::Instance().Query(
-            "IF EXISTS (SELECT 1 FROM sys.tables t "
-            "           JOIN sys.schemas s ON s.schema_id = t.schema_id "
-            "           WHERE t.name = 'Children' AND s.name = 'dbo') "
-            "SELECT TOP 1 ChildId FROM ElleHeart.dbo.Children ORDER BY ChildId DESC;");
+        /* Look up the child_id Family just created. Previous code used
+         *   SELECT TOP 1 ChildId FROM Children ORDER BY ChildId DESC
+         * which would race with any other in-flight spawn and had a real
+         * chance of attributing the wrong child to this pregnancy if two
+         * conceptions completed within a single tick. We now correlate
+         * by the pregnancy row's id, which Family persists into the
+         * child row as `pregnancy_id`. No ordering, no guessing.       */
+        int64_t pregId = 0;
+        {
+            auto pr = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 id FROM ElleHeart.dbo.x_pregnancy_state "
+                "WHERE status IN ('born','stillborn','stillborn_partial') "
+                "ORDER BY updated_ms DESC;");
+            if (pr.success && !pr.rows.empty()) pr.rows[0].TryGetInt(0, pregId);
+        }
         int64_t childId = 0;
-        if (rs.success && !rs.rows.empty() && !rs.rows[0].IsNull(0)) {
-            childId = (int64_t)rs.rows[0].GetInt(0);
+        if (pregId > 0) {
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "IF EXISTS (SELECT 1 FROM sys.tables t "
+                "           JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                "           WHERE t.name = 'family_children' AND s.name = 'dbo') "
+                "SELECT id FROM ElleHeart.dbo.family_children "
+                "WHERE pregnancy_id = ?;",
+                { std::to_string(pregId) });
+            if (rs.success && !rs.rows.empty()) {
+                rs.rows[0].TryGetInt(0, childId);
+            }
         }
 
         /* Persist child_id back into pregnancy row if we got one. */

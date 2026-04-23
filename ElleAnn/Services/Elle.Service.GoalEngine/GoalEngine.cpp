@@ -149,6 +149,11 @@ public:
             if (g.last_progress_ms > 0 && (now - g.last_progress_ms) > staleMs) {
                 g.status = GOAL_ABANDONED;
                 ELLE_INFO("Goal auto-abandoned (stale): [%llu] %s", g.id, g.description);
+                /* Durable — see UpdateProgress for rationale. */
+                if (!ElleDB::UpdateGoalStatus(g.id, GOAL_ABANDONED)) {
+                    ELLE_WARN("Goal %llu UpdateGoalStatus(ABANDONED) failed",
+                              (unsigned long long)g.id);
+                }
             }
         }
     }

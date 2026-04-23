@@ -178,6 +178,103 @@ bool SQLConnection::Ping() {
     return rs.success;
 }
 
+/*──────────────────────────────────────────────────────────────────────────────
+ * CollectStatementResults — shared fetch path for Execute / ExecuteParams.
+ *
+ * Fixes audit items:
+ *   • SQL_SUCCESS_WITH_INFO is treated as success (was previously dropped
+ *     by SQL_SUCCEEDED-vs-SQL_SUCCESS checks in callers).
+ *   • SQLGetData truncation is handled by re-reading the remainder into a
+ *     growing std::string. Previously long NVARCHAR(MAX) columns were
+ *     silently chopped at 8 KiB.
+ *   • SQLFetch is checked for SUCCESS *and* SUCCESS_WITH_INFO.
+ *
+ * Caller already executed the statement (SQLExecDirect/SQLExecute) and
+ * passes the return value as `execRet`.
+ *────────────────────────────────────────────────────────────────────────────*/
+SQLResultSet SQLConnection::CollectStatementResults(SQLHSTMT hStmt, SQLRETURN execRet) {
+    SQLResultSet result;
+    if (execRet != SQL_SUCCESS && execRet != SQL_SUCCESS_WITH_INFO &&
+        execRet != SQL_NO_DATA) {
+        result.error = GetDiagnostics(SQL_HANDLE_STMT, hStmt);
+        return result;
+    }
+
+    SQLSMALLINT numCols = 0;
+    SQLNumResultCols(hStmt, &numCols);
+    for (SQLSMALLINT i = 1; i <= numCols; i++) {
+        SQLColumn col;
+        SQLCHAR colName[256];
+        SQLSMALLINT nameLen = 0, dataType = 0, nullable = 0;
+        SQLULEN colSize = 0;
+        SQLSMALLINT decDigits = 0;
+        SQLDescribeColA(hStmt, i, colName, sizeof(colName), &nameLen,
+                        &dataType, &colSize, &decDigits, &nullable);
+        col.name = std::string((char*)colName, nameLen);
+        col.type = dataType;
+        col.size = (uint32_t)colSize;
+        result.columns.push_back(col);
+    }
+
+    for (;;) {
+        SQLRETURN fr = SQLFetch(hStmt);
+        if (fr == SQL_NO_DATA) break;
+        if (fr != SQL_SUCCESS && fr != SQL_SUCCESS_WITH_INFO) {
+            result.error = GetDiagnostics(SQL_HANDLE_STMT, hStmt);
+            return result;
+        }
+        SQLRow row;
+        for (SQLSMALLINT i = 1; i <= numCols; i++) {
+            std::string cell;
+            SQLCHAR buf[8192];
+            SQLLEN indicator = 0;
+            SQLRETURN gr = SQLGetData(hStmt, i, SQL_C_CHAR, buf, sizeof(buf), &indicator);
+            if (indicator == SQL_NULL_DATA) {
+                row.values.push_back("NULL");
+                continue;
+            }
+            if (gr == SQL_SUCCESS_WITH_INFO) {
+                /* Column didn't fit in `buf`. The driver reports the
+                 * remaining byte count via `indicator` OR indicates
+                 * unknown (-4). Loop until SQL_SUCCESS.                */
+                /* First chunk is already in buf; it's NUL-terminated
+                 * in the SQL_C_CHAR case so subtract the terminator. */
+                size_t firstLen = (indicator > 0 &&
+                                   (SQLLEN)(sizeof(buf) - 1) < indicator)
+                                    ? sizeof(buf) - 1
+                                    : strnlen((char*)buf, sizeof(buf));
+                cell.append((char*)buf, firstLen);
+                while (gr == SQL_SUCCESS_WITH_INFO) {
+                    gr = SQLGetData(hStmt, i, SQL_C_CHAR, buf, sizeof(buf), &indicator);
+                    if (gr == SQL_NO_DATA) break;
+                    if (gr != SQL_SUCCESS && gr != SQL_SUCCESS_WITH_INFO) {
+                        ELLE_WARN("SQLGetData chunk failed: %s",
+                                  GetDiagnostics(SQL_HANDLE_STMT, hStmt).c_str());
+                        break;
+                    }
+                    size_t chunkLen = strnlen((char*)buf, sizeof(buf));
+                    cell.append((char*)buf, chunkLen);
+                }
+            } else if (gr == SQL_SUCCESS) {
+                cell = std::string((char*)buf);
+            } else if (gr == SQL_NO_DATA) {
+                /* empty cell */
+            } else {
+                cell = "";
+            }
+            row.values.push_back(std::move(cell));
+        }
+        result.rows.push_back(std::move(row));
+    }
+
+    SQLLEN rowCount = 0;
+    SQLRowCount(hStmt, &rowCount);
+    result.rows_affected = rowCount;
+    result.success = true;
+    m_lastUsed = ELLE_MS_NOW();
+    return result;
+}
+
 SQLResultSet SQLConnection::Execute(const std::string& sql) {
     SQLResultSet result;
     if (!m_connected) {
@@ -193,91 +290,102 @@ SQLResultSet SQLConnection::Execute(const std::string& sql) {
     }
 
     ret = SQLExecDirectA(hStmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
-    if (!SQL_SUCCEEDED(ret) && ret != SQL_NO_DATA) {
-        result.error = GetDiagnostics(SQL_HANDLE_STMT, hStmt);
-        SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
-        return result;
-    }
-
-    /* Get column info */
-    SQLSMALLINT numCols = 0;
-    SQLNumResultCols(hStmt, &numCols);
-
-    for (SQLSMALLINT i = 1; i <= numCols; i++) {
-        SQLColumn col;
-        SQLCHAR colName[256];
-        SQLSMALLINT nameLen, dataType, nullable;
-        SQLULEN colSize;
-        SQLSMALLINT decDigits;
-
-        SQLDescribeColA(hStmt, i, colName, sizeof(colName), &nameLen,
-                        &dataType, &colSize, &decDigits, &nullable);
-        col.name = std::string((char*)colName, nameLen);
-        col.type = dataType;
-        col.size = (uint32_t)colSize;
-        result.columns.push_back(col);
-    }
-
-    /* Fetch rows */
-    while (SQLFetch(hStmt) == SQL_SUCCESS) {
-        SQLRow row;
-        for (SQLSMALLINT i = 1; i <= numCols; i++) {
-            SQLCHAR buffer[8192];
-            SQLLEN indicator;
-            ret = SQLGetData(hStmt, i, SQL_C_CHAR, buffer, sizeof(buffer), &indicator);
-            if (indicator == SQL_NULL_DATA) {
-                row.values.push_back("NULL");
-            } else {
-                row.values.push_back(std::string((char*)buffer));
-            }
-        }
-        result.rows.push_back(row);
-    }
-
-    SQLLEN rowCount;
-    SQLRowCount(hStmt, &rowCount);
-    result.rows_affected = rowCount;
-    result.success = true;
-
+    result = CollectStatementResults(hStmt, ret);
     SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
-    m_lastUsed = ELLE_MS_NOW();
     return result;
 }
 
 SQLResultSet SQLConnection::ExecuteParams(const std::string& sql, 
                                            const std::vector<std::string>& params) {
-    /* Build parameterized query by replacing ? with escaped values */
-    std::string query = sql;
-    for (size_t i = 0; i < params.size(); i++) {
-        size_t pos = query.find('?');
-        if (pos == std::string::npos) break;
-        /* Escape single quotes */
-        std::string escaped = params[i];
-        size_t qpos = 0;
-        while ((qpos = escaped.find('\'', qpos)) != std::string::npos) {
-            escaped.insert(qpos, "'");
-            qpos += 2;
-        }
-        query.replace(pos, 1, "'" + escaped + "'");
+    /*──────────────────────────────────────────────────────────────────────
+     * Real ODBC parameter binding via SQLBindParameter. The earlier
+     * implementation interpolated escaped strings into the SQL text,
+     * which is a string-injection prevention pattern, not parameterized
+     * execution — it left dialect-specific escape edge cases (N-prefixed
+     * literals, Unicode quotes, multi-byte truncation) exposed, and it
+     * forced every numeric param through string comparison on the server.
+     *
+     * We bind every param as SQL_C_CHAR → SQL_VARCHAR at input length =
+     * the string's byte size. SQL Server coerces to the column type
+     * using its own rules, which is strictly safer than our hand-rolled
+     * quoting.                                                         */
+    if (!m_connected) {
+        SQLResultSet rs; rs.success = false; rs.error = "not connected";
+        return rs;
     }
-    return Execute(query);
+
+    SQLHSTMT hStmt = SQL_NULL_HSTMT;
+    SQLRETURN ret = SQLAllocHandle(SQL_HANDLE_STMT, m_hDbc, &hStmt);
+    if (!SQL_SUCCEEDED(ret)) {
+        SQLResultSet rs; rs.success = false;
+        rs.error = "SQLAllocHandle(STMT) failed: " + GetDiagnostics(SQL_HANDLE_DBC, m_hDbc);
+        return rs;
+    }
+
+    /* Prepare statement — gives the driver a chance to plan it ahead of
+     * binding and detect syntax errors cleanly.                         */
+    ret = SQLPrepareA(hStmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+    if (!SQL_SUCCEEDED(ret)) {
+        SQLResultSet rs; rs.success = false;
+        rs.error = "SQLPrepare failed: " + GetDiagnostics(SQL_HANDLE_STMT, hStmt);
+        SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+        return rs;
+    }
+
+    /* Keep param string lifetimes valid for the duration of the call —
+     * SQLBindParameter stores pointers, not copies. We don't mutate
+     * `params` during the call so its .c_str() is stable.              */
+    std::vector<SQLLEN> cbLens(params.size(), SQL_NTS);
+    for (size_t i = 0; i < params.size(); i++) {
+        /* Empty-but-present is bound as a zero-length VARCHAR — distinct
+         * from NULL. Callers that want NULL should pass the literal
+         * "NULL" text to the old code path or adopt a typed binder
+         * when we have one. Non-empty values bind as their byte count.*/
+        cbLens[i] = (SQLLEN)params[i].size();
+        SQLRETURN br = SQLBindParameter(
+            hStmt,
+            (SQLUSMALLINT)(i + 1),
+            SQL_PARAM_INPUT,
+            SQL_C_CHAR,
+            SQL_VARCHAR,
+            (SQLULEN)params[i].size() + 1, /* column size hint */
+            0,                              /* decimal digits */
+            (SQLPOINTER)params[i].c_str(),  /* string stays live */
+            (SQLLEN)params[i].size() + 1,   /* buffer length */
+            &cbLens[i]);
+        if (!SQL_SUCCEEDED(br)) {
+            SQLResultSet rs; rs.success = false;
+            rs.error = "SQLBindParameter(" + std::to_string(i + 1) + ") failed: "
+                       + GetDiagnostics(SQL_HANDLE_STMT, hStmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+            return rs;
+        }
+    }
+
+    ret = SQLExecute(hStmt);
+    SQLResultSet rs = CollectStatementResults(hStmt, ret);
+    SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+    return rs;
 }
 
 SQLResultSet SQLConnection::CallProc(const std::string& proc, 
                                       const std::vector<std::string>& params) {
+    /* Build a proper ODBC CALL escape with ? placeholders, then reuse
+     * ExecuteParams for real binding. The previous body typed-guessed
+     * numeric vs string and string-inlined everything, which was the
+     * same class of bug ExecuteParams just got rid of.                 */
     std::ostringstream ss;
-    ss << "EXEC " << proc;
-    for (size_t i = 0; i < params.size(); i++) {
-        ss << (i == 0 ? " " : ", ");
-        /* Check if numeric */
-        bool isNum = !params[i].empty();
-        for (char c : params[i]) {
-            if (!std::isdigit(c) && c != '.' && c != '-') { isNum = false; break; }
+    ss << "{CALL " << proc;
+    if (!params.empty()) {
+        ss << "(";
+        for (size_t i = 0; i < params.size(); i++) {
+            if (i) ss << ",";
+            ss << "?";
         }
-        if (isNum) ss << params[i];
-        else ss << "'" << params[i] << "'";
+        ss << ")";
     }
-    return Execute(ss.str());
+    ss << "}";
+    return ExecuteParams(ss.str(), params);
 }
 
 int64_t SQLConnection::ExecuteScalar(const std::string& sql) {
@@ -778,19 +886,51 @@ static std::string RoleToStr(uint32_t role) {
     }
 }
 
+/* Canonical role→id map — mirrors the `messages.role` nvarchar values
+ * and the uint32_t convention used internally (0=system, 1=user,
+ * 2=elle/assistant, 3=internal). Any other role name is a schema drift
+ * and must not silently collapse into `system`.                        */
+static constexpr uint32_t ROLE_UNKNOWN  = 0xFFFFFFFFu;
+static constexpr uint32_t ROLE_SYSTEM   = 0;
+static constexpr uint32_t ROLE_USER     = 1;
+static constexpr uint32_t ROLE_ELLE     = 2;
+static constexpr uint32_t ROLE_INTERNAL = 3;
+
 static uint32_t RoleFromStr(const std::string& s) {
     std::string l = s;
     std::transform(l.begin(), l.end(), l.begin(),
                    [](unsigned char c){ return (char)std::tolower(c); });
-    if (l == "user")                return 1;
-    if (l == "assistant" || l == "elle" || l == "ai") return 2;
-    if (l == "internal")            return 3;
-    return 0;
+    if (l == "user")                                return ROLE_USER;
+    if (l == "assistant" || l == "elle" || l == "ai") return ROLE_ELLE;
+    if (l == "internal")                            return ROLE_INTERNAL;
+    if (l == "system")                              return ROLE_SYSTEM;
+    /* Previously returned 0 (=system) for every unknown value — that
+     * collapsed "internal-typo", "bot", "assistant-2", etc. into the
+     * system role, which then looked like a trusted elevated speaker.
+     * We now return a sentinel so callers can fail the message. */
+    return ROLE_UNKNOWN;
+}
+
+static bool RoleFromStrStrict(const std::string& s, uint32_t& out) {
+    uint32_t r = RoleFromStr(s);
+    if (r == ROLE_UNKNOWN) return false;
+    out = r;
+    return true;
 }
 
 bool StoreMessage(uint64_t convoId, uint32_t role, const std::string& content,
                   const ELLE_EMOTION_STATE& emotions, float sentiment) {
     (void)sentiment;
+    /* Validate role — previously any out-of-range value silently became
+     * "system" via the default arm of RoleToStr. Now: reject explicitly
+     * so drift surfaces at the write boundary instead of on replay.    */
+    if (role != ROLE_SYSTEM && role != ROLE_USER &&
+        role != ROLE_ELLE   && role != ROLE_INTERNAL) {
+        ELLE_ERROR("StoreMessage: refusing unknown role id=%u for conv=%llu",
+                   (unsigned)role, (unsigned long long)convoId);
+        return false;
+    }
+
     /* Pick the dominant emotion from the snapshot for the emotion_detected col */
     std::string dominant = "neutral";
     float topW = 0.0f;
@@ -802,41 +942,48 @@ bool StoreMessage(uint64_t convoId, uint32_t role, const std::string& content,
     }
 
     const std::string roleStr = RoleToStr(role);
-    const std::string direction = (role == 1) ? "in" : "out";
+    const std::string direction = (role == ROLE_USER) ? "in" : "out";
 
-    /* STEP 1: Ensure the conversation row exists. messages.conversation_id is a FK
-     * with CASCADE DELETE — if the conv id isn't in conversations, INSERT fails.
-     * We make StoreMessage idempotent by upserting conversations first. */
-    {
-        auto ensureConv = ElleSQLPool::Instance().QueryParams(
-            "IF NOT EXISTS (SELECT 1 FROM ElleCore.dbo.conversations WHERE id = ?) "
-            "BEGIN "
-            "  SET IDENTITY_INSERT ElleCore.dbo.conversations ON; "
-            "  INSERT INTO ElleCore.dbo.conversations "
-            "    (id, user_id, title, started_at, last_message_at, total_messages, is_active) "
-            "  VALUES (?, 1, 'auto', GETUTCDATE(), GETUTCDATE(), 0, 1); "
-            "  SET IDENTITY_INSERT ElleCore.dbo.conversations OFF; "
-            "END;",
-            { std::to_string(convoId), std::to_string(convoId) });
-        if (!ensureConv.success && !ensureConv.error.empty()) {
-            ELLE_WARN("StoreMessage: ensure-conversation failed: %s", ensureConv.error.c_str());
-        }
+    /* STEP 1: Confirm the conversation row exists. Previously we auto-
+     * created it with user_id=1 — that silently mis-attributed every
+     * orphan message to the primary user. Now: require the conversation
+     * to have been created with a real user_id by whoever started it
+     * (API handler / WS subscribe). No conv row = write fails.         */
+    auto convCheck = ElleSQLPool::Instance().QueryParams(
+        "SELECT user_id FROM ElleCore.dbo.conversations WHERE id = ?;",
+        { std::to_string(convoId) });
+    if (!convCheck.success) {
+        ELLE_ERROR("StoreMessage: conversation lookup failed for conv=%llu: %s",
+                   (unsigned long long)convoId, convCheck.error.c_str());
+        return false;
+    }
+    if (convCheck.rows.empty()) {
+        ELLE_ERROR("StoreMessage: no conversation row for conv=%llu — refusing to "
+                   "synthesize user_id; caller must create the conversation first.",
+                   (unsigned long long)convoId);
+        return false;
+    }
+    int64_t userId = 0;
+    if (!convCheck.rows[0].TryGetInt(0, userId) || userId <= 0) {
+        ELLE_ERROR("StoreMessage: conversation %llu has no valid user_id",
+                   (unsigned long long)convoId);
+        return false;
     }
 
-    /* STEP 2: Insert the message + bump conversation counters. */
+    /* STEP 2: Insert the message + bump conversation counters. user_id
+     * comes from the authoritative conversation row, not a fallback.  */
     auto rs = ElleSQLPool::Instance().QueryParams(
         "INSERT INTO ElleCore.dbo.messages "
         "(conversation_id, user_id, role, content, emotion_detected, emotion_intensity, "
         " created_at, Direction) "
-        "VALUES (?, COALESCE((SELECT user_id FROM ElleCore.dbo.conversations WHERE id=?), 1), "
-        "        ?, ?, ?, ?, GETUTCDATE(), ?); "
+        "VALUES (?, ?, ?, ?, ?, ?, GETUTCDATE(), ?); "
         "UPDATE ElleCore.dbo.conversations "
         "  SET last_message_at = GETUTCDATE(), "
         "      total_messages  = ISNULL(total_messages,0) + 1 "
         "  WHERE id = ?;",
         {
             std::to_string(convoId),
-            std::to_string(convoId),
+            std::to_string(userId),
             roleStr,
             content,
             dominant,
@@ -866,7 +1013,18 @@ bool GetConversationHistory(uint64_t convoId,
     for (auto it = rs.rows.rbegin(); it != rs.rows.rend(); ++it) {
         ELLE_CONVERSATION_MSG m = {};
         m.conversation_id = convoId;
-        m.role = RoleFromStr(it->values.size() > 0 ? it->values[0] : std::string());
+        /* Strict role parse — skip any row whose role column has drifted
+         * out of the canonical set rather than replaying it as a
+         * trusted "system" message.                                     */
+        std::string roleCell = it->values.size() > 0 ? it->values[0] : std::string();
+        uint32_t parsedRole = ROLE_UNKNOWN;
+        if (!RoleFromStrStrict(roleCell, parsedRole)) {
+            ELLE_WARN("GetConversationHistory: skipping message in conv=%llu "
+                      "with unknown role='%s'",
+                      (unsigned long long)convoId, roleCell.c_str());
+            continue;
+        }
+        m.role = parsedRole;
         if (it->values.size() > 1) {
             strncpy_s(m.content, it->values[1].c_str(), ELLE_MAX_MSG - 1);
         }
@@ -877,16 +1035,22 @@ bool GetConversationHistory(uint64_t convoId,
 }
 
 bool StoreMemory(const ELLE_MEMORY_RECORD& mem) {
-    /* Use a unique "now" timestamp as a correlation key so we can look the new
-     * row back up in a pooled-connection-safe way (OUTPUT INSERTED.id does
-     * not reliably flow back through SQLExecDirectA + our result reader). */
+    /* Single round-trip INSERT with OUTPUT inserted.id. The older
+     * two-step pattern (INSERT, then SELECT by created_ms) was:
+     *   (a) racy — two concurrent stores with the same ms would collide,
+     *   (b) unreliable — the lookup occasionally returned zero rows and
+     *       the old code returned `true` anyway, claiming durable
+     *       persistence on a memory it could no longer tag.
+     * Now: we bind parameters properly, read the id from the OUTPUT
+     * result set in the same statement, and return false if either the
+     * insert or the id recovery fails.                                  */
     uint64_t nowMs = ELLE_MS_NOW();
 
-    /* STEP 1: plain INSERT — no OUTPUT clause. */
     auto r1 = ElleSQLPool::Instance().QueryParams(
         "INSERT INTO ElleCore.dbo.memory "
         "(memory_type, tier, content, summary, emotional_valence, importance, relevance, "
         " position_x, position_y, position_z, created_ms, last_access_ms) "
+        "OUTPUT INSERTED.id "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         {
             std::to_string(mem.type),
@@ -907,20 +1071,25 @@ bool StoreMemory(const ELLE_MEMORY_RECORD& mem) {
         return false;
     }
 
-    /* STEP 2: Recover the new row's id via the unique created_ms we just wrote.
-     * If two memories somehow got the same ms, we take the most recent. */
-    auto r2 = ElleSQLPool::Instance().QueryParams(
-        "SELECT TOP 1 id FROM ElleCore.dbo.memory "
-        "WHERE created_ms = ? ORDER BY id DESC;",
-        { std::to_string(nowMs) });
-    if (!r2.success || r2.rows.empty()) {
-        ELLE_WARN("StoreMemory: row inserted but id lookup returned nothing (err=%s)",
-                  r2.error.c_str());
-        /* Row is in the table, we just can't tag it. Return true so caller
-         * doesn't retry and double-insert. */
-        return true;
+    int64_t memId = 0;
+    if (r1.rows.empty() || !r1.rows[0].TryGetInt(0, memId) || memId <= 0) {
+        /* Fallback: some drivers drop OUTPUT rows through SQLExecute+
+         * SQLBindParameter. Re-read by the unique-enough created_ms. If
+         * that also fails, we report failure — we must NOT claim a
+         * durable memory id when we can't prove persistence.            */
+        auto r2 = ElleSQLPool::Instance().QueryParams(
+            "SELECT TOP 1 id FROM ElleCore.dbo.memory "
+            "WHERE created_ms = ? ORDER BY id DESC;",
+            { std::to_string(nowMs) });
+        if (!r2.success || r2.rows.empty() ||
+            !r2.rows[0].TryGetInt(0, memId) || memId <= 0) {
+            ELLE_ERROR("StoreMemory: insert returned no id, fallback lookup "
+                       "returned nothing (err=%s) — reporting failure so "
+                       "caller can retry or alert.",
+                       r2.error.c_str());
+            return false;
+        }
     }
-    int64_t memId = r2.rows[0].GetInt(0);
 
     /* STEP 3: Write each tag + entity link. */
     for (uint32_t i = 0; i < mem.tag_count && i < ELLE_MAX_TAGS; i++) {
@@ -1270,6 +1439,26 @@ bool UpdateGoalProgress(uint64_t goalId, float progress) {
             std::to_string(progress),
             std::to_string((int64_t)goalId)
         }).success && (finished || true);
+}
+
+/* Explicit status update — used by GoalEngine for COMPLETED / ABANDONED
+ * transitions that aren't driven by a progress write. Previously these
+ * transitions lived only in the in-memory vector and vanished on restart,
+ * so the same goal would reappear as ACTIVE and re-trigger its intents. */
+bool UpdateGoalStatus(uint64_t goalId, uint32_t status) {
+    EnsureGoalsTable();
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.goals SET status = ?, last_progress_ms = ? WHERE id = ?;",
+        {
+            std::to_string((int)status),
+            std::to_string((int64_t)ELLE_MS_NOW()),
+            std::to_string((int64_t)goalId)
+        });
+    if (!rs.success) {
+        ELLE_ERROR("UpdateGoalStatus(%llu -> %u) failed: %s",
+                   (unsigned long long)goalId, (unsigned)status, rs.error.c_str());
+    }
+    return rs.success;
 }
 
 bool GetActiveGoals(std::vector<ELLE_GOAL_RECORD>& out) {

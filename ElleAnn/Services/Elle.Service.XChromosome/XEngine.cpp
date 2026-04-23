@@ -134,14 +134,34 @@ bool XEngine::Initialize() {
 
     if (rs.success && !rs.rows.empty()) {
         auto& r = rs.rows[0];
-        m_cycle.anchor_ms           = (uint64_t)r.GetInt(0);
-        m_cycle.cycle_length_days   = (int)r.GetInt(1);
-        m_cycle.modulation_strength = (float)r.GetFloat(2);
-        m_cycle.last_tick_ms        = (uint64_t)r.GetInt(3);
-        m_cycle.created_ms          = (uint64_t)r.GetInt(4);
-        ELLE_INFO("XEngine: cycle loaded (anchor=%llu len=%d)",
-                  (unsigned long long)m_cycle.anchor_ms,
-                  m_cycle.cycle_length_days);
+        /* Strict loads — previously silent GetInt/GetFloat could quietly
+         * become 0 on a drifted cell type and cascade into e.g. a day-0
+         * cycle anchor, driving gaslighting-in-reverse UI ("elle
+         * claims she's been menstruating for 55 years"). Using TryGet*
+         * we fail loudly on drift and keep the in-memory defaults.    */
+        int64_t anchorMs = 0, cycleLen = 0, lastTick = 0, createdMs = 0;
+        double  modStrength = 0.0;
+        bool ok = true;
+        ok &= r.TryGetInt  (0, anchorMs);
+        ok &= r.TryGetInt  (1, cycleLen);
+        ok &= r.TryGetFloat(2, modStrength);
+        ok &= r.TryGetInt  (3, lastTick);
+        ok &= r.TryGetInt  (4, createdMs);
+        if (!ok || anchorMs < 0 || cycleLen <= 0 || cycleLen > 60 ||
+            modStrength < 0.0 || modStrength > 2.0) {
+            ELLE_ERROR("XEngine: x_cycle_state row corrupt — refusing to "
+                       "overwrite defaults (anchor=%lld len=%lld mod=%.3f)",
+                       (long long)anchorMs, (long long)cycleLen, modStrength);
+        } else {
+            m_cycle.anchor_ms           = (uint64_t)anchorMs;
+            m_cycle.cycle_length_days   = (int)cycleLen;
+            m_cycle.modulation_strength = (float)modStrength;
+            m_cycle.last_tick_ms        = (uint64_t)lastTick;
+            m_cycle.created_ms          = (uint64_t)createdMs;
+            ELLE_INFO("XEngine: cycle loaded (anchor=%llu len=%d)",
+                      (unsigned long long)m_cycle.anchor_ms,
+                      m_cycle.cycle_length_days);
+        }
     } else {
         /* First boot — pick a random day 1..28 so Elle doesn't always start
          * on day 1. User can re-anchor at any time via /api/x/cycle/anchor. */

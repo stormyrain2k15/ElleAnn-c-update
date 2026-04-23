@@ -22,6 +22,7 @@
 typedef void* SQLHENV;
 typedef void* SQLHDBC;
 typedef void* SQLHSTMT;
+typedef short SQLRETURN;   /* ODBC return code */
 
 /*──────────────────────────────────────────────────────────────────────────────
  * SQL RESULT SET
@@ -105,6 +106,10 @@ private:
     bool AllocHandles();
     void FreeHandles();
     std::string GetDiagnostics(int16_t handleType, void* handle);
+
+    /* Shared fetch path for Execute / ExecuteParams. Handles
+     * SUCCESS_WITH_INFO as success and loops SQLGetData on truncation. */
+    SQLResultSet CollectStatementResults(SQLHSTMT hStmt, SQLRETURN execRet);
 };
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -224,6 +229,7 @@ namespace ElleDB {
      * actual row. Returns 0 on failure.                                 */
     uint64_t StoreGoalReturningId(const ELLE_GOAL_RECORD& goal);
     bool UpdateGoalProgress(uint64_t goalId, float progress);
+    bool UpdateGoalStatus(uint64_t goalId, uint32_t status);
     bool GetActiveGoals(std::vector<ELLE_GOAL_RECORD>& out);
 
     /* World Model */
@@ -398,7 +404,7 @@ namespace ElleDB {
 
     struct UserAvatar {
         int32_t     id = 0;
-        int32_t     user_id = 1;
+        int32_t     user_id = 0;    /* 0 = unset; RegisterAvatar must fail if unchanged */
         std::string label;
         std::string file_path;
         std::string mime_type;

@@ -100,6 +100,36 @@ protected:
 
         auto decision = ElleIdentityCore::Instance().EvaluateConsent(request, enriched);
 
+        /* Durable decision log — PERSIST BEFORE REPLY so the audit trail
+         * exists even if the requester crashes or we die immediately
+         * after. Previous behaviour relied on a deferred SaveToDatabase
+         * cycle driven by Continuity, so a Consent service crash after
+         * decision but before save would silently drop the record.     */
+        {
+            std::string reasonText = decision.reasoning;
+            if (reasonText.size() > 4000) reasonText.resize(4000);
+            auto logRs = ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleCore.dbo.identity_consent_log "
+                "(request_id, request_text, willing, comfort, reasoning, alternative, "
+                " decided_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?);",
+                {
+                    requestId,
+                    request,
+                    decision.willing ? std::string("1") : std::string("0"),
+                    std::to_string(decision.comfort),
+                    reasonText,
+                    decision.alternative,
+                    std::to_string((int64_t)ELLE_MS_NOW())
+                });
+            if (!logRs.success) {
+                /* Don't fail the user's request over a log write — but
+                 * do make the failure loud so operators see it.        */
+                ELLE_ERROR("Consent: failed to persist decision %s durably: %s",
+                           requestId.c_str(), logRs.error.c_str());
+            }
+        }
+
         json reply = {
             {"request_id", requestId},
             {"willing",    decision.willing},
@@ -114,10 +144,6 @@ protected:
         ELLE_INFO("Consent[%s]: willing=%d comfort=%.2f — %s",
                   requestId.c_str(), decision.willing ? 1 : 0,
                   decision.comfort, decision.reasoning.c_str());
-
-        /* EvaluateConsent already calls RecordConsentDecision internally,
-         * which writes to identity_consent_log on the next SaveToDatabase
-         * cycle (handled by Continuity's periodic save).                 */
     }
 
     std::vector<ELLE_SERVICE_ID> GetDependencies() override {

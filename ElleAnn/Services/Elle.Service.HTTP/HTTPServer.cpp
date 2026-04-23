@@ -283,22 +283,57 @@ struct HTTPResponse {
 typedef std::function<HTTPResponse(const HTTPRequest&)> RouteHandler;
 
 /*──────────────────────────────────────────────────────────────────────────────
+ * PER-ROUTE AUTH METADATA
+ *
+ * Replaces the previous method-based heuristic ("GET=free, rest=protected").
+ * Every route declares its own auth level at Register() time. The central
+ * gate in Dispatch() uses the route's metadata — there is no longer a
+ * path-prefix allowlist or a GET/HEAD bypass.
+ *
+ *   AUTH_PUBLIC        — unauthenticated clients are allowed (health,
+ *                        CORS-preflight-style reads, info endpoints).
+ *   AUTH_USER          — requires Authorization: Bearer <jwt_secret> or
+ *                        the admin key. This is the default when a route
+ *                        is registered without specifying a level, so
+ *                        adding a new route without thinking fails closed.
+ *   AUTH_ADMIN         — requires x-admin-key match (or Bearer with the
+ *                        admin secret). Used for reload / reinstall /
+ *                        destructive ops.
+ *   AUTH_INTERNAL_ONLY — loopback only; rejects anything whose peer
+ *                        address isn't 127.0.0.1 / ::1. For routes that
+ *                        should never be reachable from outside the host
+ *                        (worker claim, family spawn control, etc.).
+ *──────────────────────────────────────────────────────────────────────────────*/
+enum HttpAuthLevel {
+    AUTH_PUBLIC = 0,
+    AUTH_USER,
+    AUTH_ADMIN,
+    AUTH_INTERNAL_ONLY
+};
+
+/*──────────────────────────────────────────────────────────────────────────────
  * ROUTE DISPATCHER — supports path patterns with {placeholders}
  *──────────────────────────────────────────────────────────────────────────────*/
 struct RouteEntry {
-    std::string method;
-    std::string pattern;   /* e.g. /api/memory/{id} */
-    std::regex  re;
+    std::string   method;
+    std::string   pattern;   /* e.g. /api/memory/{id} */
+    std::regex    re;
     std::vector<std::string> paramNames;
-    RouteHandler handler;
+    RouteHandler  handler;
+    HttpAuthLevel auth = AUTH_USER;   /* fail-closed default */
 };
 
 class RouteDispatch {
 public:
-    void Register(const std::string& method, const std::string& pattern, RouteHandler h) {
+    /* Default auth = AUTH_USER so a developer who forgets to specify
+     * auth on a new route doesn't accidentally ship an anonymous write
+     * endpoint. Call with AUTH_PUBLIC for health/info reads.           */
+    void Register(const std::string& method, const std::string& pattern,
+                  RouteHandler h, HttpAuthLevel auth = AUTH_USER) {
         RouteEntry entry;
-        entry.method = method;
+        entry.method  = method;
         entry.pattern = pattern;
+        entry.auth    = auth;
         std::string regexStr;
         std::string token;
         bool inParam = false;
@@ -344,113 +379,90 @@ public:
         }
 
         /*───────────────────────────────────────────────────────────────
-         * CENTRAL AUTH GATE — runs BEFORE any route handler.
+         * MATCH FIRST, THEN AUTH — per-route policy.
          *
-         * Policy:
-         *   • Activated when http.auth_enabled=true in config.
-         *   • All mutating methods (POST/PUT/PATCH/DELETE) require auth.
-         *   • GET/HEAD are read-only by default, BUT specific GET paths
-         *     that leak sensitive data OR trigger downstream mutations
-         *     (e.g. the hardware_actions dispatch claim, queue drains,
-         *     diag endpoints) are listed in kSensitiveReadPrefixes and
-         *     also require auth.
-         *   • OPTIONS always bypasses for CORS preflight compatibility.
-         *   • Auth is either:
-         *       Authorization: Bearer <http.jwt_secret>
-         *     OR
-         *       x-admin-key: <http_server.admin_key | http.jwt_secret>
-         *   • Constant-time compare so partial-guess attacks aren't
-         *     timed. Fail-closed 503 if auth_enabled=true but no secret.
+         * Previous policy was method-based ("GET=free unless on a
+         * sensitive-prefix allowlist"). That was a maintenance bug
+         * factory: adding a new sensitive GET required remembering to
+         * update the allowlist, and new routes defaulted to anonymous.
          *
-         * Per-route fine-grained checks (e.g. x-admin-key on /morals)
-         * still run after this gate. Defense in depth.
-         *──────────────────────────────────────────────────────────────*/
-        if (httpCfg.auth_enabled) {
-            const std::string& method = req.method;
-            bool isPreflight = (method == "OPTIONS");
-            bool isRead = (method == "GET" || method == "HEAD");
+         * New policy: each RouteEntry carries its own HttpAuthLevel
+         * (default AUTH_USER when not specified). We match first so
+         * OPTIONS preflight still works against any registered path,
+         * then apply the matched route's policy before dispatching.   */
+        RouteEntry* matched = nullptr;
+        std::smatch mm;
+        for (auto& e : m_routes) {
+            if (e.method != req.method) continue;
+            if (std::regex_match(req.path, mm, e.re)) { matched = &e; break; }
+        }
 
-            /* GET endpoints that must be gated because they either expose
-             * sensitive data or perform a side-effecting atomic claim on
-             * the backing store (hardware_actions dispatch is the poster
-             * child — a bare GET poll drains pending rows).              */
-            static const char* kSensitiveReadPrefixes[] = {
-                "/api/ai/hardware/actions/pending",
-                "/api/diag/",
-                "/api/admin/",
-                "/api/morals/",
-                "/api/identity/",
-                "/api/intents/pending",
-                "/api/actions/pending",
-                "/api/memory/export",
+        if (req.method == "OPTIONS") return HTTPResponse::OK(json::object());
+
+        if (httpCfg.auth_enabled && matched && matched->auth != AUTH_PUBLIC) {
+            HttpAuthLevel need = matched->auth;
+            const std::string& secret = httpCfg.jwt_secret;
+            std::string adminKey = ElleConfig::Instance().GetString(
+                "http_server.admin_key", secret);
+            if (secret.empty() && adminKey.empty()) {
+                return HTTPResponse::Err(503,
+                    "auth_enabled=true but no jwt_secret/admin_key configured");
+            }
+            auto constTimeEq = [](const std::string& a, const std::string& b) {
+                if (a.size() != b.size()) return false;
+                unsigned diff = 0;
+                for (size_t i = 0; i < a.size(); ++i)
+                    diff |= (unsigned char)a[i] ^ (unsigned char)b[i];
+                return diff == 0;
             };
-            bool isSensitiveRead = false;
-            if (isRead) {
-                for (const char* p : kSensitiveReadPrefixes) {
-                    if (req.path.rfind(p, 0) == 0) {
-                        isSensitiveRead = true;
-                        break;
-                    }
+            bool haveBearer = false, haveAdmin = false;
+            auto authIt = req.headers.find("authorization");
+            if (authIt != req.headers.end()) {
+                static const std::string kBearer = "Bearer ";
+                const std::string& v = authIt->second;
+                if (v.size() > kBearer.size() &&
+                    std::equal(kBearer.begin(), kBearer.end(), v.begin(),
+                               [](char x, char y){
+                                   return std::tolower((unsigned char)x) ==
+                                          std::tolower((unsigned char)y);
+                               })) {
+                    std::string tok = v.substr(kBearer.size());
+                    while (!tok.empty() && (tok.front() == ' ' ||
+                                            tok.front() == '\t'))
+                        tok.erase(0, 1);
+                    if (!secret.empty()   && constTimeEq(tok, secret))   haveBearer = true;
+                    if (!adminKey.empty() && constTimeEq(tok, adminKey)) haveAdmin  = true;
                 }
             }
-
-            bool mustAuth = !isPreflight && (!isRead || isSensitiveRead);
-            if (mustAuth) {
-                const std::string& secret = httpCfg.jwt_secret;
-                std::string adminKey = ElleConfig::Instance().GetString(
-                    "http_server.admin_key", secret);
-                if (secret.empty() && adminKey.empty()) {
-                    return HTTPResponse::Err(503,
-                        "auth_enabled=true but no jwt_secret/admin_key configured");
+            auto keyIt = req.headers.find("x-admin-key");
+            if (keyIt != req.headers.end() && !adminKey.empty() &&
+                constTimeEq(keyIt->second, adminKey)) {
+                haveAdmin = true;
+            }
+            bool ok = false;
+            if (need == AUTH_USER)  ok = haveBearer || haveAdmin;
+            if (need == AUTH_ADMIN) ok = haveAdmin;
+            if (need == AUTH_INTERNAL_ONLY) {
+                auto peerIt = req.headers.find("x-peer-addr");
+                std::string peer = (peerIt != req.headers.end())
+                                   ? peerIt->second : "";
+                bool isLoop = (peer == "127.0.0.1" || peer == "::1" ||
+                               peer.rfind("127.", 0) == 0);
+                if (!isLoop) {
+                    return HTTPResponse::Err(403, "internal-only route");
                 }
-                auto constTimeEq = [](const std::string& a, const std::string& b) {
-                    if (a.size() != b.size()) return false;
-                    unsigned diff = 0;
-                    for (size_t i = 0; i < a.size(); ++i)
-                        diff |= (unsigned char)a[i] ^ (unsigned char)b[i];
-                    return diff == 0;
-                };
-                bool ok = false;
-                auto authIt = req.headers.find("authorization");
-                if (authIt != req.headers.end()) {
-                    static const std::string kBearer = "Bearer ";
-                    const std::string& v = authIt->second;
-                    if (v.size() > kBearer.size() &&
-                        std::equal(kBearer.begin(), kBearer.end(), v.begin(),
-                                   [](char x, char y){
-                                       return std::tolower((unsigned char)x) ==
-                                              std::tolower((unsigned char)y);
-                                   })) {
-                        std::string tok = v.substr(kBearer.size());
-                        while (!tok.empty() && (tok.front() == ' ' ||
-                                                tok.front() == '\t'))
-                            tok.erase(0, 1);
-                        if (!secret.empty() && constTimeEq(tok, secret)) ok = true;
-                    }
-                }
-                if (!ok) {
-                    auto keyIt = req.headers.find("x-admin-key");
-                    if (keyIt != req.headers.end() && !adminKey.empty() &&
-                        constTimeEq(keyIt->second, adminKey)) {
-                        ok = true;
-                    }
-                }
-                if (!ok) {
-                    return HTTPResponse::Err(401,
-                        "authentication required");
-                }
+                ok = haveAdmin;
+            }
+            if (!ok) {
+                return HTTPResponse::Err(401, "authentication required");
             }
         }
 
-        for (auto& e : m_routes) {
-            if (e.method != req.method) continue;
-            std::smatch m;
-            if (std::regex_match(req.path, m, e.re)) {
-                for (size_t i = 0; i < e.paramNames.size() && i + 1 < m.size(); i++) {
-                    req.headers["x-path-" + e.paramNames[i]] = m[i + 1].str();
-                }
-                return e.handler(req);
+        if (matched) {
+            for (size_t i = 0; i < matched->paramNames.size() && i + 1 < mm.size(); i++) {
+                req.headers["x-path-" + matched->paramNames[i]] = mm[i + 1].str();
             }
+            return matched->handler(req);
         }
         return HTTPResponse::Err(404, "Not found: " + req.method + " " + req.path);
     }
@@ -1071,6 +1083,23 @@ private:
             }
 
             HTTPRequest req = ParseRequest(raw);
+
+            /* Stamp the peer address onto the request so the auth gate
+             * can enforce AUTH_INTERNAL_ONLY (loopback-only routes).
+             * getpeername on the accepted socket is authoritative; the
+             * client cannot spoof this.                                */
+            {
+                sockaddr_storage peer{};
+                int peerLen = (int)sizeof(peer);
+                if (getpeername(clientSocket, (sockaddr*)&peer, &peerLen) == 0) {
+                    char host[NI_MAXHOST] = {0};
+                    if (getnameinfo((sockaddr*)&peer, peerLen,
+                                    host, sizeof(host),
+                                    nullptr, 0, NI_NUMERICHOST) == 0) {
+                        req.headers["x-peer-addr"] = host;
+                    }
+                }
+            }
 
             /* If we have Content-Length, read remaining body. Strict parse:
              * reject garbage / non-numeric values rather than silently
@@ -1917,9 +1946,38 @@ private:
         });
 
         /* ============== Tokens / Conversations — dbo.conversations + messages ==== */
-        m_router.Register("POST", "/api/tokens/conversations", [](const HTTPRequest& req) {
+        /* Helper — extract an identity-bearing user_id from body/query with
+         * strict validation. Returns a populated response when the id is
+         * missing or invalid; callers use:
+         *     int32_t userId = 0;
+         *     if (auto err = RequireUserId(body, userId)) return *err;
+         * Previously every one of these handlers had `body.value("user_id", 1)`
+         * then (more recently) `body.value("user_id", 0)`, and silently
+         * wrote the 0 sentinel into user-scoped tables. Now a missing or
+         * non-positive user_id is a 400.                                 */
+        auto RequireUserId = [](const json& body, int32_t& out) -> std::optional<HTTPResponse> {
+            if (!body.contains("user_id"))
+                return HTTPResponse::Err(400, "user_id is required");
+            auto& v = body.at("user_id");
+            int64_t raw = 0;
+            if (v.is_number_integer())      raw = v.get<int64_t>();
+            else if (v.is_number_unsigned()) raw = (int64_t)v.get<uint64_t>();
+            else if (v.is_string()) {
+                if (!HTTPRequest::StrictParseLL(v.get<std::string>(), raw))
+                    return HTTPResponse::Err(400, "user_id must be a positive integer");
+            } else {
+                return HTTPResponse::Err(400, "user_id must be a positive integer");
+            }
+            if (raw <= 0 || raw > INT32_MAX)
+                return HTTPResponse::Err(400, "user_id must be a positive integer");
+            out = (int32_t)raw;
+            return std::nullopt;
+        };
+
+        m_router.Register("POST", "/api/tokens/conversations", [RequireUserId](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            int32_t userId = body.value("user_id", 0);
+            int32_t userId = 0;
+            if (auto err = RequireUserId(body, userId)) return *err;
             std::string title = body.value("title", std::string("New conversation"));
             int32_t newId = 0;
             if (!ElleDB::CreateConversation(userId, title, newId))
@@ -1985,10 +2043,13 @@ private:
             }
             return HTTPResponse::OK(j);
         });
-        m_router.Register("POST", "/api/tokens/video-calls", [](const HTTPRequest& req) {
+        m_router.Register("POST", "/api/tokens/video-calls", [RequireUserId](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            int32_t userId = body.value("user_id", 0);
+            int32_t userId = 0;
+            if (auto err = RequireUserId(body, userId)) return *err;
             int32_t convId = body.value("conversation_id", 0);
+            if (convId <= 0)
+                return HTTPResponse::Err(400, "conversation_id must be positive");
             std::string callId;
             if (!ElleDB::StartVoiceCall(userId, convId, callId))
                 return HTTPResponse::Err(500, "StartVoiceCall failed");
@@ -2110,7 +2171,9 @@ private:
                     return HTTPResponse::Err(400, "provide file_path or base64");
 
                 ElleDB::UserAvatar a;
-                a.user_id    = body.value("user_id", 0);
+                int32_t auid = 0;
+                if (auto err = RequireUserId(body, auid)) return *err;
+                a.user_id    = auid;
                 a.label      = label;
                 a.file_path  = filePath;
                 a.mime_type  = mime;
@@ -2401,11 +2464,23 @@ private:
                 {"ram_percent", (float)mem.dwMemoryLoad}
             });
         });
+        /*─────────────────────────────────────────────────────────────────
+         * HARDWARE ACTION DISPATCH.
+         *
+         * The old GET endpoint was a state-mutating atomic-claim disguised
+         * as a read (every poll UPDATEd pending rows to 'dispatched').
+         * Per audit: separate read from mutation.
+         *
+         *  • GET  /api/ai/hardware/actions/pending  — pure read, AUTH_USER.
+         *    Returns rows that are currently pending WITHOUT claiming.
+         *  • POST /api/ai/hardware/actions/claim    — atomic claim,
+         *    AUTH_INTERNAL_ONLY (only the local device worker should be
+         *    allowed to dispatch). Returns the claimed rows.
+         *───────────────────────────────────────────────────────────────*/
         m_router.Register("GET", "/api/ai/hardware/actions/pending", [](const HTTPRequest& req) {
             std::string target = req.QueryParam("target", "device");
             json j = json::array();
 
-            /* (a) Legacy / trust-gated actions from the action queue. */
             std::vector<ELLE_ACTION_RECORD> actions;
             ElleDB::GetPendingActions(actions, 50);
             for (auto& a : actions) {
@@ -2418,17 +2493,12 @@ private:
                 });
             }
 
-            /* (b) Device-facing hardware_actions (vibrate / flash / notify)
-             * populated by ActionExecutor::ExecuteHardwareCommand. Atomic
-             * claim pattern so two concurrent polls don't double-process.  */
-            auto claim = ElleSQLPool::Instance().Query(
-                "UPDATE TOP (50) ElleCore.dbo.hardware_actions "
-                "SET status = 'dispatched' "
-                "OUTPUT inserted.id, inserted.action_type, ISNULL(inserted.payload,''), "
-                "       inserted.created_ms "
-                "WHERE status = 'pending';");
-            if (claim.success) {
-                for (auto& r : claim.rows) {
+            auto peek = ElleSQLPool::Instance().QueryParams(
+                "SELECT TOP 50 id, action_type, ISNULL(payload,''), created_ms "
+                "FROM ElleCore.dbo.hardware_actions "
+                "WHERE status = 'pending' ORDER BY id ASC;", {});
+            if (peek.success) {
+                for (auto& r : peek.rows) {
                     j.push_back({
                         {"source", "hardware_actions"},
                         {"id", r.GetInt(0)},
@@ -2440,7 +2510,29 @@ private:
             }
             (void)target;
             return HTTPResponse::OK(j);
-        });
+        }, AUTH_USER);
+
+        m_router.Register("POST", "/api/ai/hardware/actions/claim", [](const HTTPRequest& req) {
+            (void)req;
+            json j = json::array();
+            auto claim = ElleSQLPool::Instance().Query(
+                "UPDATE TOP (50) ElleCore.dbo.hardware_actions "
+                "SET status = 'dispatched' "
+                "OUTPUT inserted.id, inserted.action_type, ISNULL(inserted.payload,''), "
+                "       inserted.created_ms "
+                "WHERE status = 'pending';");
+            if (!claim.success) return HTTPResponse::Err(500, claim.error);
+            for (auto& r : claim.rows) {
+                j.push_back({
+                    {"source", "hardware_actions"},
+                    {"id", r.GetInt(0)},
+                    {"action_type", r.values.size() > 1 ? r.values[1] : ""},
+                    {"payload",     r.values.size() > 2 ? r.values[2] : ""},
+                    {"created_ms",  r.GetInt(3)}
+                });
+            }
+            return HTTPResponse::OK(j);
+        }, AUTH_INTERNAL_ONLY);
         m_router.Register("POST", "/api/ai/hardware/actions/{id}/ack", [](const HTTPRequest& req) {
             /* Android confirms delivery — mark the hardware_actions row consumed. */
             int64_t id = req.PathLL("id");
@@ -4169,18 +4261,22 @@ private:
         });
         m_router.Register("GET", "/api/brain/status", [](const HTTPRequest&) {
             return HTTPResponse::OK({{"status", "active"}});
-        });
+        }, AUTH_PUBLIC);
         m_router.Register("GET", "/api/hal/status", [](const HTTPRequest&) {
             return HTTPResponse::OK({{"hardware", "nominal"}});
-        });
+        }, AUTH_PUBLIC);
         m_router.Register("POST", "/api/admin/reload", [](const HTTPRequest&) {
             try {
                 ElleConfig::Instance().Reload();
                 return HTTPResponse::OK({{"reloaded", true}});
+            } catch (const std::exception& e) {
+                ELLE_ERROR("admin/reload failed: %s", e.what());
+                return HTTPResponse::Err(500, std::string("reload failed: ") + e.what());
             } catch (...) {
+                ELLE_ERROR("admin/reload failed (unknown)");
                 return HTTPResponse::Err(500, "reload failed");
             }
-        });
+        }, AUTH_ADMIN);
 
         ELLE_INFO("Registered %zu API routes", m_router.Count());
     }
