@@ -4,6 +4,7 @@
 #include "ElleQueueIPC.h"
 #include "ElleLogger.h"
 #include "ElleConfig.h"
+#include <algorithm>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * PIPE NAME HELPERS
@@ -94,6 +95,27 @@ bool ElleIPCMessage::Deserialize(const uint8_t* data, uint32_t len, ElleIPCMessa
     if (payloadSize > 0) {
         out.payload.resize(payloadSize);
         memcpy(out.payload.data(), data + sizeof(ELLE_IPC_HEADER), payloadSize);
+    }
+
+    /* Verify checksum — Create() fills header.checksum over header-minus-
+     * checksum + payload. Previously we accepted any frame; corrupted or
+     * tampered wire bytes would silently feed garbage into every handler. */
+    uint32_t claimed = out.header.checksum;
+    uint32_t checksumSize = sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t) + payloadSize;
+    std::vector<uint8_t> tmp(checksumSize);
+    /* Hash the header with checksum zeroed out, same way Create() did it. */
+    ELLE_IPC_HEADER zeroed = out.header;
+    zeroed.checksum = 0;
+    memcpy(tmp.data(), &zeroed, sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t));
+    if (payloadSize > 0) {
+        memcpy(tmp.data() + sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t),
+               out.payload.data(), payloadSize);
+    }
+    uint32_t actual = Elle_IPC_Checksum(tmp.data(), checksumSize);
+    if (claimed != actual) {
+        ELLE_WARN("IPC checksum mismatch: claimed=%08x actual=%08x — frame dropped",
+                  claimed, actual);
+        return false;
     }
 
     return true;
@@ -233,16 +255,48 @@ void ElleIPCServer::IssueRead(EllePipeConnection* conn) {
 }
 
 void ElleIPCServer::OnIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytesTransferred, DWORD error) {
-    auto* conn = reinterpret_cast<EllePipeConnection*>(
+    /* The connection was identified by the dispatcher via the IOCP
+     * completion key and pointer classification, not offsetof magic. The
+     * caller sets ovl's carrier pipe_handle; we trust the dispatcher. */
+    EllePipeConnection* conn = reinterpret_cast<EllePipeConnection*>(
         reinterpret_cast<uint8_t*>(ovl) - offsetof(EllePipeConnection, m_readOvl));
+
+    /* Write completions come in on m_writeOvl — reject them here; the
+     * dispatcher already routes writes separately to ReleasePendingWrite. */
+    if (ovl->operation == ELLE_IOCP_OP_WRITE) return;
 
     if (error != 0) {
         if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) {
             conn->m_connected = false;
-            ELLE_DEBUG("Pipe disconnected");
-            /* Re-create pipe instance for new connections */
+            conn->m_remoteService = (ELLE_SERVICE_ID)0;
+            conn->m_readBuffer.clear();
+            ELLE_DEBUG("Pipe disconnected — recycling instance for new client");
+
+            /* Clean recycle: Disconnect, fully reset the OVERLAPPED struct,
+             * then re-arm ConnectNamedPipe so the next peer can bind.      */
             DisconnectNamedPipe(conn->m_hPipe);
-            ConnectNamedPipe(conn->m_hPipe, &conn->m_readOvl.overlapped);
+            ZeroMemory(&conn->m_readOvl.overlapped, sizeof(OVERLAPPED));
+            conn->m_readOvl.operation = ELLE_IOCP_OP_CONNECT;
+
+            BOOL ok = ConnectNamedPipe(conn->m_hPipe, &conn->m_readOvl.overlapped);
+            if (!ok) {
+                DWORD e = GetLastError();
+                if (e == ERROR_PIPE_CONNECTED) {
+                    conn->m_connected = true;
+                    IssueRead(conn);
+                } else if (e != ERROR_IO_PENDING) {
+                    ELLE_WARN("Pipe recycle ConnectNamedPipe failed: %d", e);
+                }
+            }
+        } else if (error == ERROR_MORE_DATA) {
+            /* Message bigger than ELLE_PIPE_BUFFER_SIZE — read the remainder
+             * in a follow-up synchronous read so the whole message is
+             * assembled before deserialization. Rare, but matters for
+             * large SetStringPayload (e.g. long system prompts).           */
+            ProcessReadComplete(conn, bytesTransferred, /*partial*/ true);
+            IssueRead(conn);
+        } else {
+            ELLE_WARN("Server IOCP error %u on pipe", error);
         }
         return;
     }
@@ -255,44 +309,72 @@ void ElleIPCServer::OnIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytesTransferr
             break;
 
         case ELLE_IOCP_OP_READ:
-            ProcessReadComplete(conn, bytesTransferred);
-            IssueRead(conn); /* Continue reading */
+            ProcessReadComplete(conn, bytesTransferred, /*partial*/ false);
+            IssueRead(conn);
             break;
 
-        case ELLE_IOCP_OP_WRITE:
-            /* Write completed */
+        default:
             break;
     }
 }
 
 void ElleIPCServer::ProcessReadComplete(EllePipeConnection* conn, DWORD bytes) {
-    if (bytes == 0) return;
+    ProcessReadComplete(conn, bytes, false);
+}
+
+void ElleIPCServer::ProcessReadComplete(EllePipeConnection* conn, DWORD bytes, bool partial) {
+    if (bytes == 0 && !partial) return;
+
+    /* Accumulate into m_readBuffer to support messages that span multiple
+     * ReadFile completions (PIPE_READMODE_MESSAGE returns ERROR_MORE_DATA
+     * when a single message is larger than the buffer). */
+    size_t off = conn->m_readBuffer.size();
+    conn->m_readBuffer.resize(off + bytes);
+    memcpy(conn->m_readBuffer.data() + off, conn->m_readOvl.buffer, bytes);
+
+    if (partial) return;  /* wait for the rest */
 
     ElleIPCMessage msg;
-    if (ElleIPCMessage::Deserialize(conn->m_readOvl.buffer, bytes, msg)) {
+    if (ElleIPCMessage::Deserialize(
+            conn->m_readBuffer.data(), (uint32_t)conn->m_readBuffer.size(), msg)) {
         conn->m_remoteService = (ELLE_SERVICE_ID)msg.header.source_svc;
         if (m_handler) {
             m_handler(msg, (ELLE_SERVICE_ID)msg.header.source_svc);
         }
     } else {
-        ELLE_WARN("Failed to deserialize IPC message (%d bytes)", bytes);
+        ELLE_WARN("Failed to deserialize IPC message (%zu bytes accumulated)",
+                  conn->m_readBuffer.size());
     }
+    conn->m_readBuffer.clear();
 }
 
 bool ElleIPCServer::Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg) {
     std::lock_guard<std::mutex> lock(m_connMutex);
     for (auto& conn : m_connections) {
         if (conn->m_connected && conn->m_remoteService == target) {
-            auto data = msg.Serialize();
+            /* Ownership of the wire bytes AND the OVERLAPPED lives on the
+             * connection until the IOCP completion fires. Previously both
+             * were stack-locals — the stack frame died before WriteFile's
+             * async completion, corrupting whatever happened to land in
+             * that memory. Now the PendingWrite struct is heap-allocated,
+             * keyed by its contained overlapped pointer, and released by
+             * ReleasePendingWrite() on completion. */
             std::lock_guard<std::mutex> wlock(conn->m_writeMutex);
+            auto pw = std::make_unique<EllePipeConnection::PendingWrite>();
+            pw->data = msg.Serialize();
+            pw->ovl.operation = ELLE_IOCP_OP_WRITE;
+            pw->ovl.service_id = m_serviceId;
+            pw->ovl.pipe_handle = conn->m_hPipe;
 
-            ZeroMemory(&conn->m_writeOvl.overlapped, sizeof(OVERLAPPED));
-            conn->m_writeOvl.operation = ELLE_IOCP_OP_WRITE;
-
-            DWORD written;
-            BOOL result = WriteFile(conn->m_hPipe, data.data(), (DWORD)data.size(),
-                                     &written, &conn->m_writeOvl.overlapped);
-            return result || GetLastError() == ERROR_IO_PENDING;
+            DWORD written = 0;
+            BOOL result = WriteFile(conn->m_hPipe, pw->data.data(),
+                                    (DWORD)pw->data.size(), &written,
+                                    &pw->ovl.overlapped);
+            if (result || GetLastError() == ERROR_IO_PENDING) {
+                conn->m_pendingWrites.push_back(std::move(pw));
+                return true;
+            }
+            return false;
         }
     }
     return false;
@@ -301,17 +383,20 @@ bool ElleIPCServer::Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg) {
 void ElleIPCServer::Broadcast(const ElleIPCMessage& msg) {
     std::lock_guard<std::mutex> lock(m_connMutex);
     for (auto& conn : m_connections) {
-        if (conn->m_connected) {
-            auto data = msg.Serialize();
-            std::lock_guard<std::mutex> wlock(conn->m_writeMutex);
+        if (!conn->m_connected) continue;
+        std::lock_guard<std::mutex> wlock(conn->m_writeMutex);
+        auto pw = std::make_unique<EllePipeConnection::PendingWrite>();
+        pw->data = msg.Serialize();
+        pw->ovl.operation = ELLE_IOCP_OP_WRITE;
+        pw->ovl.service_id = m_serviceId;
+        pw->ovl.pipe_handle = conn->m_hPipe;
 
-            ELLE_IOCP_OVERLAPPED writeOvl;
-            ZeroMemory(&writeOvl, sizeof(writeOvl));
-            writeOvl.operation = ELLE_IOCP_OP_WRITE;
-
-            DWORD written;
-            WriteFile(conn->m_hPipe, data.data(), (DWORD)data.size(),
-                      &written, &writeOvl.overlapped);
+        DWORD written = 0;
+        BOOL result = WriteFile(conn->m_hPipe, pw->data.data(),
+                                (DWORD)pw->data.size(), &written,
+                                &pw->ovl.overlapped);
+        if (result || GetLastError() == ERROR_IO_PENDING) {
+            conn->m_pendingWrites.push_back(std::move(pw));
         }
     }
 }
@@ -367,8 +452,17 @@ bool ElleIPCClient::Connect(ELLE_SERVICE_ID myService, ELLE_SERVICE_ID targetSer
     DWORD mode = PIPE_READMODE_MESSAGE;
     SetNamedPipeHandleState(m_conn->m_hPipe, &mode, nullptr, nullptr);
 
-    /* Associate with IOCP */
-    CreateIoCompletionPort(m_conn->m_hPipe, m_hIOCP, (ULONG_PTR)m_conn.get(), 0);
+    /* Associate with IOCP. Previously the return was unchecked; a failed
+     * association silently breaks all async reads/writes on this client. */
+    if (!CreateIoCompletionPort(m_conn->m_hPipe, m_hIOCP,
+                                (ULONG_PTR)m_conn.get(), 0)) {
+        ELLE_ERROR("Client IOCP association failed (target=%u): %d",
+                   (unsigned)targetService, GetLastError());
+        CloseHandle(m_conn->m_hPipe);
+        m_conn->m_hPipe = INVALID_HANDLE_VALUE;
+        m_conn.reset();
+        return false;
+    }
 
     m_conn->m_connected = true;
     m_conn->m_remoteService = targetService;
@@ -397,6 +491,19 @@ void ElleIPCClient::OnIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytesTransferr
         if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) {
             m_conn->m_connected = false;
             ELLE_DEBUG("Client pipe disconnected (target=%u)", (unsigned)m_targetService);
+        } else if (error == ERROR_MORE_DATA) {
+            /* Large message — accumulate the chunk and keep reading. */
+            size_t off = m_conn->m_readBuffer.size();
+            m_conn->m_readBuffer.resize(off + bytesTransferred);
+            memcpy(m_conn->m_readBuffer.data() + off,
+                   m_conn->m_readOvl.buffer, bytesTransferred);
+            /* Re-post read to pick up the tail. */
+            ZeroMemory(&m_conn->m_readOvl.overlapped, sizeof(OVERLAPPED));
+            m_conn->m_readOvl.operation = ELLE_IOCP_OP_READ;
+            ReadFile(m_conn->m_hPipe, m_conn->m_readOvl.buffer,
+                     ELLE_PIPE_BUFFER_SIZE, nullptr,
+                     &m_conn->m_readOvl.overlapped);
+            return;
         } else {
             ELLE_WARN("Client IOCP error %u on target=%u", error, (unsigned)m_targetService);
         }
@@ -406,15 +513,26 @@ void ElleIPCClient::OnIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytesTransferr
     switch (ovl->operation) {
         case ELLE_IOCP_OP_READ: {
             if (bytesTransferred > 0) {
+                /* Append this chunk to the reassembly buffer, then attempt
+                 * to deserialize the whole message. Supports messages that
+                 * span multiple IOCP completions via ERROR_MORE_DATA above. */
+                size_t off = m_conn->m_readBuffer.size();
+                m_conn->m_readBuffer.resize(off + bytesTransferred);
+                memcpy(m_conn->m_readBuffer.data() + off,
+                       m_conn->m_readOvl.buffer, bytesTransferred);
+
                 ElleIPCMessage msg;
-                if (ElleIPCMessage::Deserialize(m_conn->m_readOvl.buffer, bytesTransferred, msg)) {
+                if (ElleIPCMessage::Deserialize(
+                        m_conn->m_readBuffer.data(),
+                        (uint32_t)m_conn->m_readBuffer.size(), msg)) {
                     if (m_handler) {
                         m_handler(msg, (ELLE_SERVICE_ID)msg.header.source_svc);
                     }
                 } else {
-                    ELLE_WARN("Client failed to deserialize %u bytes from target=%u",
-                              bytesTransferred, (unsigned)m_targetService);
+                    ELLE_WARN("Client failed to deserialize %zu bytes from target=%u",
+                              m_conn->m_readBuffer.size(), (unsigned)m_targetService);
                 }
+                m_conn->m_readBuffer.clear();
             }
             /* Always re-post the read so further server→client messages land. */
             ZeroMemory(&m_conn->m_readOvl.overlapped, sizeof(OVERLAPPED));
@@ -430,7 +548,8 @@ void ElleIPCClient::OnIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytesTransferr
             break;
         }
         case ELLE_IOCP_OP_WRITE:
-            /* Write completed — nothing to do; Serialize buffer is owned by caller. */
+            /* Write completed — PendingWrite cleanup happens in the Hub's
+             * DispatchIOComplete classifier path; nothing to do here.      */
             break;
         default:
             break;
@@ -454,16 +573,27 @@ bool ElleIPCClient::IsConnected() const {
 
 bool ElleIPCClient::Send(const ElleIPCMessage& msg) {
     if (!IsConnected()) return false;
-    auto data = msg.Serialize();
     std::lock_guard<std::mutex> lock(m_conn->m_writeMutex);
 
-    ZeroMemory(&m_conn->m_writeOvl.overlapped, sizeof(OVERLAPPED));
-    m_conn->m_writeOvl.operation = ELLE_IOCP_OP_WRITE;
+    /* Same ownership pattern as server-side Send — the wire bytes and the
+     * OVERLAPPED both live on the connection until the IOCP completion
+     * releases them. Fixes use-after-free when WriteFile returns
+     * ERROR_IO_PENDING and the old stack-local buffer got reclaimed.     */
+    auto pw = std::make_unique<EllePipeConnection::PendingWrite>();
+    pw->data = msg.Serialize();
+    pw->ovl.operation = ELLE_IOCP_OP_WRITE;
+    pw->ovl.service_id = m_myService;
+    pw->ovl.pipe_handle = m_conn->m_hPipe;
 
-    DWORD written;
-    BOOL result = WriteFile(m_conn->m_hPipe, data.data(), (DWORD)data.size(),
-                             &written, &m_conn->m_writeOvl.overlapped);
-    return result || GetLastError() == ERROR_IO_PENDING;
+    DWORD written = 0;
+    BOOL result = WriteFile(m_conn->m_hPipe, pw->data.data(),
+                            (DWORD)pw->data.size(), &written,
+                            &pw->ovl.overlapped);
+    if (result || GetLastError() == ERROR_IO_PENDING) {
+        m_conn->m_pendingWrites.push_back(std::move(pw));
+        return true;
+    }
+    return false;
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -508,18 +638,44 @@ bool ElleIPCHub::Initialize(ELLE_SERVICE_ID myService, uint32_t workerThreads) {
 void ElleIPCHub::Shutdown() {
     m_running = false;
 
-    /* Post completion to wake worker threads */
+    /* Cancel any outstanding I/O BEFORE waking workers or destroying conns.
+     * This forces pending overlapped ops to complete with
+     * ERROR_OPERATION_ABORTED so their IOCP entries drain safely.
+     * Previously we cleared m_connections / m_clients while the IOCP thread
+     * could still be about to dereference those same pointers — classic
+     * use-after-free on shutdown.                                          */
+    {
+        std::lock_guard<std::mutex> lock(m_server.m_connMutex);
+        for (auto& conn : m_server.m_connections) {
+            if (conn && conn->m_hPipe != INVALID_HANDLE_VALUE) {
+                CancelIoEx(conn->m_hPipe, nullptr);
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_clientMutex);
+        for (auto& kv : m_clients) {
+            auto* c = kv.second.get();
+            if (c && c->m_conn && c->m_conn->m_hPipe != INVALID_HANDLE_VALUE) {
+                CancelIoEx(c->m_conn->m_hPipe, nullptr);
+            }
+        }
+    }
+
+    /* Post completion to wake worker threads so they observe m_running = false */
     for (size_t i = 0; i < m_workers.size(); i++) {
         PostQueuedCompletionStatus(m_hIOCP, 0, 0, nullptr);
     }
 
+    /* JOIN workers — guarantees no more completions will touch conns after
+     * this point. Required before we destroy the conn vectors below. */
     for (auto& t : m_workers) {
         if (t.joinable()) t.join();
     }
     m_workers.clear();
 
+    /* Now safe to tear down pipes — no threads observing them. */
     m_server.Stop();
-
     {
         std::lock_guard<std::mutex> lock(m_clientMutex);
         m_clients.clear();
@@ -644,7 +800,8 @@ void ElleIPCHub::WorkerThread() {
             if (err == WAIT_TIMEOUT) continue;
             if (ovl) {
                 auto* elleOvl = reinterpret_cast<ELLE_IOCP_OVERLAPPED*>(ovl);
-                DispatchIOComplete(elleOvl, 0, err);
+                auto* conn    = reinterpret_cast<EllePipeConnection*>(completionKey);
+                DispatchIOComplete(elleOvl, 0, err, conn);
             }
             continue;
         }
@@ -652,20 +809,56 @@ void ElleIPCHub::WorkerThread() {
         if (!ovl) continue; /* Shutdown signal */
 
         auto* elleOvl = reinterpret_cast<ELLE_IOCP_OVERLAPPED*>(ovl);
-        DispatchIOComplete(elleOvl, bytesTransferred, 0);
+        auto* conn    = reinterpret_cast<EllePipeConnection*>(completionKey);
+        DispatchIOComplete(elleOvl, bytesTransferred, 0, conn);
     }
 }
 
 /* Route the completion to whichever side owns the connection.
- * Client-owned conns have m_clientOwner set to the ElleIPCClient*; server
- * conns leave it nullptr. Without this dispatch every client read completion
- * was misrouted to the server handler and silently dropped.                */
-void ElleIPCHub::DispatchIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytes, DWORD err) {
-    /* Recover the owning EllePipeConnection via the same offsetof trick the
-     * server uses. Works regardless of server/client because both sides use
-     * the same struct layout.                                              */
-    auto* conn = reinterpret_cast<EllePipeConnection*>(
-        reinterpret_cast<uint8_t*>(ovl) - offsetof(EllePipeConnection, m_readOvl));
+ *
+ * We use the completion key (set to the EllePipeConnection* in both
+ * CreateIoCompletionPort calls) as the authoritative identifier — NOT
+ * offsetof arithmetic on the overlapped pointer, because write
+ * completions arrive on m_writeOvl and the offsetof(... m_readOvl) trick
+ * used previously produced a wrong pointer on every write.
+ *
+ * Write completions: release the PendingWrite that owns the overlapped
+ * pointer, freeing the wire-bytes buffer after the async WriteFile is
+ * truly done. Read/connect completions: route by owner flag.           */
+void ElleIPCHub::DispatchIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytes, DWORD err,
+                                    EllePipeConnection* conn) {
+    if (!conn) {
+        /* Shouldn't happen — worker thread always passes completionKey. */
+        return;
+    }
+
+    /* Classify completion by pointer location within the connection. */
+    auto* ovlBase = reinterpret_cast<uint8_t*>(ovl);
+    auto* connBase = reinterpret_cast<uint8_t*>(conn);
+    bool isWrite = (ovlBase == connBase + EllePipeConnection::WriteOvlOffset())
+                || (ovl->operation == ELLE_IOCP_OP_WRITE);
+
+    /* Also check the PendingWrite list — write completions for buffered
+     * async sends are NOT on m_writeOvl; each has its own overlapped. */
+    if (!isWrite) {
+        std::lock_guard<std::mutex> lock(conn->m_writeMutex);
+        for (auto& pw : conn->m_pendingWrites) {
+            if (&pw->ovl == ovl) { isWrite = true; break; }
+        }
+    }
+
+    if (isWrite) {
+        /* Free the owning PendingWrite (if any). */
+        std::lock_guard<std::mutex> lock(conn->m_writeMutex);
+        auto& pw = conn->m_pendingWrites;
+        pw.erase(std::remove_if(pw.begin(), pw.end(),
+                 [ovl](const std::unique_ptr<EllePipeConnection::PendingWrite>& p) {
+                     return &p->ovl == ovl;
+                 }), pw.end());
+        return;
+    }
+
+    /* Read / connect — route by owner. */
     if (conn->m_clientOwner) {
         reinterpret_cast<ElleIPCClient*>(conn->m_clientOwner)->OnIOComplete(ovl, bytes, err);
     } else {

@@ -38,6 +38,17 @@ public:
     };
     State GetState() const;
 
+    /* Request a cooperative shutdown — flips the running flag so the
+     * worker exits at the next word boundary, then joins the thread so
+     * no in-flight SQL/HTTP I/O is left outstanding when the process
+     * tears down. Safe to call multiple times.                           */
+    void Shutdown();
+
+    /* Destructor guarantees the worker thread is joined. Previously the
+     * thread was launched .detach()'d (now m_worker.joinable() is used)
+     * so process teardown raced with an in-flight curl/SQL call.       */
+    ~DictionaryLoader();
+
 private:
     DictionaryLoader() = default;
 

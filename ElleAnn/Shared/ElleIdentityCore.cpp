@@ -10,6 +10,7 @@
 #include "ElleSQLConn.h"
 #include "ElleLLM.h"
 #include "json.hpp"
+#include "ElleJsonExtract.h"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -347,14 +348,13 @@ ElleIdentityCore::ConsentDecision ElleIdentityCore::EvaluateConsent(
         "\"reasoning\":\"<1 sentence in Elle's first-person voice>\", "
         "\"alternative\":\"<what she'd prefer instead, or empty string>\"}.");
 
-    /* Parse the JSON response — tolerant to ``` fences and leading text. */
+    /* Parse the JSON response — tolerant to ``` fences, leading prose,
+     * and nested braces in the prose via brace-balanced extraction.     */
     decision.reasoning = "";
     if (!response.empty()) {
-        auto first = response.find('{');
-        auto last  = response.rfind('}');
-        if (first != std::string::npos && last != std::string::npos && last > first) {
+        nlohmann::json j;
+        if (Elle::ExtractJsonObject(response, j)) {
             try {
-                auto j = nlohmann::json::parse(response.substr(first, last - first + 1));
                 if (j.contains("comfort_level") && j["comfort_level"].is_number()) {
                     /* LLM's comfort assessment blends with our topic-derived
                      * baseline — 70% LLM, 30% heuristic so a surprise-sensitive

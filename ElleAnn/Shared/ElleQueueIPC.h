@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <memory>
 #include <atomic>
+#include <type_traits>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * IPC MESSAGE WRAPPER
@@ -38,9 +39,15 @@ struct ElleIPCMessage {
     /* Deserialize from wire bytes */
     static bool Deserialize(const uint8_t* data, uint32_t len, ElleIPCMessage& out);
 
-    /* Typed payload helpers */
+    /* Typed payload helpers.
+     * These are only safe for trivially-copyable POD types — enforce at
+     * compile time so someone can't accidentally SetPayload(std::string)
+     * or any type with non-trivial constructors.                         */
     template<typename T>
     void SetPayload(const T& obj) {
+        static_assert(std::is_trivially_copyable<T>::value,
+            "SetPayload requires a trivially-copyable type — "
+            "use SetStringPayload for strings or nlohmann::json.dump().");
         payload.resize(sizeof(T));
         memcpy(payload.data(), &obj, sizeof(T));
         header.payload_size = sizeof(T);
@@ -48,6 +55,8 @@ struct ElleIPCMessage {
 
     template<typename T>
     bool GetPayload(T& obj) const {
+        static_assert(std::is_trivially_copyable<T>::value,
+            "GetPayload requires a trivially-copyable type.");
         if (payload.size() < sizeof(T)) return false;
         memcpy(&obj, payload.data(), sizeof(T));
         return true;
@@ -72,9 +81,14 @@ public:
     ELLE_IOCP_OVERLAPPED* GetReadOverlapped() { return &m_readOvl; }
     ELLE_IOCP_OVERLAPPED* GetWriteOverlapped() { return &m_writeOvl; }
 
+    /* Offsets used by the IOCP dispatcher to classify a completion ptr. */
+    static size_t ReadOvlOffset()  { return offsetof(EllePipeConnection, m_readOvl);  }
+    static size_t WriteOvlOffset() { return offsetof(EllePipeConnection, m_writeOvl); }
+
 private:
     friend class ElleIPCServer;
     friend class ElleIPCClient;
+    friend class ElleIPCHub;
 
     HANDLE              m_hPipe = INVALID_HANDLE_VALUE;
     bool                m_connected = false;
@@ -86,8 +100,17 @@ private:
     void*               m_clientOwner = nullptr;
     ELLE_IOCP_OVERLAPPED m_readOvl;
     ELLE_IOCP_OVERLAPPED m_writeOvl;
-    std::vector<uint8_t> m_readBuffer;
+    std::vector<uint8_t> m_readBuffer;    /* Reassembly buffer for msgs > ELLE_PIPE_BUFFER_SIZE */
     std::vector<uint8_t> m_writeBuffer;
+
+    /* Outstanding async-write payloads — ownership lives on the connection,
+     * NOT the stack, so the buffer survives until the IOCP write completion
+     * fires. Key = the overlapped pointer handed to WriteFile.             */
+    struct PendingWrite {
+        ELLE_IOCP_OVERLAPPED ovl{};
+        std::vector<uint8_t> data;
+    };
+    std::vector<std::unique_ptr<PendingWrite>> m_pendingWrites;
     std::mutex           m_writeMutex;
 };
 
@@ -129,8 +152,11 @@ private:
     std::vector<std::unique_ptr<EllePipeConnection>> m_connections;
     std::mutex m_connMutex;
 
+    friend class ElleIPCHub;
+
     bool CreatePipeInstance(EllePipeConnection* conn);
     void ProcessReadComplete(EllePipeConnection* conn, DWORD bytes);
+    void ProcessReadComplete(EllePipeConnection* conn, DWORD bytes, bool partial);
     void IssueRead(EllePipeConnection* conn);
 };
 
@@ -158,6 +184,8 @@ private:
     HANDLE          m_hIOCP = nullptr;
     std::unique_ptr<EllePipeConnection> m_conn;
     IPCMessageHandler m_handler;
+
+    friend class ElleIPCHub;
 };
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -204,7 +232,8 @@ private:
     /* IOCP worker threads */
     std::vector<std::thread> m_workers;
     void WorkerThread();
-    void DispatchIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytes, DWORD err);
+    void DispatchIOComplete(ELLE_IOCP_OVERLAPPED* ovl, DWORD bytes, DWORD err,
+                            EllePipeConnection* conn);
 
     /* Message queue */
     std::queue<ElleIPCMessage> m_incomingQueue;

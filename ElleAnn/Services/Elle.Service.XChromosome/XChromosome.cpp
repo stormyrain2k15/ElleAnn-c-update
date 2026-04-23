@@ -233,9 +233,14 @@ private:
             if (!out.is_object()) out = json::object();
             return true;
         } catch (const std::exception& e) {
+            /* Log the full parser message for operators, but reply with a
+             * generic message so a release build never echoes parser
+             * internals (or potentially request-tainted content) to the
+             * network-facing caller.                                      */
+            ELLE_WARN("XChromosome ParseReq JSON error: %s", e.what());
             Reply(req, sender, json{
                 {"success", false},
-                {"error", std::string("invalid JSON: ") + e.what()}
+                {"error", "invalid JSON"}
             });
             return false;
         }

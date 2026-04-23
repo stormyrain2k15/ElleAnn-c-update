@@ -14,7 +14,14 @@ from datetime import datetime, timezone
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
+# MongoDB connection — fail fast with a clear message when the required
+# environment variables are missing, instead of a bare KeyError trace.
+_MISSING = [k for k in ('MONGO_URL', 'DB_NAME') if not os.environ.get(k)]
+if _MISSING:
+    raise RuntimeError(
+        "Missing required environment variables: " + ", ".join(_MISSING) +
+        ". Populate backend/.env (see backend/.env.example)."
+    )
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
@@ -71,10 +78,16 @@ app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
+    # Default to the safer "local dev only" set when CORS_ORIGINS is unset.
+    # Production deployments should set CORS_ORIGINS to the frontend URL(s)
+    # explicitly. Using "*" with allow_credentials=True is actually rejected
+    # by browsers, so this was never working for authenticated flows anyway.
+    allow_origins=[o.strip() for o in os.environ.get(
+        'CORS_ORIGINS', 'http://localhost:3000'
+    ).split(',') if o.strip()],
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["Content-Type", "Authorization", "x-admin-key"],
 )
 
 # Configure logging

@@ -304,17 +304,21 @@
     },
 
     "http_server": {
-        "bind_address": "0.0.0.0",
+        "bind_address": "127.0.0.1",
         "port": 8000,
         "websocket_path": "/command",
         "max_connections": 256,
+        "max_concurrent_connections": 256,
         "keep_alive_timeout_seconds": 120,
         "cors_enabled": true,
-        "cors_origins": ["*"],
+        "cors_origins": ["http://localhost:3000"],
         "auth_enabled": true,
+        "admin_key": "",
         "jwt_secret": "",
         "jwt_expiry_hours": 24,
         "rate_limit_rpm": 60,
+        "max_ws_frame_bytes": 1048576,
+        "max_upload_bytes": 10485760,
         "api_routes": {
             "ai": "/api/ai",
             "memory": "/api/memory",

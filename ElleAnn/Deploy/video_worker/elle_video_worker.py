@@ -91,11 +91,19 @@ def post_progress(job_id: str, pct: int) -> None:
 
 
 def post_complete(job_id: str, output_path: str) -> None:
-    requests.post(
+    """Notify the server of successful completion.
+
+    Previously this swallowed all errors — a transient 5xx from the API
+    would leave the local worker thinking the job was finished while the
+    server never recorded it. Now we raise so the caller can move the
+    job to post_fail() and keep the system consistent.
+    """
+    resp = requests.post(
         f"{API_BASE}/api/video/worker/complete/{job_id}",
         json={"output_path": output_path},
         timeout=10,
     )
+    resp.raise_for_status()
 
 
 def post_fail(job_id: str, err: str) -> None:
@@ -206,6 +214,7 @@ def process_job(job: dict) -> None:
     scratch = WORK_DIR / f"job_{job_id}_{uuid.uuid4().hex[:6]}"
     scratch.mkdir()
 
+    success = False
     try:
         post_progress(job_id, 5)
 
@@ -229,10 +238,17 @@ def process_job(job: dict) -> None:
         log.info("step 4/4: commit (%s)", final_mp4)
         post_complete(job_id, str(final_mp4))
         log.info("job %s DONE (%s)", job_id, final_mp4)
+        success = True
 
     finally:
-        # scratch dir — keep on failure for debugging, wipe on success
-        pass
+        # Honour the comment: scratch dir stays on failure for debugging,
+        # gets wiped on success so tmp artifacts don't accumulate forever.
+        # Previously this block was `pass` — every successful job leaked
+        # the entire scratch tree. After ~1000 jobs you're out of disk.
+        if success:
+            shutil.rmtree(scratch, ignore_errors=True)
+        else:
+            log.warning("keeping scratch for post-mortem: %s", scratch)
 
 
 def main() -> int:

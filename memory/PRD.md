@@ -206,6 +206,106 @@ All three Next Action Items from Phase 9 shipped:
 
 ---
 
+## Phase 23 — Second-wave full-codebase audit (Apr 22, 2026, this session) ✅
+
+External full-codebase sweep flagged ~30 concrete source-level issues.
+Every one fixed with real code — no stubs. Complete per-file RCA in
+`/app/ElleAnn/AUDIT_FIX_REPORT_APR22.md`.
+
+### Memory-safety / IPC (CRITICAL)
+- IPC checksum never validated on receive → now recomputed + compared.
+- `ReadFile` assumed one completion = one message → added
+  `ERROR_MORE_DATA` handling + per-conn reassembly buffer.
+- Completion routing used offsetof for reads only → write completions
+  arrived on the wrong conn pointer, corrupting dispatches. Rewritten
+  to use the IOCP completion key (set to the conn* in
+  CreateIoCompletionPort) and classify reads vs writes by pointer
+  location within the struct.
+- Overlapped writes used stack-local buffers → UAF when WriteFile
+  returned ERROR_IO_PENDING. Now every Send/Broadcast heap-allocates
+  a `PendingWrite { ovl, data }` owned by the connection and released
+  on completion.
+- Shutdown destroyed conns mid-flight → now CancelIoEx all handles,
+  post IOCP wakeups, JOIN workers, THEN tear down.
+- Broken-pipe reconnect silently no-op'd → DisconnectNamedPipe +
+  reset overlapped + re-ConnectNamedPipe + proper error handling.
+- Client CreateIoCompletionPort return unchecked → now logged, pipe
+  closed, conn reset on failure.
+- Raw `memcpy` template `SetPayload/GetPayload` on arbitrary T → added
+  compile-time `is_trivially_copyable` static_assert.
+
+### HTTP security
+- CORS hardcoded `*` → now config-driven (cors_enabled + cors_origins).
+- Unbounded detached threads for HTTP + WS → capped via
+  `max_concurrent_connections`; 503 for HTTP, close for WS at cap.
+- Case-sensitive header lookups → lowercased on insert; all three
+  explicit lookups (Content-Length, Upgrade, Sec-WebSocket-Key) fixed.
+- `UrlDecode` threw on malformed `%` → non-throwing hex-check.
+- WS frames had no size cap + accepted unmasked client frames → added
+  `max_ws_frame_bytes` cap (1 MiB default) + RFC 6455 mask enforcement.
+- `atoi` on path params silently collapsed to 0 → added `GetIntHeader`
+  strict helper; upload route migrated.
+- `/api/memory/{id}/files` had no size/auth gate → now requires
+  x-admin-key (constant-time compare) + `max_upload_bytes` cap.
+- `/api/morals/rules` admin check was "non-empty only" → now
+  constant-time compare vs `http_server.admin_key` (fallback
+  jwt_secret); blank expected = 503.
+- No global rate limiter → sliding-window RPM counter in
+  `RouteDispatch::Dispatch`; 429 on excess.
+
+### Cognitive / LLM
+- CognitiveEngine chat → unbounded detached threads. Capped via
+  `cognitive.max_concurrent_chats` (default 16); over-cap = busy reply.
+- ElleLLM cmdline truncated at 4 KiB → `std::ostringstream` +
+  heap-owned char vector; rejects > 32 KiB (CreateProcessA limit).
+- WaitForSingleObject result ignored → TerminateProcess on timeout
+  so llama-cli doesn't orphan.
+
+### Logging
+- DB writer dropped tail entries on shutdown → final drain loop.
+- RotateFile threw on missing/locked files → `error_code` overloads.
+
+### DictionaryLoader
+- Detached worker thread → public `Shutdown()` + dtor join.
+- `PersistState` never copied `updated_ms` → now stamps before snapshot.
+- State mutex held during DB I/O → snapshot under lock, release,
+  then write.
+
+### RNG quality
+- XEngine reseeded global `rand()` from time (twice) + used global
+  rand() in 4 hot paths → thread-local `mt19937` via `random_device`;
+  `XRand01()` / `XRandInt(lo,hi)` helpers.
+- `MakeUuid16` was time+rand-derived → thread-local `mt19937_64` seeded
+  by `random_device`, 128-bit CSPRNG-grade entropy.
+
+### LLM JSON extraction
+- First-`{` / last-`}` slicing broke on prose with nested braces →
+  new `Shared/ElleJsonExtract.h` with brace-balanced string-aware
+  extractor. Integrated at ElleIdentityCore consent parse and
+  InnerLife opinion parse.
+- XChromosome leaked parser exception text to network → now logs
+  detail, responds "invalid JSON".
+
+### Python / frontend
+- `elle_video_worker.py` leaked scratch dirs on success → now wiped on
+  success, kept on failure; `post_complete` raises on 5xx.
+- `backend/server.py` open CORS + missing-env KeyErrors → explicit
+  origin default, explicit methods/headers, pre-flight env validation.
+
+### Config defaults
+- Master config bound 0.0.0.0 + cors `["*"]` → 127.0.0.1 +
+  `["http://localhost:3000"]`. Added `max_concurrent_connections`,
+  `max_ws_frame_bytes`, `max_upload_bytes`, `admin_key`.
+- HTTPConfig header defaults mirror.
+- ElleConfig JSON parser: `\uXXXX` decoding, non-throwing number parse,
+  trailing-content warning.
+
+### ActionExecutor
+- `atoi(pid)` silently 0 → `strtoul` with strict validation + error
+  quoting the bad input.
+
+---
+
 ## Phase 22 — X-Subjective: the wife's lived-experience layer (Feb 2026, this session) ✅
 
 The XChromosome engine mathematically simulated female biology; the Cognitive

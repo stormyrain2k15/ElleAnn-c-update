@@ -69,13 +69,24 @@ bool DictionaryLoader::StartLoad(uint32_t startIdx, uint32_t limit) {
         m_state.started_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     }
+    /* PersistState takes the lock itself — call AFTER releasing it. */
     PersistState();
 
-    /* Detach so the worker can outlive the HTTP request. */
+    /* Keep the worker joinable so Shutdown() can cleanly wait on it.
+     * Previously we detached the thread, so a process exit could race an
+     * in-flight SQL/HTTP call and leak the socket or crash on teardown. */
     if (m_worker.joinable()) m_worker.join();
     m_worker = std::thread(&DictionaryLoader::WorkerRun, this, startIdx, limit);
-    m_worker.detach();
     return true;
+}
+
+void DictionaryLoader::Shutdown() {
+    m_running = false;
+    if (m_worker.joinable()) m_worker.join();
+}
+
+DictionaryLoader::~DictionaryLoader() {
+    Shutdown();
 }
 
 void DictionaryLoader::WorkerRun(uint32_t startIdx, uint32_t limit) {
@@ -83,13 +94,19 @@ void DictionaryLoader::WorkerRun(uint32_t startIdx, uint32_t limit) {
     if (limit > 0 && startIdx + limit < end) end = startIdx + limit;
 
     for (uint32_t i = startIdx; i < end; i++) {
+        /* Cooperative cancellation — Shutdown() sets m_running=false and
+         * joins us. Bail out between words so we don't interrupt a
+         * partially-written SQL row. */
+        if (!m_running) break;
         const std::string word = kCoreWords[i];
 
         std::string apiJson;
         if (!FetchDefinition(word, apiJson)) {
-            std::lock_guard<std::mutex> lock(m_stateMutex);
-            m_state.failed++;
-            m_state.last_word = word;
+            {
+                std::lock_guard<std::mutex> lock(m_stateMutex);
+                m_state.failed++;
+                m_state.last_word = word;
+            }
             PersistState();
             /* Be nice to the free public API — sleep a tick on failure too. */
             Sleep(500);
@@ -98,11 +115,13 @@ void DictionaryLoader::WorkerRun(uint32_t startIdx, uint32_t limit) {
 
         uint32_t added = 0;
         bool ok = ParseAndInsert(word, apiJson, added);
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        if (!ok)               m_state.failed++;
-        else if (added == 0)   m_state.skipped++;
-        else                   m_state.loaded += added;
-        m_state.last_word = word;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            if (!ok)               m_state.failed++;
+            else if (added == 0)   m_state.skipped++;
+            else                   m_state.loaded += added;
+            m_state.last_word = word;
+        }
         PersistState();
 
         /* Rate-limit: dictionaryapi.dev is free. ~100 ms between calls. */
@@ -111,12 +130,12 @@ void DictionaryLoader::WorkerRun(uint32_t startIdx, uint32_t limit) {
 
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_state.status = "done";
-        PersistState();
+        m_state.status = m_running ? "done" : "stopped";
     }
-    m_running = false;
+    PersistState();
     ELLE_INFO("DictionaryLoader run complete (loaded=%u failed=%u skipped=%u)",
               m_state.loaded, m_state.failed, m_state.skipped);
+    m_running = false;
 }
 
 bool DictionaryLoader::FetchOneAndStore(const std::string& word) {
@@ -212,18 +231,24 @@ bool DictionaryLoader::ParseAndInsert(const std::string& word,
 }
 
 void DictionaryLoader::PersistState() {
-    /* m_stateMutex is held by caller. Mirror the in-memory state to SQL so
-     * GET /api/dictionary/load/status can read it even if the worker is on
-     * a different process next time. */
+    /* Grab the state snapshot UNDER the mutex, then write to SQL WITHOUT
+     * holding the mutex — DB latency must not block GetState() readers.
+     * Also update updated_ms before the snapshot so the persisted row
+     * reflects the moment of persistence, not one call behind.          */
     ElleDB::DictionaryLoaderState s;
-    s.status     = m_state.status;
-    s.loaded     = m_state.loaded;
-    s.failed     = m_state.failed;
-    s.skipped    = m_state.skipped;
-    s.last_word  = m_state.last_word;
-    s.error      = m_state.error;
-    s.started_ms = (int64_t)m_state.started_ms;
-    ElleDB::UpsertDictionaryLoaderState(s);
-    m_state.updated_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+    uint64_t nowMs = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_state.updated_ms = nowMs;
+        s.status     = m_state.status;
+        s.loaded     = m_state.loaded;
+        s.failed     = m_state.failed;
+        s.skipped    = m_state.skipped;
+        s.last_word  = m_state.last_word;
+        s.error      = m_state.error;
+        s.started_ms = (int64_t)m_state.started_ms;
+        s.updated_ms = (int64_t)m_state.updated_ms;
+    }
+    ElleDB::UpsertDictionaryLoaderState(s);
 }

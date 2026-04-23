@@ -253,14 +253,20 @@ void ElleLogger::WriteFile(const std::string& formatted) {
 void ElleLogger::RotateFile() {
     m_logFile.close();
 
-    /* Rotate existing files */
+    /* Rotate existing files — wrap every std::filesystem::rename because
+     * a missing file or a locked file would otherwise throw out of the
+     * log-write path and take the caller down with it. */
+    std::error_code ec;
     for (int i = (int)m_maxFiles - 1; i >= 1; i--) {
         std::string oldName = m_logPath + "." + std::to_string(i);
         std::string newName = m_logPath + "." + std::to_string(i + 1);
-        std::filesystem::rename(oldName, newName);
+        if (std::filesystem::exists(oldName, ec)) {
+            std::filesystem::rename(oldName, newName, ec);
+        }
     }
-
-    std::filesystem::rename(m_logPath, m_logPath + ".1");
+    if (std::filesystem::exists(m_logPath, ec)) {
+        std::filesystem::rename(m_logPath, m_logPath + ".1", ec);
+    }
     m_logFile.open(m_logPath, std::ios::out);
     m_currentFileSize = 0;
 }
@@ -268,7 +274,7 @@ void ElleLogger::RotateFile() {
 void ElleLogger::DatabaseWriterThread() {
     while (m_dbRunning) {
         Sleep(1000); /* Batch writes every second */
-        
+
         std::vector<ELLE_LOG_ENTRY> batch;
         {
             std::lock_guard<std::mutex> lock(m_dbMutex);
@@ -279,9 +285,27 @@ void ElleLogger::DatabaseWriterThread() {
         }
 
         for (auto& entry : batch) {
-            ElleDB::WriteLog((ELLE_LOG_LEVEL)entry.level, 
-                            (ELLE_SERVICE_ID)entry.source_svc, 
+            ElleDB::WriteLog((ELLE_LOG_LEVEL)entry.level,
+                            (ELLE_SERVICE_ID)entry.source_svc,
                             entry.message);
         }
+    }
+
+    /* Final flush on shutdown — drain the remaining queued entries so tail
+     * logs don't disappear. Previously we exited the loop the moment
+     * m_dbRunning flipped false and the last second's worth of logs got
+     * dropped silently.                                                   */
+    std::vector<ELLE_LOG_ENTRY> tail;
+    {
+        std::lock_guard<std::mutex> lock(m_dbMutex);
+        while (!m_dbQueue.empty()) {
+            tail.push_back(m_dbQueue.front());
+            m_dbQueue.pop();
+        }
+    }
+    for (auto& entry : tail) {
+        ElleDB::WriteLog((ELLE_LOG_LEVEL)entry.level,
+                        (ELLE_SERVICE_ID)entry.source_svc,
+                        entry.message);
     }
 }

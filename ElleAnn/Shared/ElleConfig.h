@@ -146,13 +146,27 @@ struct MemoryConfig {
 };
 
 struct HTTPConfig {
-    std::string bind_address = "0.0.0.0";
+    /* Bind default changed from 0.0.0.0 to 127.0.0.1 — for a local
+     * desktop companion service, external bind should be an explicit
+     * opt-in via config, not a silent default.                         */
+    std::string bind_address = "127.0.0.1";
     uint32_t    port = 8000;
     std::string ws_path = "/command";
     uint32_t    max_connections = 256;
     bool        auth_enabled = true;
     std::string jwt_secret;
     uint32_t    jwt_expiry_hours = 24;
+
+    /* CORS + rate-limiting knobs consumed by HTTPServer. cors_origins
+     * is stored as a comma-separated string to keep parsing simple —
+     * "*" (or a blank list) means allow-all; otherwise only the first
+     * matching origin is emitted in Access-Control-Allow-Origin.        */
+    bool        cors_enabled = true;
+    std::string cors_origins = "http://localhost:3000";
+    uint32_t    rate_limit_rpm = 0;           /* 0 = disabled */
+    uint32_t    max_concurrent_connections = 256;
+    uint32_t    max_ws_frame_bytes = 1 * 1024 * 1024;  /* 1 MiB default */
+    uint32_t    max_upload_bytes   = 10 * 1024 * 1024; /* 10 MiB default */
 };
 
 /*──────────────────────────────────────────────────────────────────────────────

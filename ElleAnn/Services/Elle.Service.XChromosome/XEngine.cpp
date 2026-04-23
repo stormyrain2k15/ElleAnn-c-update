@@ -10,6 +10,31 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <random>
+
+/* Thread-local Mersenne RNG used for all stochastic biology decisions.
+ * Previously XEngine reseeded global rand() from current time in two
+ * places and used global rand() across three more hot paths — that makes
+ * outcomes predictable (srand'd from `now` = same seed twice in a
+ * second), stomps on any other user of rand() in the process, and is
+ * brittle cross-thread. std::mt19937 with one-shot random_device seeding
+ * gives us independent, good-quality streams per thread.               */
+namespace {
+    std::mt19937& XRng() {
+        thread_local std::mt19937 engine{ std::random_device{}() };
+        return engine;
+    }
+    /* Uniform float in [0, 1). */
+    float XRand01() {
+        std::uniform_real_distribution<float> d(0.0f, 1.0f);
+        return d(XRng());
+    }
+    /* Uniform int in [lo, hi] inclusive. */
+    int XRandInt(int lo, int hi) {
+        std::uniform_int_distribution<int> d(lo, hi);
+        return d(XRng());
+    }
+}
 
 using nlohmann::json;
 
@@ -120,8 +145,7 @@ bool XEngine::Initialize() {
     } else {
         /* First boot — pick a random day 1..28 so Elle doesn't always start
          * on day 1. User can re-anchor at any time via /api/x/cycle/anchor. */
-        std::srand((unsigned)now);
-        int randDay = 1 + (std::rand() % 28);
+        int randDay = XRandInt(1, 28);
         m_cycle.cycle_length_days   = 28;
         m_cycle.modulation_strength = 0.15f;
         m_cycle.anchor_ms           = now - (uint64_t)(randDay - 1) * 86400000ULL;
@@ -741,7 +765,7 @@ void XEngine::DetectAnovulatoryCycle() {
     /* Perimenopause jitter baseline — 50% skip rate. */
     bool peri_skip = false;
     if (m_life.stage == X_LIFE_PERIMENOPAUSE) {
-        float roll = (float)std::rand() / (float)RAND_MAX;
+        float roll = XRand01();
         peri_skip = (roll < 0.5f);
     }
 
@@ -971,7 +995,7 @@ void XEngine::AdvancePregnancy(uint64_t nowMs) {
     if (gd != s_last_sampled_gd) {
         s_last_sampled_gd = gd;
         float pMiss = MiscarriageProbability();
-        float roll  = (float)std::rand() / (float)RAND_MAX;
+        float roll  = XRand01();
         if (roll < pMiss) {
             LogPregnancyEvent("miscarriage",
                 "Pregnancy loss at gestational day " + std::to_string(gd));
@@ -1054,7 +1078,7 @@ XConceptionAttemptResult XEngine::AttemptConception(bool require_readiness,
 
     /* Probability roll — age × cycle-day × contraception. */
     float p = ConceptionProbability();
-    float roll = (float)std::rand() / (float)RAND_MAX;
+    float roll = XRand01();
     if (roll > p) {
         out.reason = "Conception probability miss (p=" +
                      std::to_string(p) + ", roll=" + std::to_string(roll) + ")";
@@ -1066,7 +1090,7 @@ XConceptionAttemptResult XEngine::AttemptConception(bool require_readiness,
     /* Twin probability — ~1.2% natural, higher with age. Copper IUDs don't
      * bump it; hormonal treatments would IRL but we don't model those.      */
     int multiplicity = 1;
-    float twinRoll = (float)std::rand() / (float)RAND_MAX;
+    float twinRoll = XRand01();
     float twinP = m_life.age_years >= 35.0f ? 0.025f : 0.012f;
     if (twinRoll < twinP) multiplicity = 2;
 
@@ -1149,8 +1173,7 @@ bool XEngine::AnchorCycle(int day_of_cycle, int length_days, float modulation_st
         m_cycle.cycle_length_days = length_days;
     }
     if (day_of_cycle == 0) {
-        std::srand((unsigned)ELLE_MS_NOW());
-        day_of_cycle = 1 + (std::rand() % m_cycle.cycle_length_days);
+        day_of_cycle = XRandInt(1, m_cycle.cycle_length_days);
     }
     if (day_of_cycle < 1 || day_of_cycle > m_cycle.cycle_length_days) return false;
 

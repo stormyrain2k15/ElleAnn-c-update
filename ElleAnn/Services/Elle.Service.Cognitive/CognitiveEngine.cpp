@@ -393,7 +393,22 @@ protected:
             }
             case IPC_CHAT_REQUEST: {
                 /* Spawn a dedicated thread — orchestration calls LLM (~2-5s),
-                 * we must never block the IPC dispatcher. */
+                 * we must never block the IPC dispatcher. Bounded by config
+                 * cognitive.max_concurrent_chats (default 16) so a storm of
+                 * chat requests can't turn into unbounded thread growth.   */
+                uint32_t cap = (uint32_t)ElleConfig::Instance().GetInt(
+                    "cognitive.max_concurrent_chats", 16);
+                if (cap > 0 && m_inflightChats.load() >= cap) {
+                    ELLE_WARN("Chat orchestration cap %u reached; rejecting request", cap);
+                    /* Reply 503-style to the origin so it can retry/backoff. */
+                    auto rep = ElleIPCMessage::Create(IPC_CHAT_RESPONSE,
+                                                      SVC_COGNITIVE, sender);
+                    rep.SetStringPayload(
+                        "{\"error\":\"cognitive_busy\",\"retry\":true}");
+                    GetIPCHub().Send(sender, rep);
+                    break;
+                }
+                m_inflightChats++;
                 std::string payload = msg.GetStringPayload();
                 ELLE_SERVICE_ID origin = sender;
                 std::thread([this, payload, origin]() {
@@ -404,6 +419,7 @@ protected:
                     } catch (...) {
                         ELLE_ERROR("Chat orchestration unknown exception");
                     }
+                    m_inflightChats--;
                 }).detach();
                 break;
             }
@@ -418,6 +434,7 @@ protected:
 
 private:
     CognitiveEngine m_engine;
+    std::atomic<uint32_t> m_inflightChats{0};
     ELLE_EMOTION_STATE m_cachedEmotions = {};
 
     /*────────────────────────────────────────────────────────────────────────

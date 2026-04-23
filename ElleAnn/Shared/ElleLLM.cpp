@@ -12,6 +12,7 @@
 #include <sstream>
 #include <algorithm>
 #include <numeric>
+#include <vector>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -593,15 +594,34 @@ std::string LLMLocalProvider::Generate(const std::string& prompt, uint32_t maxTo
     }
 
     /* Build cmd line. --log-disable keeps stdout clean so we can capture
-     * only generated tokens.                                                 */
+     * only generated tokens.
+     *
+     * Previously this was built into a fixed 4096-byte char array via
+     * snprintf; long prompts or paths silently truncated, producing
+     * broken inference with no diagnostic. Switched to std::string so the
+     * buffer grows with the prompt — CreateProcessA's lpCommandLine is
+     * limited to 32 KiB anyway, so we cap and reject beyond that.        */
     std::string bin = m_config.binary_path.empty() ? "llama-cli.exe"
                                                     : m_config.binary_path;
-    char tempCmd[4096];
-    snprintf(tempCmd, sizeof(tempCmd),
-        "\"%s\" -m \"%s\" -c %u -n %u --temp %.2f --log-disable -p \"%s\"",
-        bin.c_str(), m_config.model_path.c_str(),
-        (unsigned)m_config.context_size, (unsigned)maxTokens,
-        (double)temperature, escaped.c_str());
+
+    std::ostringstream cs;
+    cs << "\"" << bin << "\""
+       << " -m \"" << m_config.model_path << "\""
+       << " -c " << (unsigned)m_config.context_size
+       << " -n " << (unsigned)maxTokens
+       << " --temp " << std::fixed;
+    cs.precision(2);
+    cs << (double)temperature
+       << " --log-disable -p \"" << escaped << "\"";
+    std::string cmdStr = cs.str();
+    if (cmdStr.size() >= 32768) {
+        ELLE_ERROR("llama-cli command line exceeds 32KiB (%zu); prompt too long",
+                   cmdStr.size());
+        return "";
+    }
+    /* CreateProcessA mutates lpCommandLine — own a writable copy. */
+    std::vector<char> tempCmd(cmdStr.begin(), cmdStr.end());
+    tempCmd.push_back('\0');
 
     /* Spawn with a pipe on stdout. */
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
@@ -616,7 +636,7 @@ std::string LLMLocalProvider::Generate(const std::string& prompt, uint32_t maxTo
     si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
 
     PROCESS_INFORMATION pi = {};
-    BOOL ok = CreateProcessA(nullptr, tempCmd, nullptr, nullptr, TRUE,
+    BOOL ok = CreateProcessA(nullptr, tempCmd.data(), nullptr, nullptr, TRUE,
                               CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseHandle(hWritePipe);
     if (!ok) { CloseHandle(hReadPipe); return ""; }
@@ -632,7 +652,21 @@ std::string LLMLocalProvider::Generate(const std::string& prompt, uint32_t maxTo
     }
     CloseHandle(hReadPipe);
 
-    WaitForSingleObject(pi.hProcess, 120000);   /* 2-min hard cap */
+    /* Hard-cap the child at 2 minutes. If it wedges past that we MUST
+     * TerminateProcess so we don't leave orphan llama-cli instances
+     * holding the model file open across retries.                      */
+    DWORD waitRes = WaitForSingleObject(pi.hProcess, 120000);
+    if (waitRes == WAIT_TIMEOUT) {
+        ELLE_WARN("llama-cli exceeded 2-min budget; terminating child pid=%u",
+                  (unsigned)pi.dwProcessId);
+        TerminateProcess(pi.hProcess, (UINT)-1);
+        WaitForSingleObject(pi.hProcess, 5000);   /* let it actually die */
+    } else if (waitRes != WAIT_OBJECT_0) {
+        ELLE_WARN("llama-cli WaitForSingleObject returned %u (gle=%u); "
+                  "terminating to prevent orphan", waitRes, GetLastError());
+        TerminateProcess(pi.hProcess, (UINT)-1);
+        WaitForSingleObject(pi.hProcess, 5000);
+    }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 

@@ -133,13 +133,39 @@ struct HTTPResponse {
     std::string body;
 
     std::string Serialize() const {
+        /* CORS policy now comes from config — previously this was hardcoded
+         * to "Allow-Origin: *" for every response regardless of
+         * cors_enabled / cors_origins config, which defeated the intent of
+         * those config keys. Respect the config; leave CORS off entirely if
+         * cors_enabled is false.                                           */
+        auto& http = ElleConfig::Instance().GetHTTP();
+        std::string allowOrigin;
+        if (http.cors_enabled) {
+            /* cors_origins is comma-separated; "*" (or a missing value)
+             * means wildcard; otherwise the first origin is used.         */
+            const std::string& list = http.cors_origins;
+            if (list.empty() || list == "*") allowOrigin = "*";
+            else {
+                auto c = list.find(',');
+                allowOrigin = (c == std::string::npos) ? list : list.substr(0, c);
+                /* trim whitespace */
+                auto trim = [](std::string& s){
+                    while (!s.empty() && std::isspace((unsigned char)s.front())) s.erase(0,1);
+                    while (!s.empty() && std::isspace((unsigned char)s.back()))  s.pop_back();
+                };
+                trim(allowOrigin);
+            }
+        }
+
         std::ostringstream ss;
         ss << "HTTP/1.1 " << status << " " << statusText << "\r\n";
         ss << "Content-Type: " << contentType << "\r\n";
         ss << "Content-Length: " << body.size() << "\r\n";
-        ss << "Access-Control-Allow-Origin: *\r\n";
-        ss << "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n";
-        ss << "Access-Control-Allow-Headers: Content-Type, Authorization, x-admin-key\r\n";
+        if (http.cors_enabled && !allowOrigin.empty()) {
+            ss << "Access-Control-Allow-Origin: " << allowOrigin << "\r\n";
+            ss << "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n";
+            ss << "Access-Control-Allow-Headers: Content-Type, Authorization, x-admin-key\r\n";
+        }
         for (auto& [k, v] : headers) ss << k << ": " << v << "\r\n";
         ss << "\r\n" << body;
         return ss.str();
@@ -210,6 +236,25 @@ public:
     }
 
     HTTPResponse Dispatch(HTTPRequest& req) {
+        /* Global rate limit enforced before routing. Config key:
+         *   http_server.rate_limit_rpm (requests per minute; 0 disables).
+         * This was flagged as "no global middleware" — per-IP limiting is a
+         * future step (needs the peer addr plumbed through accept), but a
+         * single global counter already stops trivial flood abuse.        */
+        uint32_t rpm = ElleConfig::Instance().GetHTTP().rate_limit_rpm;
+        if (rpm > 0) {
+            uint64_t now = ELLE_MS_NOW();
+            std::lock_guard<std::mutex> lock(m_rlMutex);
+            if (now - m_rlWindowStart >= 60000) {
+                m_rlWindowStart = now;
+                m_rlCount = 0;
+            }
+            if (m_rlCount >= rpm) {
+                return HTTPResponse::Err(429, "rate limit exceeded");
+            }
+            m_rlCount++;
+        }
+
         for (auto& e : m_routes) {
             if (e.method != req.method) continue;
             std::smatch m;
@@ -227,6 +272,11 @@ public:
 
 private:
     std::vector<RouteEntry> m_routes;
+
+    /* Global sliding-window rate counter. */
+    std::mutex m_rlMutex;
+    uint64_t   m_rlWindowStart = 0;
+    uint32_t   m_rlCount = 0;
 };
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -239,6 +289,23 @@ struct WSClient {
     uint64_t    connected_ms = 0;
     std::mutex  sendMutex;
 };
+
+/* Strict int-from-header helper. Previously route handlers did
+ *     int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+ * which silently turns any non-numeric value into 0 AND throws
+ * std::out_of_range if the header key is missing. This helper returns
+ * `false` cleanly on either failure, so handlers can emit a real
+ * 400 instead of crashing or acting on id=0.                           */
+static inline bool GetIntHeader(const HTTPRequest& req, const std::string& key,
+                                long long& out) {
+    auto it = req.headers.find(key);
+    if (it == req.headers.end() || it->second.empty()) return false;
+    char* end = nullptr;
+    long long v = std::strtoll(it->second.c_str(), &end, 10);
+    if (!end || end == it->second.c_str() || *end != '\0') return false;
+    out = v;
+    return true;
+}
 
 /*──────────────────────────────────────────────────────────────────────────────
  * DIRECT GROQ CALL via WinHTTP (bypass IPC — prevents chat hang)
@@ -408,14 +475,27 @@ static bool WsSendText(SOCKET s, std::mutex& mtx, const std::string& payload) {
     return true;
 }
 
-/* Read a single frame (blocking). Returns false on disconnect / error. */
+/* Read a single frame (blocking). Returns false on disconnect / error.
+ * Per RFC 6455 §5.1, client→server frames MUST be masked; the server MUST
+ * close the connection on an unmasked frame. Payload is capped at
+ * http.max_ws_frame_bytes to prevent unbounded allocation.              */
 static bool WsReadFrame(SOCKET s, std::string& outPayload, int& outOpcode) {
     unsigned char hdr[2];
     int r = recv(s, (char*)hdr, 2, MSG_WAITALL);
     if (r != 2) return false;
     bool fin = (hdr[0] & 0x80) != 0;
+    (void)fin; /* fragmentation reassembly TBD — reject control frames > 125 below */
     outOpcode = hdr[0] & 0x0F;
     bool masked = (hdr[1] & 0x80) != 0;
+
+    /* RFC 6455: a client MUST mask every frame. Reject unmasked client
+     * frames so a malicious/broken peer can't send us partially-obscured
+     * payloads or bypass framing assumptions downstream.                 */
+    if (!masked) {
+        ELLE_WARN("Rejecting unmasked WebSocket frame from client");
+        return false;
+    }
+
     uint64_t payloadLen = hdr[1] & 0x7F;
 
     if (payloadLen == 126) {
@@ -429,18 +509,24 @@ static bool WsReadFrame(SOCKET s, std::string& outPayload, int& outOpcode) {
         for (int i = 0; i < 8; i++) payloadLen = (payloadLen << 8) | ext[i];
     }
 
-    unsigned char mask[4] = {0};
-    if (masked) {
-        if (recv(s, (char*)mask, 4, MSG_WAITALL) != 4) return false;
+    /* Hard cap on payload — without this, a malicious client can claim
+     * payloadLen = 2^63-1 and we'd try to allocate and recv that much. */
+    uint64_t maxFrame = (uint64_t)ElleConfig::Instance().GetHTTP().max_ws_frame_bytes;
+    if (maxFrame == 0) maxFrame = 1ULL * 1024 * 1024;  /* 1 MiB safety default */
+    if (payloadLen > maxFrame) {
+        ELLE_WARN("WebSocket payload %llu exceeds cap %llu — closing",
+                  (unsigned long long)payloadLen, (unsigned long long)maxFrame);
+        return false;
     }
+
+    unsigned char mask[4] = {0};
+    if (recv(s, (char*)mask, 4, MSG_WAITALL) != 4) return false;
 
     outPayload.resize((size_t)payloadLen);
     if (payloadLen > 0) {
         if (recv(s, &outPayload[0], (int)payloadLen, MSG_WAITALL) != (int)payloadLen) return false;
-        if (masked) {
-            for (size_t i = 0; i < payloadLen; i++) {
-                outPayload[i] = outPayload[i] ^ mask[i % 4];
-            }
+        for (size_t i = 0; i < payloadLen; i++) {
+            outPayload[i] = outPayload[i] ^ mask[i % 4];
         }
     }
     (void)fin;
@@ -619,6 +705,18 @@ private:
     std::atomic<uint64_t> m_requestSeq{0};
     ChatCorrelator m_chatCorrelator;
 
+    /* Concurrent-connection governor. Bounds the number of in-flight
+     * HTTP handler threads AND active WebSocket client threads so a
+     * storm of requests can't turn into unbounded thread growth. Taken
+     * from http.max_concurrent_connections config (0 means unbounded,
+     * matching historic behaviour).                                    */
+    std::atomic<uint32_t> m_activeHttpHandlers{0};
+    std::atomic<uint32_t> m_activeWsClients{0};
+
+    uint32_t MaxConcurrent() const {
+        return ElleConfig::Instance().GetHTTP().max_concurrent_connections;
+    }
+
     ELLE_EMOTION_STATE m_cachedEmotions = {};
 
     /*────────────────────────────────────────────────────────────────────────
@@ -637,8 +735,22 @@ private:
             SOCKET clientSocket = accept(m_listenSocket, nullptr, nullptr);
             if (clientSocket == INVALID_SOCKET) continue;
 
+            /* Bound concurrent handlers. If we're at the cap, serve a 503
+             * rather than spawning an unbounded thread. */
+            uint32_t cap = MaxConcurrent();
+            if (cap > 0 && m_activeHttpHandlers.load() >= cap) {
+                HTTPResponse r = HTTPResponse::Err(503, "server busy — try again");
+                std::string data = r.Serialize();
+                send(clientSocket, data.c_str(), (int)data.size(), 0);
+                shutdown(clientSocket, SD_SEND);
+                closesocket(clientSocket);
+                continue;
+            }
+
+            m_activeHttpHandlers++;
             std::thread([this, clientSocket]() {
                 HandleClient(clientSocket);
+                m_activeHttpHandlers--;
             }).detach();
         }
     }
@@ -678,7 +790,7 @@ private:
             HTTPRequest req = ParseRequest(raw);
 
             /* If we have Content-Length, read remaining body */
-            auto clIt = req.headers.find("Content-Length");
+            auto clIt = req.headers.find("content-length");
             if (clIt != req.headers.end()) {
                 size_t contentLen = 0;
                 try { contentLen = (size_t)std::stoull(clIt->second); } catch (...) {}
@@ -764,16 +876,21 @@ private:
                 std::string key = line.substr(0, colon);
                 std::string val = line.substr(colon + 1);
                 while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(0, 1);
+                /* HTTP header names are case-insensitive per RFC 7230 §3.2.
+                 * Normalise to lowercase on insertion so lookups don't miss
+                 * `content-length` vs `Content-Length` etc.                 */
+                std::transform(key.begin(), key.end(), key.begin(),
+                               [](unsigned char c){ return (char)std::tolower(c); });
                 req.headers[key] = val;
             }
         }
 
-        if (req.headers.count("Upgrade")) {
-            std::string up = req.headers["Upgrade"];
+        if (req.headers.count("upgrade")) {
+            std::string up = req.headers["upgrade"];
             std::transform(up.begin(), up.end(), up.begin(), ::tolower);
             if (up == "websocket") {
                 req.isWebSocket = true;
-                req.wsKey = req.headers["Sec-WebSocket-Key"];
+                req.wsKey = req.headers["sec-websocket-key"];
             }
         }
 
@@ -803,13 +920,28 @@ private:
     }
 
     static std::string UrlDecode(const std::string& s) {
+        /* Non-throwing percent decoder. Previous version used std::stoi
+         * which raises on malformed %XY sequences and bubbled up to abort
+         * the entire request; we now check hex validity ourselves and
+         * emit the literal `%` byte when the sequence is malformed.      */
+        auto hex = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+            if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+            return -1;
+        };
         std::string out;
         out.reserve(s.size());
         for (size_t i = 0; i < s.size(); i++) {
             if (s[i] == '%' && i + 2 < s.size()) {
-                int hi = std::stoi(s.substr(i + 1, 2), nullptr, 16);
-                out.push_back((char)hi);
-                i += 2;
+                int hi = hex(s[i + 1]);
+                int lo = hex(s[i + 2]);
+                if (hi < 0 || lo < 0) {
+                    out.push_back(s[i]);          /* keep literal '%' */
+                } else {
+                    out.push_back((char)((hi << 4) | lo));
+                    i += 2;
+                }
             } else if (s[i] == '+') {
                 out.push_back(' ');
             } else {
@@ -855,6 +987,15 @@ private:
         client->connected_ms = ELLE_MS_NOW();
         client->id = "ws-" + std::to_string(ELLE_MS_NOW());
 
+        /* Cap concurrent WS clients — reject new connections with 1013
+         * ("try again later") if we're at the HTTPConfig cap. */
+        uint32_t cap = MaxConcurrent();
+        if (cap > 0 && m_activeWsClients.load() >= cap) {
+            ELLE_WARN("WS cap %u reached — refusing new client", cap);
+            closesocket(clientSocket);
+            return;
+        }
+
         {
             std::lock_guard<std::mutex> lock(m_wsMutex);
             m_wsClients.push_back(client);
@@ -872,8 +1013,10 @@ private:
         WsSendText(client->socket, client->sendMutex, welcome.dump());
 
         /* Read loop */
+        m_activeWsClients++;
         std::thread([this, client]() {
             this->WebSocketReadLoop(client);
+            m_activeWsClients--;
         }).detach();
     }
 
@@ -1200,8 +1343,41 @@ private:
             return HTTPResponse::OK({{"id", id}, {"deleted", true}});
         });
         m_router.Register("POST", "/api/memory/{id}/files", [](const HTTPRequest& req) {
-            /* Persist attached file to disk under data/memory_files/, record path in summary. */
-            int64_t id = std::atoll(req.headers.at("x-path-id").c_str());
+            /* Upload requires x-admin-key (constant-time compared against
+             * http_server.admin_key or jwt_secret) AND the body must be
+             * within http.max_upload_bytes. Previously anyone could POST
+             * an arbitrarily large binary to data/memory_files/ with no
+             * gate — trivial fill-the-disk attack.                       */
+            auto& cfg  = ElleConfig::Instance();
+            auto& http = cfg.GetHTTP();
+            std::string expected = cfg.GetString("http_server.admin_key", http.jwt_secret);
+            if (expected.empty()) {
+                return HTTPResponse::Err(503, "upload disabled: no admin_key configured");
+            }
+            auto it = req.headers.find("x-admin-key");
+            if (it == req.headers.end() || it->second.size() != expected.size()) {
+                return HTTPResponse::Err(403, "invalid admin key");
+            }
+            unsigned diff = 0;
+            for (size_t i = 0; i < expected.size(); i++)
+                diff |= (unsigned char)it->second[i] ^ (unsigned char)expected[i];
+            if (diff != 0) return HTTPResponse::Err(403, "invalid admin key");
+
+            uint64_t capBytes = http.max_upload_bytes ? http.max_upload_bytes
+                                                      : (10ULL * 1024 * 1024);
+            if (req.body.size() > capBytes) {
+                return HTTPResponse::Err(413, "payload too large");
+            }
+
+            /* Validate the id strictly — atoll returns 0 on junk. */
+            auto idIt = req.headers.find("x-path-id");
+            if (idIt == req.headers.end() || idIt->second.empty())
+                return HTTPResponse::Err(400, "missing memory id");
+            char* end = nullptr;
+            long long id = strtoll(idIt->second.c_str(), &end, 10);
+            if (!end || *end != '\0' || id <= 0)
+                return HTTPResponse::Err(400, "invalid memory id");
+
             std::string dir = "data\\memory_files";
             CreateDirectoryA("data", nullptr);
             CreateDirectoryA(dir.c_str(), nullptr);
@@ -3380,10 +3556,32 @@ private:
             return HTTPResponse::OK({{"rules", arr}});
         });
         m_router.Register("POST", "/api/morals/rules", [](const HTTPRequest& req) {
+            /* Compare the x-admin-key header against the real admin secret
+             * loaded from config (admin_key, or fall back to jwt_secret so
+             * there's always one source of truth). Previously we only
+             * checked the header was non-empty — anyone with any key could
+             * write moral rules, which is exactly what an attacker would
+             * probe for. Use a constant-time compare to avoid timing
+             * oracles on partially-guessed keys.                            */
             auto it = req.headers.find("x-admin-key");
             if (it == req.headers.end() || it->second.empty()) {
                 return HTTPResponse::Err(401, "missing x-admin-key");
             }
+            auto& cfg = ElleConfig::Instance();
+            std::string expected = cfg.GetString("http_server.admin_key",
+                                   cfg.GetHTTP().jwt_secret);
+            if (expected.empty()) {
+                return HTTPResponse::Err(503, "admin endpoint disabled: no admin_key configured");
+            }
+            const std::string& got = it->second;
+            if (got.size() != expected.size()) {
+                return HTTPResponse::Err(403, "invalid admin key");
+            }
+            unsigned diff = 0;
+            for (size_t i = 0; i < got.size(); i++)
+                diff |= (unsigned char)got[i] ^ (unsigned char)expected[i];
+            if (diff != 0) return HTTPResponse::Err(403, "invalid admin key");
+
             json body = req.BodyJSON();
             std::string principle = body.value("principle", "");
             std::string category  = body.value("category", "core");

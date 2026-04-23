@@ -28,6 +28,7 @@
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/json.hpp"
+#include "../../Shared/ElleJsonExtract.h"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -320,12 +321,10 @@ private:
         std::string raw = ElleLLMEngine::Instance().Ask(prompt,
             "You distill exchanges into preferences. Terse. JSON only.");
         if (raw.empty()) return;
-        auto first = raw.find('{');
-        auto last  = raw.rfind('}');
-        if (first == std::string::npos || last == std::string::npos || last <= first) return;
+        nlohmann::json j;
+        if (!Elle::ExtractJsonObject(raw, j)) return;
 
         try {
-            auto j = nlohmann::json::parse(raw.substr(first, last - first + 1));
             if (j.value("skip", false)) return;
             std::string domain  = j.value("domain",  std::string(""));
             std::string subject = j.value("subject", std::string(""));

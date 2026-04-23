@@ -554,8 +554,17 @@ private:
             }
             case ACTION_KILL_PROCESS: {
                 if (!p_KillProc) return Fail("ASM_KillProcess export missing", 0x1303);
-                DWORD pid = (DWORD)atoi(action.parameters);
-                if (pid == 0) return Fail("Invalid pid in parameters", 0x1304);
+                /* Strict PID parse — atoi silently returns 0 for garbage
+                 * like "abc" or "-1abc", which would then trip the
+                 * pid == 0 check and give no useful diagnostic.           */
+                char* end = nullptr;
+                unsigned long parsed = strtoul(action.parameters, &end, 10);
+                if (!end || end == action.parameters || *end != '\0' ||
+                    parsed == 0 || parsed > 0xFFFFFFFFUL) {
+                    return Fail(std::string("Invalid pid: '") + action.parameters + "'",
+                                0x1304);
+                }
+                DWORD pid = (DWORD)parsed;
                 int rc = p_KillProc(pid);
                 if (rc == 0) return Fail("ASM_KillProcess failed pid=" + std::to_string(pid), 0x1305);
                 return {true, "Killed pid=" + std::to_string(pid), TRUST_SUCCESS_DELTA, 0};

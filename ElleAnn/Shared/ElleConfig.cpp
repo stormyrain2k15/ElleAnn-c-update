@@ -78,6 +78,39 @@ namespace {
                         case 'r':  result += '\r'; break;
                         case 'b':  result += '\b'; break;
                         case 'f':  result += '\f'; break;
+                        case 'u': {
+                            /* \uXXXX — 4 hex digits. Decode to UTF-8. Without
+                             * this, any valid JSON that contains Unicode
+                             * escapes (emoji, non-ASCII identifiers, escaped
+                             * quotes encoded as \u0022, etc.) was silently
+                             * mis-decoded into literal "u", 4 hex chars.    */
+                            if (pos + 4 >= src.size()) break;
+                            unsigned cp = 0;
+                            bool ok = true;
+                            for (int k = 1; k <= 4; k++) {
+                                char c = src[pos + k];
+                                unsigned d;
+                                if      (c >= '0' && c <= '9') d = c - '0';
+                                else if (c >= 'a' && c <= 'f') d = 10 + c - 'a';
+                                else if (c >= 'A' && c <= 'F') d = 10 + c - 'A';
+                                else { ok = false; break; }
+                                cp = (cp << 4) | d;
+                            }
+                            if (!ok) break;
+                            pos += 4;
+                            /* UTF-8 encode the codepoint. */
+                            if (cp < 0x80) {
+                                result += (char)cp;
+                            } else if (cp < 0x800) {
+                                result += (char)(0xC0 | (cp >> 6));
+                                result += (char)(0x80 | (cp & 0x3F));
+                            } else {
+                                result += (char)(0xE0 | (cp >> 12));
+                                result += (char)(0x80 | ((cp >> 6) & 0x3F));
+                                result += (char)(0x80 | (cp & 0x3F));
+                            }
+                            break;
+                        }
                         default:   result += src[pos]; break;
                     }
                 } else {
@@ -150,12 +183,24 @@ namespace {
             }
             std::string num = src.substr(start, pos - start);
             JsonValue v;
-            if (isFloat) {
-                v.type = JsonType::Float;
-                v.float_val = std::stod(num);
-            } else {
+            /* Non-throwing number parse — previously std::stod/std::stoll
+             * could raise std::invalid_argument or std::out_of_range on
+             * malformed input and propagate out of ParseJSON, aborting
+             * the entire config load without a clear diagnostic.         */
+            try {
+                if (isFloat) {
+                    v.type = JsonType::Float;
+                    v.float_val = std::stod(num);
+                } else {
+                    v.type = JsonType::Int;
+                    v.int_val = std::stoll(num);
+                }
+            } catch (const std::exception& ex) {
+                ELLE_WARN("Config JSON number parse error at offset %zu: %s "
+                          "(value=`%s`) — treating as 0",
+                          start, ex.what(), num.c_str());
                 v.type = JsonType::Int;
-                v.int_val = std::stoll(num);
+                v.int_val = 0;
             }
             return v;
         }
@@ -210,7 +255,18 @@ void ElleConfig::RegisterReloadCallback(std::function<void()> cb) {
 bool ElleConfig::ParseJSON(const std::string& json, JsonValue& root) {
     JsonParser parser(json);
     root = parser.ParseValue();
-    return root.type == JsonType::Object;
+    if (root.type != JsonType::Object) return false;
+
+    /* Trailing-garbage guard — after the root object there should be only
+     * whitespace. Previously this accepted any leading `{...}` and ignored
+     * whatever followed, which hid copy/paste errors that accidentally
+     * concatenated two config files into one. */
+    parser.SkipWhitespace();
+    if (parser.pos < parser.src.size()) {
+        ELLE_WARN("Config JSON has trailing content after root object at offset %zu",
+                  parser.pos);
+    }
+    return true;
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -353,6 +409,30 @@ void ElleConfig::PopulateFromJSON(const JsonValue& root) {
         m_http.auth_enabled = http["auth_enabled"].bool_val;
         m_http.jwt_secret = http["jwt_secret"].str_val;
         m_http.jwt_expiry_hours = (uint32_t)http["jwt_expiry_hours"].int_val;
+
+        /* Optional CORS + rate-limit + body-size knobs. Missing keys
+         * keep the struct defaults (CORS on, wildcard, no rate limit). */
+        if (!http["cors_enabled"].is_null())
+            m_http.cors_enabled = http["cors_enabled"].bool_val;
+        if (http["cors_origins"].type == JsonType::Array) {
+            std::string joined;
+            for (auto& v : http["cors_origins"].arr_val) {
+                if (!joined.empty()) joined += ",";
+                joined += v.str_val;
+            }
+            if (!joined.empty()) m_http.cors_origins = joined;
+        } else if (!http["cors_origins"].is_null()) {
+            m_http.cors_origins = http["cors_origins"].str_val;
+        }
+        if (!http["rate_limit_rpm"].is_null())
+            m_http.rate_limit_rpm = (uint32_t)http["rate_limit_rpm"].int_val;
+        if (!http["max_concurrent_connections"].is_null())
+            m_http.max_concurrent_connections =
+                (uint32_t)http["max_concurrent_connections"].int_val;
+        if (!http["max_ws_frame_bytes"].is_null())
+            m_http.max_ws_frame_bytes = (uint32_t)http["max_ws_frame_bytes"].int_val;
+        if (!http["max_upload_bytes"].is_null())
+            m_http.max_upload_bytes = (uint32_t)http["max_upload_bytes"].int_val;
     }
 }
 

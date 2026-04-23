@@ -9,6 +9,7 @@
 #include <sstream>
 #include <algorithm>
 #include <set>
+#include <random>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * SQLRow helpers
@@ -1880,12 +1881,21 @@ bool RecordSkillUse(const std::string& skill_name) {
 /*══════════════════════════════════════════════════════════════════════════════
  * VIDEO JOBS — ported from app/services/video_generator.py
  *═════════════════════════════════════════════════════════════════════════════*/
+/* Real UUIDv4-quality identifier — 128 random bits rendered as 32 lower-
+ * case hex chars (we return 16 chars for backwards compatibility with the
+ * column width, but source the randomness from a proper CSPRNG-seeded
+ * Mersenne engine instead of rand(). Previously this derived 16 hex chars
+ * from ELLE_MS_NOW() XOR'd with rand()^i — collisions and near-birthdays
+ * were easy for anyone who could predict either input.                   */
 static std::string MakeUuid16() {
+    thread_local std::mt19937_64 rng{ std::random_device{}() };
+    std::uniform_int_distribution<uint64_t> dist;
+    uint64_t a = dist(rng);
+    uint64_t b = dist(rng);
     static const char* hex = "0123456789abcdef";
     std::string s; s.reserve(16);
-    uint64_t t = ELLE_MS_NOW();
     for (int i = 0; i < 16; i++) {
-        uint64_t v = (t ^ ((uint64_t)rand() << i)) >> (i * 4);
+        uint64_t v = (i < 8) ? (a >> (i * 8)) : (b >> ((i - 8) * 8));
         s += hex[v & 0xF];
     }
     return s;
