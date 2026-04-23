@@ -169,6 +169,15 @@ typedef enum ELLE_EMOTION_ID {
     ELLE_EMOTION_COUNT  /* == 102 */
 } ELLE_EMOTION_ID;
 
+#ifdef __cplusplus
+/* Pins the emotion enum count to ELLE_MAX_EMOTIONS. Every emotion-snapshot
+ * float[] buffer in this file is sized by ELLE_MAX_EMOTIONS; if the enum
+ * grew past 102 without ELLE_MAX_EMOTIONS being bumped in lockstep, any
+ * ProcessStimulus() write past index 101 would be out-of-bounds.         */
+static_assert((int)ELLE_EMOTION_COUNT == ELLE_MAX_EMOTIONS,
+              "ELLE_EMOTION_COUNT and ELLE_MAX_EMOTIONS must stay in lockstep.");
+#endif
+
 /*  Human-readable name + category per emotion dimension.
  *  Indexed by ELLE_EMOTION_ID. Defined in ElleTypes.cpp.
  *  Used by /api/emotions/dimensions to expose the full 102-dim state.   */
@@ -388,6 +397,17 @@ typedef enum ELLE_SERVICE_ID {
     ELLE_SERVICE_COUNT
 } ELLE_SERVICE_ID;
 
+#ifdef __cplusplus
+/* Compile-time guard — if a new service is appended without also updating
+ * g_serviceNames[] in ElleTypes.cpp / the Heartbeat state array / the
+ * GetPipeName() switch, this static_assert pins the contract. Bump the
+ * expected count here ONLY in the same commit that updates all three.   */
+static_assert((int)ELLE_SERVICE_COUNT == 20,
+              "ELLE_SERVICE_COUNT changed — update g_serviceNames[], "
+              "Heartbeat service state arrays, and GetPipeName() switch "
+              "in lockstep before bumping this assert.");
+#endif
+
 /*──────────────────────────────────────────────────────────────────────────────
  * IPC MESSAGE STRUCTURES (POD — safe across IOCP boundaries)
  *──────────────────────────────────────────────────────────────────────────────*/
@@ -407,6 +427,16 @@ typedef struct ELLE_IPC_HEADER {
 } ELLE_IPC_HEADER;
 
 #define ELLE_IPC_MAGIC  0x454C4C45
+
+#ifdef __cplusplus
+/* Wire-format layout guard. The header is #pragma pack(1), so size MUST be
+ * exactly: 4+4+4+4+8+4+4+8+4+4 = 48 bytes. Any compiler padding drift
+ * here would produce messages that can't be parsed by another process
+ * compiled with slightly different flags. */
+static_assert(sizeof(ELLE_IPC_HEADER) == 48,
+              "ELLE_IPC_HEADER layout drifted from the 48-byte IPC wire "
+              "format — check #pragma pack and field ordering.");
+#endif
 
 /* IPC Message Types */
 typedef enum ELLE_IPC_MSG_TYPE {

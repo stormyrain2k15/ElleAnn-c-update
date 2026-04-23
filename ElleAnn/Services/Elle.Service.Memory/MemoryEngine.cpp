@@ -77,26 +77,36 @@ bool MemoryEngine::Initialize() {
 
 void MemoryEngine::Shutdown() {
     /* Flush ALL remaining STM to LTM — on shutdown we can't afford to lose
-     * anything to the promote-criteria filter. Every live entry gets written. */
-    std::lock_guard<std::mutex> lock(m_stmMutex);
-    if (m_stm.empty()) return;
+     * anything to the promote-criteria filter. Every live entry gets written.
+     *
+     * Lock discipline: we take the mutex ONLY long enough to move the deque
+     * out into a local snapshot, then release it before issuing any SQL
+     * writes. Holding m_stmMutex across ElleDB::StoreMemory() can block
+     * concurrent readers (Recall, STMCount) for the full duration of a
+     * shutdown flush, and in the worst case — if a SQL call stalls —
+     * deadlock the shutdown sequence because other services try to read
+     * memory state while their own stop path is pending.                  */
+    std::deque<ELLE_MEMORY_RECORD> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(m_stmMutex);
+        if (m_stm.empty()) return;
+        snapshot.swap(m_stm);   /* m_stm is now empty; lock released below. */
+    }
 
     uint32_t flushed = 0;
-    for (auto& e : m_stm) {
+    for (auto& e : snapshot) {
         e.tier = MEM_LTM;
         if (ElleDB::StoreMemory(e)) flushed++;
     }
     ELLE_INFO("Memory shutdown: flushed %u STM entries to LTM", flushed);
-    m_stm.clear();
 }
 
 uint64_t MemoryEngine::StoreSTM(const std::string& content, float importance,
                                   const float emotions[ELLE_MAX_EMOTIONS],
                                   const std::vector<std::string>& tags) {
-    std::lock_guard<std::mutex> lock(m_stmMutex);
-
     ELLE_MEMORY_RECORD mem = {};
-    mem.id = m_nextId++;
+    /* Build the record outside the lock — no shared state touched here. */
+
     mem.type = MEM_EPISODIC;
     mem.tier = MEM_STM;
     strncpy_s(mem.content, content.c_str(), ELLE_MAX_MSG - 1);
@@ -124,36 +134,60 @@ uint64_t MemoryEngine::StoreSTM(const std::string& content, float importance,
     /* Compute 3D position */
     ComputePosition(mem);
 
-    m_stm.push_back(mem);
+    /* Acquire the lock only long enough to (a) assign an id, (b) push the
+     * entry, and (c) pick out capacity-pressure eviction victims. The
+     * actual SQL writes for evicted entries happen AFTER the lock is
+     * released so a stalled DB round-trip can't block concurrent recalls. */
+    std::vector<ELLE_MEMORY_RECORD> toPromote;
+    uint64_t assignedId = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_stmMutex);
+        mem.id = m_nextId++;
+        assignedId = mem.id;
+        m_stm.push_back(mem);
 
-    /* Enforce capacity — before falling off the end, promote lowest-relevance,
-     * non-critical entries to LTM so nothing valuable is lost. Critical entries
-     * (importance >= 0.90) are pinned and never evicted by capacity pressure.  */
-    auto cap = ElleConfig::Instance().GetMemory().stm_capacity;
-    while (m_stm.size() > cap) {
-        auto victim = m_stm.end();
-        float lowestRel = 2.0f;
-        for (auto it = m_stm.begin(); it != m_stm.end(); ++it) {
-            if (PriorityTier(it->importance) == 0) continue; /* skip critical */
-            if (it->relevance < lowestRel) {
-                lowestRel = it->relevance;
-                victim = it;
+        /* Enforce capacity — before falling off the end, promote lowest-relevance,
+         * non-critical entries to LTM so nothing valuable is lost. Critical entries
+         * (importance >= 0.90) are pinned and never evicted by capacity pressure. */
+        auto cap = ElleConfig::Instance().GetMemory().stm_capacity;
+        while (m_stm.size() > cap) {
+            auto victim = m_stm.end();
+            float lowestRel = 2.0f;
+            for (auto it = m_stm.begin(); it != m_stm.end(); ++it) {
+                if (PriorityTier(it->importance) == 0) continue; /* skip critical */
+                if (it->relevance < lowestRel) {
+                    lowestRel = it->relevance;
+                    victim = it;
+                }
             }
+            if (victim == m_stm.end()) {
+                /* Every entry is critical — we must still honour the cap. Evict the
+                 * oldest critical (FIFO) but still promote it so it survives in LTM. */
+                victim = m_stm.begin();
+            }
+            ELLE_MEMORY_RECORD copy = *victim;
+            copy.tier = MEM_LTM;
+            toPromote.push_back(copy);
+            m_stm.erase(victim);
         }
-        if (victim == m_stm.end()) {
-            /* Every entry is critical — we must still honour the cap. Evict the
-             * oldest critical (FIFO) but still promote it so it survives in LTM. */
-            victim = m_stm.begin();
-        }
-        victim->tier = MEM_LTM;
-        ElleDB::StoreMemory(*victim);
-        ELLE_DEBUG("STM capacity pressure: promoted [%llu] %.50s... (rel=%.2f)",
-                   victim->id, victim->content, victim->relevance);
-        m_stm.erase(victim);
     }
 
-    ELLE_DEBUG("STM stored: [%llu] %.50s... (importance=%.2f)", mem.id, content.c_str(), importance);
-    return mem.id;
+    /* DB writes outside the lock. Failures are logged but do NOT re-insert
+     * into STM — capacity pressure means STM is already over-full, so the
+     * live record (just pushed) has priority over the evicted copy. Worst
+     * case: the evicted record is lost, which is the documented behaviour
+     * when SQL is unreachable. */
+    for (auto& rec : toPromote) {
+        if (!ElleDB::StoreMemory(rec)) {
+            ELLE_WARN("STM capacity eviction: LTM write failed for [%llu] — record lost", rec.id);
+        } else {
+            ELLE_DEBUG("STM capacity pressure: promoted [%llu] %.50s... (rel=%.2f)",
+                       rec.id, rec.content, rec.relevance);
+        }
+    }
+
+    ELLE_DEBUG("STM stored: [%llu] %.50s... (importance=%.2f)", assignedId, content.c_str(), importance);
+    return assignedId;
 }
 
 uint64_t MemoryEngine::StoreLTM(const ELLE_MEMORY_RECORD& record) {
@@ -228,12 +262,8 @@ std::vector<ELLE_MEMORY_RECORD> MemoryEngine::Recall(const std::string& query,
 }
 
 void MemoryEngine::ConsolidateMemories() {
-    std::lock_guard<std::mutex> lock(m_stmMutex);
-
     auto  cfg       = ElleConfig::Instance().GetMemory();
     float impFast   = cfg.promote_threshold;    /* fast-track promotion on importance */
-    uint32_t promoted = 0;
-    uint32_t dropped  = 0;
 
     /* Two-phase sweep:
      *  Phase 1 — refresh decay on every entry so we're working with fresh scores.
@@ -248,18 +278,133 @@ void MemoryEngine::ConsolidateMemories() {
      *   - relevance <= 0 AND importance < 0.5               (trivial, fully faded)
      * Critical (importance >= 0.90) entries are never dropped by decay alone — they
      * stay resident in STM until explicitly consolidated via IPC_MEMORY_CONSOLIDATE
-     * or until promoted on access-count / explicit importance fast-track.            */
+     * or until promoted on access-count / explicit importance fast-track.
+     *
+     * Lock discipline: all decay math + decisions happen under m_stmMutex.
+     * We COPY records marked for promotion into a local vector, erase them
+     * from the live deque, then release the mutex before issuing any SQL
+     * writes. This prevents readers from blocking on long DB round-trips.
+     * If a write fails we re-insert the record under a second brief lock
+     * (worst case: the entry is briefly not in STM and not in LTM, but
+     * still owned by the local vector).                                   */
 
-    /* --- phase 1 : decay refresh (no erase) --- */
+    std::vector<ELLE_MEMORY_RECORD> toWrite;
+    uint32_t dropped = 0;
+
     {
-        uint64_t now = ELLE_MS_NOW();
-        float    scale = (cfg.stm_decay_seconds > 0.0f) ? (15.0f / cfg.stm_decay_seconds) : 1.0f;
+        std::lock_guard<std::mutex> lock(m_stmMutex);
+
+        /* --- phase 1 : decay refresh (no erase) --- */
+        {
+            uint64_t now = ELLE_MS_NOW();
+            float    scale = (cfg.stm_decay_seconds > 0.0f) ? (15.0f / cfg.stm_decay_seconds) : 1.0f;
+            for (auto& e : m_stm) {
+                int tier = PriorityTier(e.importance);
+                float rate = kDecayRatePerSec[tier] * scale;
+                if (rate <= 0.0f) continue; /* critical */
+                /* Rebased on last_access_ms so accessing a memory genuinely
+                 * keeps it fresh. Previously this used created_ms, meaning
+                 * an old but hot memory would decay past the floor no matter
+                 * how often Elle recalled it.                                */
+                uint64_t anchor = e.last_access_ms > 0 ? e.last_access_ms : e.created_ms;
+                float age_sec = (float)(now - anchor) / 1000.0f;
+                float rel = 1.0f - (rate * age_sec);
+                if (e.access_count > 0) {
+                    float bump = std::min(0.5f, e.access_count * 0.05f);
+                    rel += bump;
+                }
+                e.decay     = 1.0f - rel;
+                e.relevance = ELLE_CLAMP(rel, 0.0f, 1.0f);
+            }
+        }
+
+        /* --- phase 2 : classify (promote → copy aside, drop → erase) --- */
+        auto it = m_stm.begin();
+        while (it != m_stm.end()) {
+            int  tier          = PriorityTier(it->importance);
+            bool criticalTier  = (tier == 0);
+            bool impFastTrack  = (it->importance >= impFast);
+            bool accessFreq    = (it->access_count >= 3);
+            bool strongEmotion = (it->emotional_valence > 0.5f || it->emotional_valence < -0.5f);
+            bool decayedOut    = (it->relevance <= kPromotionRelevance);
+            bool trivialGone   = (it->relevance <= 0.0f && it->importance < 0.5f);
+
+            if (impFastTrack || accessFreq || strongEmotion ||
+                (!criticalTier && decayedOut)) {
+                ELLE_MEMORY_RECORD copy = *it;
+                copy.tier = MEM_LTM;
+                toWrite.push_back(copy);
+                it = m_stm.erase(it);
+            } else if (!criticalTier && trivialGone) {
+                ELLE_DEBUG("STM dropped trivial [%llu] imp=%.2f rel=%.2f | %.40s",
+                           it->id, it->importance, it->relevance, it->content);
+                it = m_stm.erase(it);
+                dropped++;
+            } else {
+                ++it;
+            }
+        }
+    }   /* m_stmMutex released */
+
+    /* --- phase 3 : DB writes outside the lock --- */
+    uint32_t promoted = 0;
+    std::vector<ELLE_MEMORY_RECORD> reinsert;
+    for (auto& rec : toWrite) {
+        if (ElleDB::StoreMemory(rec)) {
+            promoted++;
+            ELLE_INFO("STM→LTM [%llu] pri=%s imp=%.2f rel=%.2f acc=%u | %.60s",
+                      rec.id, PriorityLabel(PriorityTier(rec.importance)),
+                      rec.importance, rec.relevance, rec.access_count,
+                      rec.content);
+        } else {
+            ELLE_WARN("STM→LTM write failed for [%llu] — returning to STM", rec.id);
+            rec.tier = MEM_STM;
+            reinsert.push_back(rec);
+        }
+    }
+
+    if (!reinsert.empty()) {
+        std::lock_guard<std::mutex> lock(m_stmMutex);
+        for (auto& r : reinsert) m_stm.push_back(r);
+    }
+
+    if (promoted > 0 || dropped > 0) {
+        size_t remaining;
+        {
+            std::lock_guard<std::mutex> lock(m_stmMutex);
+            remaining = m_stm.size();
+        }
+        ELLE_INFO("Consolidation pass: promoted=%u dropped=%u remaining_stm=%zu",
+                  promoted, dropped, remaining);
+    }
+}
+
+void MemoryEngine::DecaySTM() {
+    auto  cfg   = ElleConfig::Instance().GetMemory();
+    uint64_t now = ELLE_MS_NOW();
+    float scale = (cfg.stm_decay_seconds > 0.0f) ? (15.0f / cfg.stm_decay_seconds) : 1.0f;
+
+    /* Subconscious tick: refresh relevance on every entry using priority-tiered
+     * decay rates. Does NOT evict — eviction/promotion is the consolidation pass
+     * (periodic, or on-demand via IPC_MEMORY_CONSOLIDATE).
+     *
+     * Lock discipline: decay + floor-sweep classification under lock.
+     * Floor-promoted records are copied out, erased from STM, then written
+     * to the DB without holding m_stmMutex.                                    */
+    std::vector<ELLE_MEMORY_RECORD> floorPromoted;
+    {
+        std::lock_guard<std::mutex> lock(m_stmMutex);
+
         for (auto& e : m_stm) {
-            int tier = PriorityTier(e.importance);
+            int   tier = PriorityTier(e.importance);
             float rate = kDecayRatePerSec[tier] * scale;
-            if (rate <= 0.0f) continue; /* critical */
-            float age_sec = (float)(now - e.created_ms) / 1000.0f;
-            float rel = 1.0f - (rate * age_sec);
+            if (rate <= 0.0f) continue; /* critical — pinned */
+
+            /* Rebased on last_access_ms so accessing a memory genuinely
+             * keeps it fresh. See ConsolidateMemories() for the same fix. */
+            uint64_t anchor = e.last_access_ms > 0 ? e.last_access_ms : e.created_ms;
+            float age_sec = (float)(now - anchor) / 1000.0f;
+            float rel     = 1.0f - (rate * age_sec);
             if (e.access_count > 0) {
                 float bump = std::min(0.5f, e.access_count * 0.05f);
                 rel += bump;
@@ -267,89 +412,29 @@ void MemoryEngine::ConsolidateMemories() {
             e.decay     = 1.0f - rel;
             e.relevance = ELLE_CLAMP(rel, 0.0f, 1.0f);
         }
-    }
 
-    /* --- phase 2 : promote / keep / drop --- */
-    auto it = m_stm.begin();
-    while (it != m_stm.end()) {
-        int  tier          = PriorityTier(it->importance);
-        bool criticalTier  = (tier == 0);
-        bool impFastTrack  = (it->importance >= impFast);
-        bool accessFreq    = (it->access_count >= 3);
-        bool strongEmotion = (it->emotional_valence > 0.5f || it->emotional_valence < -0.5f);
-        bool decayedOut    = (it->relevance <= kPromotionRelevance);
-        bool trivialGone   = (it->relevance <= 0.0f && it->importance < 0.5f);
-
-        if (impFastTrack || accessFreq || strongEmotion ||
-            (!criticalTier && decayedOut)) {
-            it->tier = MEM_LTM;
-            if (ElleDB::StoreMemory(*it)) {
-                promoted++;
-                ELLE_INFO("STM→LTM [%llu] pri=%s imp=%.2f rel=%.2f acc=%u | %.60s",
-                          it->id, PriorityLabel(tier),
-                          it->importance, it->relevance, it->access_count,
-                          it->content);
+        /* Emergency floor sweep: anything that has slipped below kMinRelevanceFloor
+         * gets promoted so we don't leak RAM between consolidation ticks. */
+        auto it = m_stm.begin();
+        while (it != m_stm.end()) {
+            if (PriorityTier(it->importance) != 0 &&
+                it->relevance <= kMinRelevanceFloor) {
+                ELLE_MEMORY_RECORD copy = *it;
+                copy.tier = MEM_LTM;
+                floorPromoted.push_back(copy);
+                it = m_stm.erase(it);
             } else {
-                ELLE_WARN("STM→LTM write failed for [%llu] — keeping in STM", it->id);
                 ++it;
-                continue;
             }
-            it = m_stm.erase(it);
-        } else if (!criticalTier && trivialGone) {
-            ELLE_DEBUG("STM dropped trivial [%llu] imp=%.2f rel=%.2f | %.40s",
-                       it->id, it->importance, it->relevance, it->content);
-            it = m_stm.erase(it);
-            dropped++;
-        } else {
-            ++it;
         }
     }
 
-    if (promoted > 0 || dropped > 0) {
-        ELLE_INFO("Consolidation pass: promoted=%u dropped=%u remaining_stm=%zu",
-                  promoted, dropped, m_stm.size());
-    }
-}
-
-void MemoryEngine::DecaySTM() {
-    std::lock_guard<std::mutex> lock(m_stmMutex);
-
-    auto  cfg   = ElleConfig::Instance().GetMemory();
-    uint64_t now = ELLE_MS_NOW();
-    float scale = (cfg.stm_decay_seconds > 0.0f) ? (15.0f / cfg.stm_decay_seconds) : 1.0f;
-
-    /* Subconscious tick: refresh relevance on every entry using priority-tiered
-     * decay rates. Does NOT evict — eviction/promotion is the consolidation pass
-     * (periodic, or on-demand via IPC_MEMORY_CONSOLIDATE).                       */
-    for (auto& e : m_stm) {
-        int   tier = PriorityTier(e.importance);
-        float rate = kDecayRatePerSec[tier] * scale;
-        if (rate <= 0.0f) continue; /* critical — pinned */
-
-        float age_sec = (float)(now - e.created_ms) / 1000.0f;
-        float rel     = 1.0f - (rate * age_sec);
-        if (e.access_count > 0) {
-            float bump = std::min(0.5f, e.access_count * 0.05f);
-            rel += bump;
-        }
-        e.decay     = 1.0f - rel;
-        e.relevance = ELLE_CLAMP(rel, 0.0f, 1.0f);
-    }
-
-    /* Emergency floor sweep: anything that has slipped below kMinRelevanceFloor
-     * for more than one decay interval gets promoted inline so we don't leak RAM
-     * between consolidation ticks. Safety net — matches Python apply_decay(). */
-    auto it = m_stm.begin();
-    while (it != m_stm.end()) {
-        if (PriorityTier(it->importance) != 0 &&
-            it->relevance <= kMinRelevanceFloor) {
-            it->tier = MEM_LTM;
-            if (ElleDB::StoreMemory(*it)) {
-                ELLE_DEBUG("DecaySTM floor-promoted [%llu] rel=%.3f", it->id, it->relevance);
-            }
-            it = m_stm.erase(it);
+    /* DB writes outside the lock. */
+    for (auto& rec : floorPromoted) {
+        if (ElleDB::StoreMemory(rec)) {
+            ELLE_DEBUG("DecaySTM floor-promoted [%llu] rel=%.3f", rec.id, rec.relevance);
         } else {
-            ++it;
+            ELLE_WARN("DecaySTM floor-promote write failed for [%llu] — record lost", rec.id);
         }
     }
 }
@@ -475,13 +560,28 @@ void MemoryEngine::DreamConsolidate(const std::string& narrativePrompt) {
 }
 
 std::vector<ELLE_MEMORY_RECORD> MemoryEngine::RecallRecent(uint32_t count) {
-    std::lock_guard<std::mutex> lock(m_stmMutex);
-    std::vector<ELLE_MEMORY_RECORD> results;
-    uint32_t n = std::min(count, (uint32_t)m_stm.size());
-    for (uint32_t i = 0; i < n; i++) {
-        results.push_back(m_stm[m_stm.size() - 1 - i]);
+    /* "Recent" means newest-first across BOTH tiers. Previously this
+     * returned only the STM deque tail, which was misleading — an old
+     * STM entry could outrank a freshly-written LTM row. Now we pull
+     * the STM tail AND the newest `count` LTM rows, merge-sort them by
+     * created_ms DESC, and return the top `count`.                       */
+    std::vector<ELLE_MEMORY_RECORD> merged;
+    {
+        std::lock_guard<std::mutex> lock(m_stmMutex);
+        merged.reserve(m_stm.size() + count);
+        for (auto& m : m_stm) merged.push_back(m);
     }
-    return results;
+
+    std::vector<ELLE_MEMORY_RECORD> ltm;
+    ElleDB::RecallRecentLTM(ltm, count);
+    merged.insert(merged.end(), ltm.begin(), ltm.end());
+
+    std::sort(merged.begin(), merged.end(),
+              [](const ELLE_MEMORY_RECORD& a, const ELLE_MEMORY_RECORD& b) {
+                  return a.created_ms > b.created_ms;
+              });
+    if (merged.size() > count) merged.resize(count);
+    return merged;
 }
 
 void MemoryEngine::UpdateClusters() {

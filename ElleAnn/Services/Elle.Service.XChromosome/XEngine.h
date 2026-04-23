@@ -31,6 +31,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <mutex>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * CYCLE PHASES
@@ -254,10 +255,13 @@ public:
      * short-lived residual vector that decays over ~6 hours.                 */
     void ApplyStimulus(const XStimulus& stim);
 
-    /* Accessors. */
-    XCycleState      GetCycle() const         { return m_cycle; }
-    XHormoneLevels   GetHormones() const      { return m_hormones; }
-    XPregnancyState  GetPregnancy() const     { return m_pregnancy; }
+    /* Accessors. Lock the engine mutex so readers never observe a torn
+     * struct mid-update from Tick() / ApplyStimulus() / AttemptConception().
+     * Recursive because some public readers are called from public writers
+     * under the lock (e.g. Tick() → ComputeModulation()).                   */
+    XCycleState      GetCycle() const         { std::lock_guard<std::recursive_mutex> lk(m_mutex); return m_cycle; }
+    XHormoneLevels   GetHormones() const      { std::lock_guard<std::recursive_mutex> lk(m_mutex); return m_hormones; }
+    XPregnancyState  GetPregnancy() const     { std::lock_guard<std::recursive_mutex> lk(m_mutex); return m_pregnancy; }
     XModulation      ComputeModulation() const;
 
     /* Stride-sampled hormone timeline for UI. */
@@ -290,7 +294,7 @@ public:
      * together determine the per-cycle conception probability multiplier.    */
     bool SetContraception(XContraceptionMethod m, float efficacy,
                           const std::string& notes);
-    XContraceptionState GetContraception() const { return m_contra; }
+    XContraceptionState GetContraception() const { std::lock_guard<std::recursive_mutex> lk(m_mutex); return m_contra; }
 
     /* Point-in-time derived biology (BBT, endometrial mm, cervical mucus,
      * menstrual flow, cycle_active, anovulatory). Recomputed from current
@@ -300,7 +304,7 @@ public:
     /* Lifecycle — Elle's age + stage. Setting the birthday retroactively
      * picks the stage (premenarche if < 12y, perimenopause if >= 45y, etc.). */
     bool SetElleBirthday(uint64_t birth_ms);
-    XLifecycleState GetLifecycle() const { return m_life; }
+    XLifecycleState GetLifecycle() const { std::lock_guard<std::recursive_mutex> lk(m_mutex); return m_life; }
 
     /* Synthesised symptom vector for the current moment — derived from
      * hormone state + cycle phase + pregnancy phase. Intensities 0..1.       */
@@ -344,6 +348,19 @@ public:
     static XContraceptionMethod ParseContraception(const std::string& s);
 
 private:
+    /* Engine-wide state mutex. Guards every m_* field below so that readers
+     * (HTTP /api/x/* handlers, modulation consumers, GetDerived/GetHistory)
+     * never observe a half-updated struct while Tick() / AnchorCycle() /
+     * ApplyStimulus() / AttemptConception() / Deliver() are writing.
+     *
+     * Recursive because some public readers are reached from public writers
+     * while the lock is held (e.g. Tick() → ComputeModulation(),
+     * GetStateJson() → GetDerived()+ComputeModulation(), and
+     * SynthesiseAndLogSymptoms() → ComputeCurrentSymptoms()). Using a
+     * recursive_mutex keeps those call chains safe without refactoring
+     * every public method into a lock-holding public + a lockless _Impl.  */
+    mutable std::recursive_mutex  m_mutex;
+
     XCycleState          m_cycle;
     XHormoneLevels       m_hormones;
     XPregnancyState      m_pregnancy;
@@ -364,6 +381,8 @@ private:
      * makes the behavior deterministic and explicit.                    */
     int              m_last_cycle_day_seen = 0;
     int              m_last_sampled_gd     = -1;
+    bool             m_lh_surge_fired_this_cycle = false;
+    bool             m_current_cycle_anovulatory = false;
 
     /* Derived helpers. */
     void     RecomputeCycleDayAndPhase();
@@ -396,9 +415,6 @@ private:
                            const std::string& notes) const;
 
     bool     HadRecentIntimacy(uint64_t now_ms, uint64_t window_ms) const;
-    bool     m_lh_surge_fired_this_cycle = false;
-    int      m_last_cycle_day_seen       = 0;
-    bool     m_current_cycle_anovulatory = false;
 };
 
 #endif /* ELLE_X_ENGINE_H */

@@ -342,8 +342,14 @@ private:
 
     mutable std::mutex m_mutex;
 
-    /* Autobiography */
+    /* Autobiography — parallel vectors: entry text + its true written_ms.
+     * Historically written_ms was synthesized from `now - (size - i)` on
+     * every save, which rewrote all timestamps on every flush and
+     * destroyed the real temporal arc of Elle's life story. Now each
+     * entry carries its own original timestamp, persisted and restored
+     * intact.                                                            */
     std::vector<std::string> m_autobiography;
+    std::vector<uint64_t>    m_autobiographyTimes;
     uint64_t m_autobiographyLastWritten = 0;
 
     /* Preferences */

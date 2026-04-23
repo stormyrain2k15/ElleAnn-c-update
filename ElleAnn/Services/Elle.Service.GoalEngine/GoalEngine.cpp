@@ -20,10 +20,35 @@ public:
         return true;
     }
 
-    /* Create a new goal */
+    /* Create a new goal. Dedupes against any ACTIVE goal with the same
+     * normalised (lowercased, trimmed) description so that repeated
+     * self-prompt proposals don't pile up identical rows — previously
+     * "learn about {topic}" could be issued every few minutes and would
+     * accumulate as many ACTIVE copies, all racing to write progress. */
     uint64_t CreateGoal(const std::string& description, ELLE_GOAL_PRIORITY priority,
                          ELLE_DRIVE_ID sourceDrive, const std::string& successCriteria = "",
                          uint64_t parentGoalId = 0) {
+        /* Normalise: lowercase + trim surrounding whitespace. */
+        auto norm = [](const std::string& s) {
+            size_t a = 0, b = s.size();
+            while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r')) a++;
+            while (b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\n' || s[b-1] == '\r')) b--;
+            std::string out; out.reserve(b - a);
+            for (size_t i = a; i < b; i++) out += (char)tolower((unsigned char)s[i]);
+            return out;
+        };
+        const std::string key = norm(description);
+        if (!key.empty()) {
+            for (const auto& g : m_goals) {
+                if (g.status != GOAL_ACTIVE) continue;
+                if (norm(g.description) == key) {
+                    ELLE_DEBUG("Goal dedupe: '%s' already active as [%llu]",
+                               description.c_str(), g.id);
+                    return g.id;
+                }
+            }
+        }
+
         ELLE_GOAL_RECORD goal = {};
         strncpy_s(goal.description, description.c_str(), ELLE_MAX_MSG - 1);
         goal.status = GOAL_ACTIVE;

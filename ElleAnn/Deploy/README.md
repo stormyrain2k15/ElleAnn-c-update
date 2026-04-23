@@ -14,8 +14,13 @@
    If your build output is elsewhere, edit `binary_root` in the JSON OR pass
    `-BinaryRoot "<abs path>"` to the PowerShell script.
 2. SQL Server is reachable at the connection string in
-   `elle_master_config.json` AND the delta in `SQL/ElleAnn_MemoryDelta.sql`
-   has been applied.
+   `elle_master_config.json` AND every delta in `SQL/` has been applied in order:
+     - `ElleAnn_Schema.sql`             (base tables)
+     - `ElleAnn_Identity_Schema.sql`    (identity/autobiography)
+     - `ElleAnn_XChromosome_Schema.sql` (cycle/hormones/pregnancy)
+     - `ElleAnn_MemoryDelta.sql`        (memory-tier columns)
+     - `ElleAnn_QueueReaperDelta.sql`   (IntentQueue.ProcessingMs column)
+   All deltas are idempotent (`IF NOT EXISTS`) so re-running is safe.
 3. ASM DLLs (Elle.ASM.Hardware.dll etc.) sit next to the .exe files OR on the
    system PATH — the Action service dynamically loads them via LoadLibrary.
 

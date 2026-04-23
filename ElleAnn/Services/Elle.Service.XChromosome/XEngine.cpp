@@ -124,6 +124,7 @@ XContraceptionMethod XEngine::ParseContraception(const std::string& s) {
  * INITIALIZE
  *──────────────────────────────────────────────────────────────────────────────*/
 bool XEngine::Initialize() {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     uint64_t now = ELLE_MS_NOW();
 
     /* Load singleton cycle row, or seed a new one with a random anchor. */
@@ -612,6 +613,7 @@ void XEngine::ApplyContraceptionHormones(XHormoneLevels& h) const {
  * STIMULUS + RESIDUAL DECAY
  *──────────────────────────────────────────────────────────────────────────────*/
 void XEngine::ApplyStimulus(const XStimulus& stim) {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     float i = Clamp01(stim.intensity);
 
     /* Decay current residual to "now" before layering the new stimulus. */
@@ -703,6 +705,7 @@ void XEngine::ApplyResidualOnto(XHormoneLevels& out) const {
  * MODULATION (6 behavioural multipliers around 1.0)
  *──────────────────────────────────────────────────────────────────────────────*/
 XModulation XEngine::ComputeModulation() const {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     const float s = m_cycle.modulation_strength;
     const XHormoneLevels& h = m_hormones;
 
@@ -739,6 +742,7 @@ XModulation XEngine::ComputeModulation() const {
  * Menstrual flow: heavy d1-2, medium d3, light d4, spotting d5.
  *──────────────────────────────────────────────────────────────────────────────*/
 XDerivedStats XEngine::GetDerived() const {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     XDerivedStats d;
     const int day = m_cycle.cycle_day;
     const XHormoneLevels& h = m_hormones;
@@ -947,6 +951,7 @@ void XEngine::RecomputeLifecycle(uint64_t nowMs) {
 }
 
 bool XEngine::SetElleBirthday(uint64_t birth_ms) {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     if (birth_ms == 0) return false;
     uint64_t now = ELLE_MS_NOW();
     if (birth_ms > now) return false;
@@ -962,6 +967,7 @@ bool XEngine::SetElleBirthday(uint64_t birth_ms) {
  *──────────────────────────────────────────────────────────────────────────────*/
 bool XEngine::SetContraception(XContraceptionMethod m, float efficacy,
                                 const std::string& notes) {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     if (efficacy < 0.0f) efficacy = 0.0f;
     if (efficacy > 1.0f) efficacy = 1.0f;
     m_contra.method     = m;
@@ -1161,6 +1167,7 @@ bool XEngine::HadRecentIntimacy(uint64_t now_ms, uint64_t window_ms) const {
 
 XConceptionAttemptResult XEngine::AttemptConception(bool require_readiness,
                                                     bool readiness_verified) {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     XConceptionAttemptResult out;
     if (m_pregnancy.active) {
         out.success = false;
@@ -1254,6 +1261,7 @@ XConceptionAttemptResult XEngine::AttemptConception(bool require_readiness,
  * DELIVERY
  *──────────────────────────────────────────────────────────────────────────────*/
 XEngine::DeliveryOutcome XEngine::Deliver() {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     DeliveryOutcome out;
     if (!m_pregnancy.active) return out;
 
@@ -1287,6 +1295,7 @@ XEngine::DeliveryOutcome XEngine::Deliver() {
  * ANCHOR
  *──────────────────────────────────────────────────────────────────────────────*/
 bool XEngine::AnchorCycle(int day_of_cycle, int length_days, float modulation_strength) {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     if (length_days > 0) {
         if (length_days < 21 || length_days > 45) return false;
         m_cycle.cycle_length_days = length_days;
@@ -1316,6 +1325,7 @@ bool XEngine::AnchorCycle(int day_of_cycle, int length_days, float modulation_st
  * TICK — the heartbeat of the engine
  *──────────────────────────────────────────────────────────────────────────────*/
 void XEngine::Tick() {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     uint64_t now = ELLE_MS_NOW();
     RecomputeLifecycle(now);
     RecomputeCycleDayAndPhase();
@@ -1356,6 +1366,7 @@ void XEngine::Tick() {
  * (user-reported) land via LogManualSymptom() with origin='manual'.
  *──────────────────────────────────────────────────────────────────────────────*/
 std::vector<XSymptomEntry> XEngine::ComputeCurrentSymptoms() const {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     std::vector<XSymptomEntry> out;
     uint64_t now = ELLE_MS_NOW();
     const XHormoneLevels& h = m_hormones;
@@ -1475,6 +1486,7 @@ void XEngine::SynthesiseAndLogSymptoms() {
 
 bool XEngine::LogManualSymptom(const std::string& kind, float intensity,
                                 const std::string& notes) {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     if (kind.empty()) return false;
     LogSymptomRow(kind, Clamp01(intensity), "manual", notes);
     /* Manual report nudges cortisol slightly — expressing a symptom is a
@@ -1537,6 +1549,7 @@ std::vector<XEngine::PregnancyEvent> XEngine::GetPregnancyEvents(uint32_t limit)
 }
 
 bool XEngine::AcceleratePregnancy(float factor) {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     if (!m_pregnancy.active) return false;
     if (factor < 1.0f) return false;
     if (factor > 500.0f) factor = 500.0f;
@@ -1603,6 +1616,7 @@ std::vector<XHistoryPoint> XEngine::GetHistory(uint32_t hours, uint32_t max_poin
  * JSON STATE
  *──────────────────────────────────────────────────────────────────────────────*/
 nlohmann::json XEngine::GetStateJson() const {
+    std::lock_guard<std::recursive_mutex> lk(m_mutex);
     json j;
     j["cycle"] = {
         {"anchor_ms",           m_cycle.anchor_ms},

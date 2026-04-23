@@ -206,12 +206,22 @@ void EmotionalEngine::Shutdown() {
     /* Persist the current emotional snapshot to SQL so when the service
      * restarts, Elle wakes up where she left off instead of at baseline.
      * The companion LoadLatestEmotionSnapshot() is called by DeriveDriveState
-     * and can be called from Initialize() if you want full restore-on-boot. */
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (ElleDB::PersistEmotionSnapshot(m_state)) {
+     * and can be called from Initialize() if you want full restore-on-boot.
+     *
+     * Lock discipline: copy the state under the mutex, then release it
+     * before invoking PersistEmotionSnapshot(). Holding m_mutex across
+     * a SQL write would stall any concurrent reader (GetState, snapshot
+     * broadcast) for the duration of the shutdown flush and can deadlock
+     * the service-shutdown sequence if the DB stalls.                   */
+    ELLE_EMOTION_STATE snap;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        snap = m_state;
+    }
+    if (ElleDB::PersistEmotionSnapshot(snap)) {
         ELLE_INFO("EmotionalEngine shutdown: state snapshot persisted "
-                  "(v=%.2f a=%.2f d=%.2f)", m_state.valence,
-                  m_state.arousal, m_state.dominance);
+                  "(v=%.2f a=%.2f d=%.2f)", snap.valence,
+                  snap.arousal, snap.dominance);
     } else {
         ELLE_WARN("EmotionalEngine shutdown: snapshot write failed — state lost");
     }
@@ -458,21 +468,24 @@ void EmotionalEngine::UpdateMood() {
 
     float threshold = ElleConfig::Instance().GetEmotion().mood_threshold;
     if (maxVal >= threshold) {
-        if (m_inMood && m_dominantMood == (ELLE_EMOTION_ID)maxIdx) {
-            m_moodTicks++;
+        bool wasInMood = m_inMood.load(std::memory_order_relaxed);
+        uint32_t prevDom = m_dominantMood.load(std::memory_order_relaxed);
+        if (wasInMood && prevDom == (uint32_t)maxIdx) {
+            m_moodTicks.fetch_add(1, std::memory_order_release);
         } else {
-            m_dominantMood = (ELLE_EMOTION_ID)maxIdx;
-            m_moodTicks = 1;
-            m_inMood = true;
+            m_dominantMood.store((uint32_t)maxIdx, std::memory_order_release);
+            m_moodTicks.store(1, std::memory_order_release);
+            m_inMood.store(true, std::memory_order_release);
             ELLE_INFO("Mood formed: %s (%.2f)", s_emotionNames[maxIdx], maxVal);
         }
     } else {
-        if (m_inMood) {
-            ELLE_INFO("Mood dissolved: %s (was %d ticks)", 
-                      s_emotionNames[m_dominantMood], m_moodTicks);
+        if (m_inMood.load(std::memory_order_relaxed)) {
+            ELLE_INFO("Mood dissolved: %s (was %u ticks)",
+                      s_emotionNames[m_dominantMood.load(std::memory_order_relaxed)],
+                      m_moodTicks.load(std::memory_order_relaxed));
         }
-        m_inMood = false;
-        m_moodTicks = 0;
+        m_inMood.store(false, std::memory_order_release);
+        m_moodTicks.store(0, std::memory_order_release);
     }
 }
 
@@ -525,7 +538,8 @@ std::string EmotionalEngine::GetEmotionalSummary() const {
     std::ostringstream ss;
     ss << "V:" << std::fixed << std::setprecision(2) << m_state.valence
        << " A:" << m_state.arousal << " D:" << m_state.dominance;
-    if (m_inMood) ss << " [MOOD:" << s_emotionNames[m_dominantMood] << "]";
+    if (m_inMood.load(std::memory_order_acquire))
+        ss << " [MOOD:" << s_emotionNames[m_dominantMood.load(std::memory_order_acquire)] << "]";
     ss << " Top:";
     for (auto& e : top) ss << " " << e.name << "(" << (int)(e.intensity * 100) << "%)";
     return ss.str();

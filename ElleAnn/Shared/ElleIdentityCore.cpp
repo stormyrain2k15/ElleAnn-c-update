@@ -190,11 +190,13 @@ std::string ElleIdentityCore::GetAutobiography() const {
 }
 
 void ElleIdentityCore::AppendToAutobiography(const std::string& entry) {
+    uint64_t writtenMs = ELLE_MS_NOW();
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         /* Local optimistic apply (fires in every process). */
         m_autobiography.push_back(entry);
-        m_autobiographyLastWritten = ELLE_MS_NOW();
+        m_autobiographyTimes.push_back(writtenMs);
+        m_autobiographyLastWritten = writtenMs;
     }
     ELLE_DEBUG("Autobiography entry: %.80s...", entry.c_str());
     if (m_isAuthoritative) {
@@ -862,8 +864,10 @@ void ElleIdentityCore::ApplyDelta(const std::string& jsonPayload) {
      * mutator (which would trigger another broadcast / mutate-request). */
     if (op == "autobio") {
         std::lock_guard<std::mutex> lock(m_mutex);
+        uint64_t writtenMs = ELLE_MS_NOW();
         m_autobiography.push_back(a.value("entry", std::string("")));
-        m_autobiographyLastWritten = ELLE_MS_NOW();
+        m_autobiographyTimes.push_back(writtenMs);
+        m_autobiographyLastWritten = writtenMs;
     } else if (op == "think") {
         std::lock_guard<std::mutex> lock(m_mutex);
         EllePrivateThought pt;
@@ -965,15 +969,26 @@ void ElleIdentityCore::LoadFromDatabase() {
     /* --- Autobiography (newest-last for chronological replay) --- */
     {
         auto rs = ElleSQLPool::Instance().Query(
-            "SELECT entry FROM ElleCore.dbo.identity_autobiography "
+            "SELECT entry, written_ms FROM ElleCore.dbo.identity_autobiography "
             "ORDER BY written_ms ASC;");
         if (rs.success) {
             m_autobiography.clear();
+            m_autobiographyTimes.clear();
             for (auto& r : rs.rows) {
-                if (!r.values.empty()) m_autobiography.push_back(r.values[0]);
+                if (r.values.empty()) continue;
+                m_autobiography.push_back(r.values[0]);
+                /* Column 1 is written_ms; if missing or unparseable we
+                 * fall back to a stable monotonic fill so ordering is
+                 * preserved even in the presence of historical rows
+                 * written before this column was populated.             */
+                uint64_t wms = (r.values.size() > 1) ? (uint64_t)r.GetInt(1) : 0;
+                if (wms == 0) wms = m_autobiographyTimes.empty()
+                                 ? 1
+                                 : m_autobiographyTimes.back() + 1;
+                m_autobiographyTimes.push_back(wms);
             }
-            if (!rs.rows.empty())
-                m_autobiographyLastWritten = (uint64_t)rs.rows.back().GetInt(0);
+            if (!m_autobiographyTimes.empty())
+                m_autobiographyLastWritten = m_autobiographyTimes.back();
         }
     }
 
@@ -1139,20 +1154,26 @@ void ElleIdentityCore::SaveToDatabase() {
 
     uint64_t nowMs = ELLE_MS_NOW();
 
-    /* --- Autobiography: append only new entries (greater than last written) --- */
-    for (size_t i = 0; i < m_autobiography.size(); i++) {
-        /* Cheap strategy: on each save, write entries whose prefix isn't in DB.
-         * Since autobiography is append-only in memory and we track last_written,
-         * the simpler path is: clear the file once and re-append. This preserves
-         * order and avoids a costly dedup scan per entry.                        */
-        (void)i;
-    }
-    /* Single transaction: wipe and re-insert. Small list (10s of entries), fine. */
+    /* --- Autobiography: wipe and re-insert, preserving each entry's real
+     * original written_ms. Previously we synthesised the timestamp as
+     * `now - (size - i)` on every save, which rewrote every entry's time
+     * each flush and destroyed the genuine temporal arc. Now we persist
+     * the true millisecond each entry was actually authored. If a
+     * parallel timestamp is missing (shouldn't happen — Append keeps them
+     * in lockstep — but defensive), we synthesise a monotonic fallback
+     * that is strictly BEFORE nowMs.                                       */
     ElleSQLPool::Instance().Exec("DELETE FROM ElleCore.dbo.identity_autobiography;");
     for (size_t i = 0; i < m_autobiography.size(); i++) {
+        uint64_t wms = (i < m_autobiographyTimes.size())
+                         ? m_autobiographyTimes[i]
+                         : 0;
+        if (wms == 0) {
+            /* defensive fill: one ms apart, ending at nowMs. */
+            wms = nowMs - (m_autobiography.size() - i);
+        }
         ElleSQLPool::Instance().QueryParams(
             "INSERT INTO ElleCore.dbo.identity_autobiography (entry, written_ms) VALUES (?, ?);",
-            { m_autobiography[i], std::to_string(nowMs - (m_autobiography.size() - i)) });
+            { m_autobiography[i], std::to_string((long long)wms) });
     }
 
     /* --- Preferences: upsert by (domain, subject) --- */
@@ -1430,8 +1451,10 @@ void ElleIdentityCore::RecordGrowth(const std::string& dimension, float delta,
         std::string entry = "I grew in " + dimension + " (" +
                             (delta > 0 ? "+" : "") +
                             std::to_string(delta).substr(0, 5) + "). " + cause;
+        uint64_t writtenMs = ELLE_MS_NOW();
         m_autobiography.push_back(entry);
-        m_autobiographyLastWritten = ELLE_MS_NOW();
+        m_autobiographyTimes.push_back(writtenMs);
+        m_autobiographyLastWritten = writtenMs;
     }
     ELLE_INFO("Growth recorded: %s %+.3f (%s)",
               dimension.c_str(), delta, cause.c_str());
@@ -1446,6 +1469,7 @@ void ElleIdentityCore::RecordGrowth(const std::string& dimension, float delta,
 void ElleIdentityCore::__TestOnlyResetInMemoryState() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_autobiography.clear();
+    m_autobiographyTimes.clear();
     m_autobiographyLastWritten = 0;
     m_preferences.clear();
     m_privateThoughts.clear();

@@ -4,92 +4,147 @@
 Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 **Tech**: Pure C++, MASM (Assembly DLLs), Lua (behavioral) — Windows Services.
 **No** Python / Node for backend. Android companion in Kotlin.
-**Architecture**: 14 Windows Services over IOCP Named Pipes, SQL Server backing.
+**Architecture**: 19 Windows Services over IOCP Named Pipes, SQL Server backing.
 **NO-STUB policy**: nothing mocked, no fake 200s, no hollow patterns.
 **Runs exclusively on user's local Windows PC** — no E2E in cloud.
 
 ## What Exists
-- 14 Windows Services implemented:
-  Heartbeat, Cognitive, Emotional, Memory, GoalEngine, Action, SelfPrompt,
-  WorldModel, Dream, Solitude, Bonding, InnerLife, Continuity, XChromosome,
-  QueueWorker, HTTP, Lua.Behavioral.
-- Shared core: ElleTypes, ElleSQLConn, ElleQueueIPC, ElleIdentityCore,
-  ElleConfig, ElleLLM, ElleJsonExtract.
+- **19 Windows Services**: Heartbeat, Cognitive, Emotional, Memory, GoalEngine,
+  Action, SelfPrompt, WorldModel, Dream, Solitude, Bonding, InnerLife,
+  Continuity, XChromosome, Family, Consent, QueueWorker, HTTP, Identity,
+  plus Lua.Behavioral.
+- Shared core: ElleTypes, ElleSQLConn (split-ready), ElleQueueIPC,
+  ElleIdentityCore, ElleConfig, ElleLLM, ElleJsonExtract, ElleSelfSurprise.
+- MASM DLLs for Crypto, FileIO, Math, System, Utils.
 - Android Kotlin companion under `ElleAnn_PythonRef/extracted/.../elle-android`.
-- SQL deltas under `SQL/`.
-- Subjective Lua layer for user's wife (`x_subjective.lua` + `FOR_MY_WIFE.md`).
+- SQL deltas under `SQL/` — incl. the new `ElleAnn_QueueReaperDelta.sql`.
+- Subjective Lua layer (`x_subjective.lua` + `FOR_MY_WIFE.md`).
 
-## Completed (this session)
-- **Wave 1 audit**: IPC memory safety, TOCTOU intent claim (atomic
-  `OUTPUT inserted.*`), TimeoutReaper for stuck queues, `/api/diag/queues`
-  endpoint with Kotlin models, Subjective Lua layer wiring.
-- **Wave 2 audit — ALL 22 items** (see `ElleAnn/AUDIT_WAVE2_COMPLETION.md`).
-  Including: every Cognitive route now speaks the target's native opcode;
-  SelfPrompt / Bonding / InnerLife proactive paths rewired to real
-  listeners; relationship + inner-life context persisted to SQL and
-  consumed by Cognitive's chat prompt; dead helpers purged; fragile
-  JSON slicing replaced with brace-balanced extractor; detached-thread
-  shutdown fences in HTTP and Cognitive; Lua `get_emotion` / `get_trust`
-  wired to real SQL; WorldModel hydrates on boot via new
-  `ElleDB::GetAllEntities`; Goal IDs DB-authoritative; GoalEngine credits
-  autonomous progress when source-drive is satisfied; XChromosome
-  conception attempts persisted to `x_conception_attempts` table;
-  Continuity JSON context escapes `awayDesc`; cross-process
-  `ElleIdentityCore::RefreshFromDatabase()` wired into every reader
-  service's tick.
-- **Wave 3/4 audits**: Cognitive intent routing overhaul; owned worker
-  thread pools in HTTP/Cognitive (no more detached threads);
-  Visual Studio project tree (26 `.vcxproj` + `ElleAnn.sln`) + GitHub
-  Actions CI; `Consent` service + `Deploy.ps1`; `Family` service that
-  snapshots the core, strips personality, gestates, and spawns child
-  ESI processes via `CreateProcessW` into their own DBs; push-based
-  `ElleIdentityCore` (IPC delta fabric replacing DB polling); LLM
-  HTTPS/LM-Studio TLS toggle, strict-typed config, emotion-trigger
-  idempotent reload, child Lua path fix, `primary_provider` as
-  `std::string`, `creative_temp_boost` / `reasoning_temp_drop` wired
-  through `Chat()`.
-- **Wave 4 closure (Feb 2026)**:
-  1. `self_reflection_enabled` field mismatch fixed — SelfPrompt.cpp and
-     Solitude.cpp now read the real header field `self_reflection`.
-  2. LLM temperature knobs made mathematically live — added
-     `ILLMProvider::GetBaselineTemperature()`, Chat() now starts from a
-     real provider-configured baseline (falls back to 0.7), applies the
-     creative/reasoning delta, and clamps into [0, 2].
-  3. `.env.example` templates unblocked — root `.gitignore` was
-     swallowing them via `.env.*`; added `!.env.example` /
-     `!**/.env.example` override so the frontend and backend templates
-     are actually committed.
+## Completed (this session — Feb 2026)
+
+### P0 — Security / Data Integrity (DONE, previous session)
+- CNG bcrypt SHA-256 IdentityGuard, atomic OUTPUT.inserted.id for StoreMemory,
+  route-level auth metadata, strict parse-or-400 on all HTTP numerics,
+  Consent/GoalEngine status transition persistence, no silent user_id=1.
+
+### P1 — Threading / Shutdown / Lifecycle (DONE this session)
+- `MemoryEngine::Shutdown/ConsolidateMemories/StoreSTM/DecaySTM` now snapshot
+  under `m_stmMutex`, release the lock, THEN do SQL writes — no more
+  DB stalls holding readers.
+- `EmotionalEngine::Shutdown` copies the snapshot then writes outside the lock.
+- `EmotionalEngine` mood getters (`IsInMood/GetDominantMood/GetMoodDuration`)
+  backed by `std::atomic` so concurrent reads are data-race free.
+- `XEngine` public getters + mutators now serialise through a
+  `std::recursive_mutex` — previously returned complete structs with no
+  lock, allowing torn reads during `Tick()`.
+- `XEngine` duplicate member declarations (`m_last_cycle_day_seen`,
+  `m_lh_surge_fired_this_cycle`, `m_current_cycle_anovulatory`) removed —
+  was a compile error waiting on Level4 strictness.
+
+### P1 — Database Correctness / State / Persistence (DONE this session)
+- `identity_autobiography.written_ms` now carries the REAL timestamp each
+  entry was authored. New parallel vector `m_autobiographyTimes` tracks it;
+  Save/Load round-trips intact instead of clock-smashing on every flush.
+- `MemoryEngine::RecallRecent` now merges STM tail + newest LTM rows (new
+  `ElleDB::RecallRecentLTM`), sorted by `created_ms DESC`. Was STM-only.
+- Memory decay anchor changed from `created_ms` → `last_access_ms`, so
+  accessed memories genuinely stay fresh instead of decaying past the
+  floor no matter how often Elle recalls them.
+- `IntentQueue.ProcessingMs` column added (new `ElleAnn_QueueReaperDelta.sql`);
+  `GetPendingIntents` stamps it on atomic claim; `ReapStaleIntents` and
+  `/api/diag/queues` measure timeout from `ISNULL(ProcessingMs, CreatedMs)`.
+- `StoreEntity/GetEntity` use a shared `CanonicaliseEntityName()`
+  (lowercase + trim + collapse internal whitespace), so "  Mom  " and
+  "mom" no longer create two rows.
+- `GoalEngine::CreateGoal` dedupes against any active goal with the same
+  normalised description — kills the "same goal proposed every minute"
+  accumulation.
+- `Bonding::LoadRelationshipState` now loads `unresolved_tension`,
+  `tension_source`, `repair_motivation`, `conflicts_resolved`,
+  `first_repair_ms` (added as idempotent `ALTER TABLE`), so restarting
+  mid-conflict no longer erases the tension.
+
+### P1 — Parsers / Config / LLM / JSON (partial this session)
+- `ElleConfig::Load` validates that `llm`, `emotion`, `memory`, `http`,
+  `services` are all present as Object, `llm.mode ∈ {api,local,hybrid}`,
+  and `llm.providers` is a non-empty object — otherwise fail-closed.
+- `ElleSelfSurprise` score parsing replaced the "any digit 6-9 in the
+  prose" heuristic with strict JSON extraction (`ExtractJsonObject`) plus
+  a narrowed digit-scan fallback that requires score context.
+
+### P1 — Deploy / Install / Ops (DONE this session)
+- `Install-ElleServices.ps1` is now STRICT: missing .exe fails the whole
+  install (unless `-SkipMissing`); every `sc.exe` exit code is checked;
+  services are polled for `RUNNING` via `Wait-ServiceState` (no more
+  fixed `Start-Sleep` races).
+- `Uninstall-ElleServices.ps1` equally strict — `Wait-ServiceStopped` and
+  `Wait-ServiceGone` with timeouts; bubbles up all failures at the end.
+- `Deploy/README.md` lists every SQL delta in the correct apply order.
+
+### P1 — Build / CI (DONE this session)
+- `Directory.Build.props` now at `Level4` + `TreatWarningAsError=true`.
+  Narrow suppression list (4100, 4201, 4251, 4505, 4702). The previously-
+  silenced real-bug warnings (4996, 4267, 4244, 4018, 4146, 4065) are
+  deliberately NO longer suppressed — the next build surfaces them.
+
+### P2/P3 — Hygiene (partial this session)
+- `static_assert`s added: `ELLE_SERVICE_COUNT == 20`,
+  `ELLE_EMOTION_COUNT == ELLE_MAX_EMOTIONS`, and `sizeof(ELLE_IPC_HEADER) == 48`.
+- HTTP `/`, `/healthz`, `/api/health` now explicitly `AUTH_PUBLIC` (was
+  defaulting to `AUTH_USER`).
 
 ## P0 / P1 / P2 Backlog
+
 ### P0 — Blocked on User
-- [ ] User compiles the C++ stack locally and confirms build + runtime behavior.
+- [ ] User runs local MSBuild with the new Level4 + WAE settings —
+      expect a batch of genuine warnings (truncation, signed/unsigned,
+      deprecated API) to surface; those were the loudest category of
+      real bugs masked by the previous suppression list.
+- [ ] User applies `SQL/ElleAnn_QueueReaperDelta.sql` to the ElleCore DB
+      before running the new `GetPendingIntents` / `ReapStaleIntents`.
 
 ### P1 — Next Iteration
-- [ ] Android `XChromosomeScreen.kt` UI — visualize cycle phase, hormones,
-      symptoms, pregnancy state (currently blocked on C++ audit, now unblocked).
-- [ ] `SVC_FAMILY` engine — read from `x_conception_attempts` backlog and
-      create canonical child rows. Currently a reserved slot.
+- [ ] Continuity reconnection idempotency (duplicate "welcome back" on
+      rapid reconnect).
+- [ ] XEngine historical-pregnancy separation — keep past pregnancies
+      queryable without bleeding into the active row.
+- [ ] DB poll failure handling in service loops — some services ignore
+      transient SQL errors instead of backing off.
+- [ ] LLM provider schemas — validate provider-response shape before
+      consuming `choices[0].message.content`.
+- [ ] LLM HTTP status codes — treat non-2xx as a real failure (currently
+      swallows 5xx bodies).
+- [ ] Trailing-garbage rejection in nlohmann::json reads of untrusted
+      payloads (strict `accept_discarded=false`).
+- [ ] `ElleJsonExtract` already handles surrogate pairs? verify.
 
 ### P2 — Future
+- [ ] Split `ElleDB` (the giant `ElleSQLConn.cpp` namespace) by domain —
+      memory/, queues/, world/, identity/, etc. 2600 LOC monolith.
 - [ ] Stronger identity fabric: single-writer Identity service + event
-      stream to replace the DB-polling `RefreshFromDatabase` eventual
-      consistency model.
-- [ ] Embedding-based novelty detector in `ElleIdentityCore::EvaluateNovelty`
-      (currently substring-match against preferences).
-- [ ] IntentParser still lives in Cognitive but is only used by the
-      autonomous `INTENT_SELF_REFLECT` path — consider hosting it inside
-      SelfPrompt or killing it if QueueWorker's classifier subsumes it.
+      stream replacing the DB-polling `RefreshFromDatabase` model.
+- [ ] Embedding-based novelty detector in `EvaluateNovelty` (currently
+      substring match).
+- [ ] Isolate destructive tests — they currently share the live DB.
+- [ ] Frontend accessibility alt-texts.
+
+### P3 — Future Polish
+- [ ] Android `XChromosomeScreen.kt` UI (cycle/hormone/pregnancy viz).
+- [ ] `SVC_FAMILY` engine: consume `x_conception_attempts` → canonical
+      child rows.
+- [ ] Reduce subprocess logging leakage on child-process launch paths.
 
 ## Environment Notes (for next agent)
 - **No cloud E2E**. Code only runs on user's Windows PC.
-- Use **bash + python regex** for syntax sanity, NOT curl/screenshot/testing agent.
+- Use **bash + python proper brace/string stripping** for syntax sanity,
+  NOT curl/screenshot/testing agent.
 - The user does deep static audits — treat their bug reports as authoritative.
-- HTTP has a pre-existing brace imbalance in a raw-string regex that my
-  stripping pass can't parse; real C++ compiler accepts it.
 - `/app/memory/test_credentials.md` — N/A (no cloud auth).
 
 ## Reference Documents
 - `/app/ElleAnn/AUDIT_FIX_REPORT.md` (Wave 1)
 - `/app/ElleAnn/AUDIT_FIX_REPORT_APR22.md`
-- `/app/ElleAnn/AUDIT_WAVE2_COMPLETION.md` (this session)
+- `/app/ElleAnn/AUDIT_WAVE2_COMPLETION.md`
 - `/app/ElleAnn/Lua/Elle.Lua.Behavioral/scripts/FOR_MY_WIFE.md`
+- `/app/ElleAnn/Deploy/README.md`
+- `/app/ElleAnn/SQL/ElleAnn_QueueReaperDelta.sql` (new this session)

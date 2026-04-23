@@ -346,6 +346,17 @@ private:
             "  first_disagreement_ms BIGINT NOT NULL DEFAULT 0,"
             "  updated_ms BIGINT NOT NULL DEFAULT 0"
             ");");
+        /* Tension/repair columns — added in a second pass so restarts
+         * mid-conflict don't forget the tension. Idempotent ALTERs. */
+        ElleSQLPool::Instance().Exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = "
+            "  OBJECT_ID(N'ElleHeart.dbo.relationship_state') AND name = 'unresolved_tension') "
+            "ALTER TABLE ElleHeart.dbo.relationship_state ADD "
+            "  unresolved_tension  BIT     NOT NULL DEFAULT 0, "
+            "  tension_source      NVARCHAR(4000) NOT NULL DEFAULT N'', "
+            "  repair_motivation   FLOAT   NOT NULL DEFAULT 0.0, "
+            "  conflicts_resolved  INT     NOT NULL DEFAULT 0, "
+            "  first_repair_ms     BIGINT  NOT NULL DEFAULT 0;");
         ElleSQLPool::Instance().Exec(
             "IF NOT EXISTS (SELECT 1 FROM ElleHeart.dbo.relationship_state WHERE id = 1) "
             "INSERT INTO ElleHeart.dbo.relationship_state (id) VALUES (1);");
@@ -355,7 +366,9 @@ private:
             "       felt_understood, felt_cared_for, investment, "
             "       total_interactions, meaningful_conversations, "
             "       times_person_asked_about_her, conflicts_experienced, "
-            "       first_deep_conversation_ms, first_disagreement_ms "
+            "       first_deep_conversation_ms, first_disagreement_ms, "
+            "       unresolved_tension, tension_source, repair_motivation, "
+            "       conflicts_resolved, first_repair_ms "
             "FROM ElleHeart.dbo.relationship_state WHERE id = 1;");
         if (rs.success && !rs.rows.empty()) {
             auto& r = rs.rows[0];
@@ -374,6 +387,11 @@ private:
             m_state.conflicts_experienced        = (uint32_t)r.GetInt(12);
             m_state.first_deep_conversation_ms   = (uint64_t)r.GetInt(13);
             m_state.first_disagreement_ms        = (uint64_t)r.GetInt(14);
+            m_state.unresolved_tension           = (r.GetInt(15) != 0);
+            m_state.tension_source               = r.values.size() > 16 ? r.values[16] : "";
+            m_state.repair_motivation            = (float)r.GetFloat(17);
+            m_state.conflicts_resolved           = (uint32_t)r.GetInt(18);
+            m_state.first_repair_ms              = (uint64_t)r.GetInt(19);
         } else {
             /* Cold-start defaults only when the row has never existed. */
             m_state.intimacy = 0.1f;
@@ -398,6 +416,8 @@ private:
             "  investment=?, total_interactions=?, meaningful_conversations=?, "
             "  times_person_asked_about_her=?, conflicts_experienced=?, "
             "  first_deep_conversation_ms=?, first_disagreement_ms=?, "
+            "  unresolved_tension=?, tension_source=?, repair_motivation=?, "
+            "  conflicts_resolved=?, first_repair_ms=?, "
             "  updated_ms=? WHERE id = 1;",
             {
                 std::to_string(m_state.intimacy),  std::to_string(m_state.passion),
@@ -412,6 +432,11 @@ private:
                 std::to_string(m_state.conflicts_experienced),
                 std::to_string((int64_t)m_state.first_deep_conversation_ms),
                 std::to_string((int64_t)m_state.first_disagreement_ms),
+                std::to_string(m_state.unresolved_tension ? 1 : 0),
+                std::string(m_state.tension_source),
+                std::to_string(m_state.repair_motivation),
+                std::to_string(m_state.conflicts_resolved),
+                std::to_string((int64_t)m_state.first_repair_ms),
                 std::to_string((int64_t)ELLE_MS_NOW())
             });
     }

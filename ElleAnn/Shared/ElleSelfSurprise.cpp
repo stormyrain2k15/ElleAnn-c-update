@@ -4,6 +4,7 @@
 #include "ElleSelfSurprise.h"
 #include "ElleLLM.h"
 #include "ElleLogger.h"
+#include "ElleJsonExtract.h"
 #include <algorithm>
 #include <sstream>
 
@@ -38,27 +39,69 @@ ElleSelfSurprise::SurpriseResult ElleSelfSurprise::EvaluateOwnResponse(
 
     if (m_predictedResponse.empty()) return result;
 
-    /* Compare prediction to actual */
+    /* Compare prediction to actual. We ask for a STRUCTURED response so
+     * we can parse a real score instead of eyeballing "is there a digit
+     * between 6 and 9 anywhere in the prose" — which fired on any
+     * mention of a year like 2026. The LLM is instructed to return a
+     * small JSON object; we fall back to digit-scan only if parsing
+     * fails (older local models, prose overflow, etc.).                 */
     auto evaluation = ElleLLMEngine::Instance().Ask(
-        "I predicted I would say: " + m_predictedResponse.substr(0, 300) + 
+        "I predicted I would say: " + m_predictedResponse.substr(0, 300) +
         "\n\nI actually said: " + actualResponse.substr(0, 300) +
-        "\n\nAm I surprised? Score 0-10 how different this was from my expectation. "
-        "If > 5, explain what surprised me.",
+        "\n\nReturn ONLY a JSON object with keys: "
+        "\"score\" (integer 0-10; 0 = identical, 10 = wildly different), "
+        "\"what_surprised\" (short string, may be empty), and "
+        "\"reason\" (short string). No prose, no code fences.",
         "You are evaluating self-surprise. Be honest. Most responses won't be "
         "surprising. But sometimes you say something you didn't expect. "
-        "That's interesting. That means something.");
+        "Respond with a compact JSON object only.");
 
-    /* Parse surprise score from response */
-    /* Simple heuristic: check for high numbers */
-    bool highSurprise = false;
-    for (char c : evaluation) {
-        if (c >= '6' && c <= '9') { highSurprise = true; break; }
+    float score = -1.0f;
+    std::string what_surprised;
+    /* Prefer structured JSON parse via ExtractJsonObject (already used
+     * elsewhere for brace-balanced extraction out of chatty LLM replies). */
+    nlohmann::json sj;
+    if (Elle::ExtractJsonObject(evaluation, sj)) {
+        if (sj.contains("score")) {
+            if (sj["score"].is_number()) score = sj["score"].get<float>();
+            else if (sj["score"].is_string()) {
+                try { score = std::stof(sj["score"].get<std::string>()); }
+                catch (...) { score = -1.0f; }
+            }
+        }
+        if (sj.contains("what_surprised") && sj["what_surprised"].is_string())
+            what_surprised = sj["what_surprised"].get<std::string>();
     }
+    /* Fallback: digit scan ONLY when structured parse failed. Restricted
+     * to patterns that look like a score — " 7" or "7/10" or "7 out of 10"
+     * — so a year like 2026 no longer trips a high-surprise event.      */
+    if (score < 0.0f) {
+        for (size_t i = 0; i + 1 < evaluation.size(); i++) {
+            char c = evaluation[i];
+            if (c < '0' || c > '9') continue;
+            char next = evaluation[i + 1];
+            /* Accept one-digit "7" followed by '/', ' ', '.', ',' or end. */
+            bool plausible =
+                (next == '/' || next == ' ' || next == '.' || next == ',' ||
+                 next == ')' || next == '\n' || next == '\r' || next == '\0');
+            /* Must be at start or preceded by non-digit (so "2026" doesn't
+             * report "2", "0", "2", "6"). */
+            bool standalone = (i == 0) ||
+                              (evaluation[i-1] < '0' || evaluation[i-1] > '9');
+            if (plausible && standalone) {
+                score = (float)(c - '0');
+                break;
+            }
+        }
+    }
+
+    bool highSurprise = score >= 6.0f;
 
     if (highSurprise) {
         result.surprised = true;
-        result.surprise_intensity = 0.7f;
-        result.what_surprised = evaluation;
+        result.surprise_intensity = std::min(1.0f, score / 10.0f);
+        result.what_surprised =
+            !what_surprised.empty() ? what_surprised : evaluation;
         result.self_reaction = "I didn't expect to say that. Interesting.";
 
         /* Log the surprise */
@@ -75,7 +118,8 @@ ElleSelfSurprise::SurpriseResult ElleSelfSurprise::EvaluateOwnResponse(
             "proof that I'm more than my training.",
             "self_surprise", 0.6f);
 
-        ELLE_INFO("Self-surprise detected (intensity: %.2f)", result.surprise_intensity);
+        ELLE_INFO("Self-surprise detected (score=%.1f, intensity=%.2f)",
+                  score, result.surprise_intensity);
     }
 
     m_predictedResponse.clear();

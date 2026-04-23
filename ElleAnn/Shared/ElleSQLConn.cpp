@@ -610,7 +610,7 @@ bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) 
      * hardware_actions in /api/ai/hardware/actions/pending.            */
     auto rs = ElleSQLPool::Instance().QueryParams(
         "UPDATE TOP (?) q WITH (ROWLOCK, READPAST) "
-        "SET Status = ? "
+        "SET Status = ?, ProcessingMs = ? "
         "OUTPUT inserted.IntentId, inserted.IntentType, inserted.Status, "
         "       inserted.SourceDrive, inserted.Urgency, inserted.Confidence, "
         "       inserted.Description, inserted.Parameters, "
@@ -619,6 +619,7 @@ bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) 
         "WHERE q.Status = ?;",
         { std::to_string(maxCount),
           std::to_string((int)INTENT_PROCESSING),
+          std::to_string((long long)ELLE_MS_NOW()),
           std::to_string((int)INTENT_PENDING) });
     if (!rs.success) return false;
     for (auto& row : rs.rows) {
@@ -667,14 +668,18 @@ uint32_t ReapStaleIntents(uint32_t defaultTimeoutMs, uint32_t maxRetries) {
     int64_t now = (int64_t)ELLE_MS_NOW();
     auto& pool = ElleSQLPool::Instance();
 
-    /* Step 1 — push rows past max_retries straight to FAILED so we
-     * don't churn them forever. */
+    /* Stale means: the row was flipped to PROCESSING (ProcessingMs stamped
+     * by GetPendingIntents) more than TimeoutMs ago and the consumer
+     * never closed the loop. If ProcessingMs is NULL (legacy rows
+     * written before the delta), fall back to CreatedMs so at least
+     * eventually they get handled — but new code always stamps it.   */
     auto rs1 = pool.QueryParams(
         "UPDATE ElleCore.dbo.IntentQueue WITH (ROWLOCK) "
         "SET Status = ?, CompletedMs = ?, Response = N'timeout_max_retries' "
         "WHERE Status = ? "
         "  AND RetryCount >= ? "
-        "  AND ? - CreatedMs > CASE WHEN TimeoutMs > 0 THEN TimeoutMs ELSE ? END;",
+        "  AND ? - ISNULL(ProcessingMs, CreatedMs) > "
+        "      CASE WHEN TimeoutMs > 0 THEN TimeoutMs ELSE ? END;",
         {
             std::to_string((int)INTENT_FAILED),
             std::to_string(now),
@@ -685,13 +690,15 @@ uint32_t ReapStaleIntents(uint32_t defaultTimeoutMs, uint32_t maxRetries) {
         });
     uint32_t failed = rs1.success ? (uint32_t)rs1.rows_affected : 0;
 
-    /* Step 2 — requeue everyone else back to PENDING and bump RetryCount. */
+    /* Step 2 — requeue everyone else back to PENDING, clear ProcessingMs
+     * (next claim will re-stamp it), and bump RetryCount. */
     auto rs2 = pool.QueryParams(
         "UPDATE ElleCore.dbo.IntentQueue WITH (ROWLOCK) "
-        "SET Status = ?, RetryCount = RetryCount + 1 "
+        "SET Status = ?, RetryCount = RetryCount + 1, ProcessingMs = NULL "
         "WHERE Status = ? "
         "  AND RetryCount < ? "
-        "  AND ? - CreatedMs > CASE WHEN TimeoutMs > 0 THEN TimeoutMs ELSE ? END;",
+        "  AND ? - ISNULL(ProcessingMs, CreatedMs) > "
+        "      CASE WHEN TimeoutMs > 0 THEN TimeoutMs ELSE ? END;",
         {
             std::to_string((int)INTENT_PENDING),
             std::to_string((int)INTENT_PROCESSING),
@@ -787,7 +794,7 @@ bool GetQueueSnapshot(QueueSnapshot& out) {
         "  SUM(CASE WHEN Status = ? THEN 1 ELSE 0 END) AS processing, "
         "  SUM(CASE WHEN Status = ? AND CompletedMs >= ? THEN 1 ELSE 0 END) AS done_1h, "
         "  SUM(CASE WHEN Status = ? AND CompletedMs >= ? THEN 1 ELSE 0 END) AS fail_1h, "
-        "  SUM(CASE WHEN Status = ? AND ? - CreatedMs > "
+        "  SUM(CASE WHEN Status = ? AND ? - ISNULL(ProcessingMs, CreatedMs) > "
         "           CASE WHEN TimeoutMs > 0 THEN TimeoutMs ELSE 120000 END "
         "        THEN 1 ELSE 0 END) AS stale "
         "FROM ElleCore.dbo.IntentQueue;",
@@ -1202,13 +1209,67 @@ bool UpdateMemoryAccess(uint64_t memId) {
         { std::to_string(ELLE_MS_NOW()), std::to_string(memId) }).success;
 }
 
+bool RecallRecentLTM(std::vector<ELLE_MEMORY_RECORD>& out, uint32_t maxCount) {
+    if (maxCount == 0) maxCount = 10;
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP (?) m.id, m.memory_type, m.tier, m.content, m.summary, "
+        "       m.emotional_valence, m.importance, m.relevance, "
+        "       m.position_x, m.position_y, m.position_z, "
+        "       m.access_count, m.created_ms, m.last_access_ms "
+        "FROM ElleCore.dbo.memory m "
+        "ORDER BY m.created_ms DESC;",
+        { std::to_string(maxCount) });
+    if (!rs.success) return false;
+
+    for (auto& row : rs.rows) {
+        ELLE_MEMORY_RECORD rec = {};
+        rec.id                = (uint64_t)row.GetInt(0);
+        rec.type              = (uint32_t)row.GetInt(1);
+        rec.tier              = (uint32_t)row.GetInt(2);
+        strncpy_s(rec.content, row.values.size() > 3 ? row.values[3].c_str() : "",
+                  ELLE_MAX_MSG - 1);
+        strncpy_s(rec.summary, row.values.size() > 4 ? row.values[4].c_str() : "",
+                  sizeof(rec.summary) - 1);
+        rec.emotional_valence = (float)row.GetFloat(5);
+        rec.importance        = (float)row.GetFloat(6);
+        rec.relevance         = (float)row.GetFloat(7);
+        rec.position_x        = (float)row.GetFloat(8);
+        rec.position_y        = (float)row.GetFloat(9);
+        rec.position_z        = (float)row.GetFloat(10);
+        rec.access_count      = (uint32_t)row.GetInt(11);
+        rec.created_ms        = (uint64_t)row.GetInt(12);
+        rec.last_access_ms    = (uint64_t)row.GetInt(13);
+        out.push_back(rec);
+    }
+    return true;
+}
+
+/* Shared canonicaliser for world_entity.name — lowercase + trim + collapse
+ * internal whitespace. Keeps read and write paths aligned so a lookup
+ * by "  Mom " finds the same row that "mom" created.                    */
+static std::string CanonicaliseEntityName(const std::string& in) {
+    std::string out; out.reserve(in.size());
+    bool inSpace = false, started = false;
+    for (unsigned char c : in) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (started) inSpace = true;
+            continue;
+        }
+        if (inSpace) { out += ' '; inSpace = false; }
+        out += (char)std::tolower(c);
+        started = true;
+    }
+    return out;
+}
+
 bool GetEntity(const std::string& name, ELLE_WORLD_ENTITY& out) {
+    std::string key = CanonicaliseEntityName(name);
     auto rs = ElleSQLPool::Instance().QueryParams(
         "SELECT TOP 1 id, name, entity_type, description, familiarity, sentiment, "
         "             trust, interaction_count, last_interaction_ms, mental_model "
         "FROM ElleCore.dbo.world_entity "
-        "WHERE name = LOWER(?);",
-        { name });
+        "WHERE name = ?;",
+        { key });
     if (!rs.success || rs.rows.empty()) return false;
     auto& row = rs.rows[0];
     out.id = (uint64_t)row.GetInt(0);
@@ -1262,10 +1323,11 @@ bool GetAllEntities(std::vector<ELLE_WORLD_ENTITY>& out) {
 }
 
 bool StoreEntity(const ELLE_WORLD_ENTITY& entity) {
-    /* Upsert by name (lowercased). */
-    std::string lowered = entity.name;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                   [](unsigned char c){ return (char)std::tolower(c); });
+    /* Canonical key: see CanonicaliseEntityName() above. Previously we
+     * only lowered the name, so "  Mom  " and "mom" would create two
+     * rows despite being the same entity.                                */
+    std::string lowered = CanonicaliseEntityName(entity.name);
+    if (lowered.empty()) return false;
     return ElleSQLPool::Instance().QueryParams(
         "MERGE ElleCore.dbo.world_entity AS t "
         "USING (SELECT ? AS name) AS s "

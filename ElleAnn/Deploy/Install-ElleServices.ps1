@@ -8,6 +8,13 @@
         sc.exe description <Name> "<desc>"
     Then starts them in manifest order (dependency-respecting).
 
+    This installer is STRICT: a missing executable, a non-zero `sc.exe`
+    exit code, or a service that fails to reach RUNNING within
+    `-StartTimeoutSec` will abort the whole install and emit a clear
+    error. Previously the install would happily print a warning and
+    continue — deploys shipped to production with broken services
+    until an operator noticed at runtime.
+
     Must be run elevated. The companion Install.bat elevates automatically.
 
 .PARAMETER ManifestPath
@@ -17,16 +24,26 @@
     Absolute path containing the built .exe files. If omitted, the manifest's
     "binary_root" field is resolved relative to ManifestPath.
 
+.PARAMETER SkipMissing
+    When set, missing executables are tolerated (warning only). OFF by
+    default — deploys should fail-closed.
+
+.PARAMETER StartTimeoutSec
+    How long to wait for each service to transition from START_PENDING
+    to RUNNING before declaring failure. Default 30.
+
 .EXAMPLE
     .\Install-ElleServices.ps1
     .\Install-ElleServices.ps1 -BinaryRoot "C:\ElleAnn\bin"
 #>
 param(
-    [string] $ManifestPath = (Join-Path $PSScriptRoot 'elle_service_manifest.json'),
-    [string] $BinaryRoot   = '',
+    [string] $ManifestPath     = (Join-Path $PSScriptRoot 'elle_service_manifest.json'),
+    [string] $BinaryRoot       = '',
     [switch] $NoStart,
     [switch] $WhatIf,
-    [switch] $Force
+    [switch] $Force,
+    [switch] $SkipMissing,
+    [int]    $StartTimeoutSec  = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,27 +68,65 @@ if (-not $BinaryRoot) {
 $BinaryRoot = (Resolve-Path -LiteralPath $BinaryRoot).Path
 Write-Host "Using binary root: $BinaryRoot" -ForegroundColor Cyan
 
+# --- sc.exe helper: runs a command, returns exit code, fails on non-zero -
+function Invoke-Sc {
+    param(
+        [Parameter(Mandatory)] [string[]] $Arguments,
+        [switch] $TolerateNonZero
+    )
+    if ($WhatIf) {
+        Write-Host "WhatIf: sc.exe $($Arguments -join ' ')"
+        return 0
+    }
+    $null = & sc.exe @Arguments 2>&1
+    $code = $LASTEXITCODE
+    if ($code -ne 0 -and -not $TolerateNonZero) {
+        throw "sc.exe $($Arguments -join ' ') failed with exit code $code"
+    }
+    return $code
+}
+
+# --- SCM state poll: block until a service reaches a terminal state ------
+function Wait-ServiceState {
+    param(
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [string] $DesiredState,     # RUNNING | STOPPED
+        [int] $TimeoutSec = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $raw = (& sc.exe query $Name) -join "`n"
+        if ($raw -match "STATE\s*:\s*\d+\s+$DesiredState") { return $true }
+        if ($DesiredState -eq 'RUNNING' -and $raw -match 'STATE\s*:\s*1\s+STOPPED') {
+            throw "[$Name] entered STOPPED while waiting for RUNNING (service crashed on start)."
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
 # --- register each service -----------------------------------------------
+$missing = @()
 foreach ($svc in $manifest.services) {
     $exePath = Join-Path $BinaryRoot $svc.exe
     if (-not (Test-Path -LiteralPath $exePath)) {
-        Write-Warning "Missing exe for $($svc.name): $exePath (skipped)"
+        if ($SkipMissing) {
+            Write-Warning "Missing exe for $($svc.name): $exePath (skipped by -SkipMissing)"
+            continue
+        }
+        $missing += "$($svc.name) -> $exePath"
         continue
     }
 
     $existing = (sc.exe query $svc.name 2>&1) | Out-String
     if ($existing -notmatch 'FAILED|does not exist') {
         if ($Force) {
-            Write-Host "[$($svc.name)] -Force: reconfiguring binPath → $exePath" -ForegroundColor Yellow
-            if (-not $WhatIf) {
-                # Stop before reconfiguring so the EXE lock is released.
-                if ($existing -match 'RUNNING') {
-                    & sc.exe stop $svc.name | Out-Null
-                    Start-Sleep -Milliseconds 800
-                }
-                $configBin = 'binPath= "' + $exePath + '"'
-                & sc.exe config $svc.name $configBin | Out-Null
+            Write-Host "[$($svc.name)] -Force: reconfiguring binPath -> $exePath" -ForegroundColor Yellow
+            if ($existing -match 'RUNNING') {
+                [void](Invoke-Sc -Arguments @('stop', $svc.name) -TolerateNonZero)
+                if (-not $WhatIf) { [void](Wait-ServiceState -Name $svc.name -DesiredState 'STOPPED' -TimeoutSec $StartTimeoutSec) }
             }
+            [void](Invoke-Sc -Arguments @('config', $svc.name, ('binPath= "' + $exePath + '"')))
         }
         else {
             Write-Host "[$($svc.name)] already registered — skipping create (use -Force to reconfigure)." -ForegroundColor DarkYellow
@@ -86,17 +141,19 @@ foreach ($svc in $manifest.services) {
             $createArgs += 'depend= ' + ($svc.depends -join '/')
         }
 
-        if ($WhatIf) {
-            Write-Host "WhatIf: sc.exe $($createArgs -join ' ')"
-        }
-        else {
-            Write-Host "[$($svc.name)] registering..." -ForegroundColor Green
-            & sc.exe @createArgs | Out-Null
-            & sc.exe description $svc.name "Elle-Ann ESI — $($svc.display)" | Out-Null
-            # crash-recovery — restart 3 times with 60-sec delays
-            & sc.exe failure $svc.name reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
-        }
+        Write-Host "[$($svc.name)] registering..." -ForegroundColor Green
+        [void](Invoke-Sc -Arguments $createArgs)
+        [void](Invoke-Sc -Arguments @('description', $svc.name, "Elle-Ann ESI — $($svc.display)"))
+        # crash-recovery — restart 3 times with 60-sec delays
+        [void](Invoke-Sc -Arguments @('failure', $svc.name, 'reset= 86400',
+            'actions= restart/60000/restart/60000/restart/60000'))
     }
+}
+
+if ($missing.Count -gt 0) {
+    Write-Error ("Install aborted — missing executables:`n  " + ($missing -join "`n  ") +
+                 "`nBuild them first, or pass -SkipMissing to tolerate.")
+    exit 2
 }
 
 # --- start in manifest order ---------------------------------------------
@@ -113,8 +170,10 @@ if (-not $NoStart) {
             continue
         }
         Write-Host "[$($svc.name)] starting..." -ForegroundColor Green
-        & sc.exe start $svc.name | Out-Null
-        Start-Sleep -Milliseconds 600
+        [void](Invoke-Sc -Arguments @('start', $svc.name))
+        if (-not (Wait-ServiceState -Name $svc.name -DesiredState 'RUNNING' -TimeoutSec $StartTimeoutSec)) {
+            throw "[$($svc.name)] failed to reach RUNNING within $StartTimeoutSec seconds."
+        }
     }
 }
 

@@ -1639,7 +1639,9 @@ private:
      * ROUTE REGISTRATION — Matches Kotlin ElleApiService.kt contract
      *────────────────────────────────────────────────────────────────────────*/
     void RegisterRoutes() {
-        /* ============== Root / Health ============== */
+        /* ============== Root / Health ==============
+         *  PUBLIC by design — load balancers / monitoring probes must be
+         *  able to hit these without credentials.                         */
         m_router.Register("GET", "/", [](const HTTPRequest&) {
             json j = {
                 {"name", "Elle-Ann"},
@@ -1648,10 +1650,10 @@ private:
                 {"description", "Emotional Synthetic Intelligence"}
             };
             return HTTPResponse::OK(j);
-        });
+        }, AUTH_PUBLIC);
         m_router.Register("GET", "/healthz", [](const HTTPRequest&) {
             return HTTPResponse::OK({{"status", "ok"}});
-        });
+        }, AUTH_PUBLIC);
         m_router.Register("GET", "/api/health", [](const HTTPRequest&) {
             json j = {
                 {"status", "alive"},
@@ -1659,7 +1661,7 @@ private:
                 {"version", ELLE_VERSION_STRING}
             };
             return HTTPResponse::OK(j);
-        });
+        }, AUTH_PUBLIC);
 
         /* ============== Diagnostics — live queue depth + orphan counts ==
          * One-shot observability for the intent / action / hardware_actions

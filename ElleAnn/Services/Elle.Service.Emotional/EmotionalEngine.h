@@ -40,10 +40,11 @@ public:
     /* Emotional contagion */
     void ApplyContagion(float userValence, float userArousal);
 
-    /* Mood system */
-    bool IsInMood() const { return m_inMood; }
-    ELLE_EMOTION_ID GetDominantMood() const { return m_dominantMood; }
-    uint32_t GetMoodDuration() const { return m_moodTicks; }
+    /* Mood system — all getters read std::atomic fields, safe to call
+     * concurrently with Tick() without the caller taking m_mutex.        */
+    bool IsInMood() const { return m_inMood.load(std::memory_order_acquire); }
+    ELLE_EMOTION_ID GetDominantMood() const { return (ELLE_EMOTION_ID)m_dominantMood.load(std::memory_order_acquire); }
+    uint32_t GetMoodDuration() const { return m_moodTicks.load(std::memory_order_acquire); }
 
     /* VAD computation */
     float ComputeValence() const;
@@ -71,11 +72,13 @@ private:
     ELLE_EMOTION_STATE m_state;
     mutable std::mutex m_mutex;
 
-    /* Mood tracking */
-    bool            m_inMood = false;
-    ELLE_EMOTION_ID m_dominantMood = EMO_JOY;
-    uint32_t        m_moodTicks = 0;
-    uint32_t        m_moodThreshold = 300;
+    /* Mood tracking — atomic so getters don't need to take m_mutex.
+     * Writers (UpdateMood() under m_mutex) still serialise against each
+     * other through the mutex; atomics only protect concurrent READS.   */
+    std::atomic<bool>     m_inMood{false};
+    std::atomic<uint32_t> m_dominantMood{(uint32_t)EMO_JOY};
+    std::atomic<uint32_t> m_moodTicks{0};
+    uint32_t              m_moodThreshold = 300;
 
     /* X Chromosome modulation cache — refreshed once per minute from
      * ElleHeart.dbo.x_modulation_log. Multipliers around 1.0. Default

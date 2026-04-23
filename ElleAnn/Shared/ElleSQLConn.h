@@ -204,6 +204,13 @@ namespace ElleDB {
     bool StoreMemory(const ELLE_MEMORY_RECORD& mem);
     bool RecallMemories(const std::string& query, std::vector<ELLE_MEMORY_RECORD>& out, 
                         uint32_t maxCount = 10, float minRelevance = 0.3f);
+    /* Newest-first: pulls the `maxCount` LTM rows with the largest
+     * created_ms. Used by MemoryEngine::RecallRecent to merge STM tail +
+     * LTM head into a single chronologically-accurate recent view (the
+     * previous implementation returned only the STM deque tail, which
+     * was misleadingly named — a hot LTM row older than some stale STM
+     * entry would never surface).                                        */
+    bool RecallRecentLTM(std::vector<ELLE_MEMORY_RECORD>& out, uint32_t maxCount = 10);
     bool UpdateMemoryAccess(uint64_t memId);
     bool PromoteToLTM(uint64_t memId);
     bool ArchiveMemory(uint64_t memId);

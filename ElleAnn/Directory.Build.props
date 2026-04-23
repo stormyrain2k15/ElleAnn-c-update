@@ -47,13 +47,30 @@
     <ClCompile>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <ConformanceMode>true</ConformanceMode>
-      <WarningLevel>Level3</WarningLevel>
+      <!-- Level4 is the target; we ship at Level4 with warnings-as-errors.
+           If you rebuild after a major refactor and Level4 surfaces noise
+           that is genuinely harmless (e.g. C4100 unreferenced formal in
+           an IPC dispatcher hook), add the specific code to
+           DisableSpecificWarnings below — do NOT lower the level.       -->
+      <WarningLevel>Level4</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <AdditionalIncludeDirectories>$(SharedDir);$(LuaDir)include;$(LuaDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_WINDOWS;_UNICODE;UNICODE;NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <TreatWarningAsError>false</TreatWarningAsError>
-      <DisableSpecificWarnings>4996;4267;4244;4018;4146;4065;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <!-- Warnings are errors. The suppression list is intentionally
+           narrow. Everything not listed MUST be fixed at the source:
+             * C4100 unreferenced formal parameter  — idiomatic in IPC hooks
+             * C4201 nameless struct/union         — Windows SDK pattern
+             * C4251 DLL-interface template        — all-static binary
+             * C4505 unreferenced local fn removed — template-gen artifacts
+             * C4702 unreachable code              — tolerated in nlohmann::json headers
+           The historically-suppressed C4996/C4267/C4244/C4018/C4146/C4065
+           set was the loudest category of REAL issues masked in this
+           codebase (truncation, deprecated APIs, signed/unsigned
+           comparison) — deliberately not re-added here so the next
+           build surfaces them.                                            -->
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <DisableSpecificWarnings>4100;4201;4251;4505;4702;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

@@ -238,6 +238,39 @@ bool ElleConfig::Load(const std::string& configPath) {
 
     if (!ParseJSON(json, m_root)) return false;
 
+    /* Schema guard — fail-closed if any of the required top-level
+     * sections are missing or not objects. Previously a typo like
+     * `"LLM": {...}` (wrong case) silently resolved to all defaults
+     * because JsonValue operator[] returns a null on missing keys —
+     * which Populate* happily treats as "just use defaults", so bad
+     * configs shipped without any noise.                              */
+    const char* kRequired[] = { "llm", "emotion", "memory", "http", "services" };
+    for (const char* sec : kRequired) {
+        const auto& v = m_root[sec];
+        if (v.is_null() || v.type != JsonType::Object) {
+            ELLE_ERROR("Config validation failed: section '%s' is missing or not an object "
+                       "in %s — refusing to start with defaults only.",
+                       sec, configPath.c_str());
+            return false;
+        }
+    }
+    /* LLM sub-validation — a provider table MUST exist, and mode MUST be
+     * one of api/local/hybrid. */
+    {
+        const auto& llm = m_root["llm"];
+        std::string mode = llm["mode"].str_val;
+        if (mode != "api" && mode != "local" && mode != "hybrid") {
+            ELLE_ERROR("Config validation failed: llm.mode = '%s' (must be api|local|hybrid)",
+                       mode.c_str());
+            return false;
+        }
+        const auto& provs = llm["providers"];
+        if (provs.is_null() || provs.type != JsonType::Object || provs.obj_val.empty()) {
+            ELLE_ERROR("Config validation failed: llm.providers must be a non-empty object");
+            return false;
+        }
+    }
+
     PopulateFromJSON(m_root);
     return true;
 }
