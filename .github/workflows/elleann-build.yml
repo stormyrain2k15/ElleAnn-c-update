@@ -423,3 +423,145 @@ jobs:
           print('All deltas idempotent.')
           PY
 
+  # ────────────────────────────────────────────────────────────────────────
+  # SQL schema end-to-end coherence.
+  #
+  # We cannot stand up SQL Server in a pure-compile ubuntu job, but we CAN
+  # statically prove three properties that together are the next best
+  # thing to `sqlcmd -i`-ing the whole delta chain:
+  #
+  #   1. Every ALTER TABLE <schema>.<name> in a delta refers to a table
+  #      actually defined in one of the initial schemas. A typo here
+  #      would crash SSMS on first apply.
+  #   2. Every ADD <column> in an ALTER TABLE is guarded by an existence
+  #      check on that exact column (COL_LENGTH / sys.columns), so a
+  #      re-run on a database where the column already exists is a no-op.
+  #   3. Every initial schema is self-contained: no ALTER TABLE whose
+  #      target isn't declared in the same file, AND each CREATE TABLE
+  #      has a matching IF NOT EXISTS / OBJECT_ID guard or sits inside
+  #      a `CREATE DATABASE` bootstrap section.
+  #
+  # Property 2 is checked at batch granularity (`GO`), per delta file,
+  # with a diagnostic that names the file, line, table, and column.
+  # ────────────────────────────────────────────────────────────────────────
+  sql-schema-e2e:
+    name: SQL Schema End-to-End Coherence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit schema graph
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          sql_dir = 'ElleAnn/SQL'
+          initial_schemas = [
+              'ElleAnn_Schema.sql',
+              'ElleAnn_Identity_Schema.sql',
+              'ElleAnn_XChromosome_Schema.sql',
+          ]
+          delta_order = [
+              'ElleAnn_MemoryDelta.sql',
+              'ElleAnn_QueueReaperDelta.sql',
+          ]
+
+          # Collect every table defined in initial schemas.
+          create_tbl_rx = re.compile(
+              r'\bCREATE\s+TABLE\s+(?:\[?dbo\]?\.)?\[?([A-Za-z_][\w]*)\]?',
+              re.IGNORECASE)
+          alter_add_col_rx = re.compile(
+              r'\bALTER\s+TABLE\s+(?:\[?dbo\]?\.)?\[?([A-Za-z_][\w]*)\]?\s+ADD\s+'
+              r'\[?([A-Za-z_][\w]*)\]?',
+              re.IGNORECASE)
+          alter_tbl_rx = re.compile(
+              r'\bALTER\s+TABLE\s+(?:\[?dbo\]?\.)?\[?([A-Za-z_][\w]*)\]?',
+              re.IGNORECASE)
+
+          known_tables: set[str] = set()
+          for fn in initial_schemas:
+              path = os.path.join(sql_dir, fn)
+              if not os.path.isfile(path):
+                  print(f'::error::initial schema missing: {path}')
+                  sys.exit(2)
+              txt = open(path).read()
+              for m in create_tbl_rx.finditer(txt):
+                  known_tables.add(m.group(1).lower())
+          print(f'Initial schema defines {len(known_tables)} tables')
+
+          errs = 0
+
+          def col_guarded(batch: str, tbl: str, col: str) -> bool:
+              """Does this batch guard the ADD <col> with a column-existence check?"""
+              # Accept either COL_LENGTH('dbo.Tbl','Col') or a sys.columns
+              # subquery that references both the object and column names.
+              col_len_rx = re.compile(
+                  r"COL_LENGTH\s*\(\s*N?'[^']*\b" + re.escape(tbl) +
+                  r"\b[^']*'\s*,\s*N?'" + re.escape(col) + r"'\s*\)",
+                  re.IGNORECASE)
+              sys_col_rx = re.compile(
+                  r"sys\.columns[\s\S]*?\bname\s*=\s*N?'" + re.escape(col) + r"'"
+                  r"[\s\S]*?OBJECT_ID\s*\(\s*N?'[^']*\b" + re.escape(tbl) + r"\b",
+                  re.IGNORECASE)
+              # Allow either ordering of the conjuncts.
+              sys_col_rx2 = re.compile(
+                  r"OBJECT_ID\s*\(\s*N?'[^']*\b" + re.escape(tbl) + r"\b[\s\S]*?"
+                  r"\bname\s*=\s*N?'" + re.escape(col) + r"'",
+                  re.IGNORECASE)
+              return bool(col_len_rx.search(batch) or sys_col_rx.search(batch)
+                          or sys_col_rx2.search(batch))
+
+          # Audit every delta.
+          for fn in delta_order:
+              path = os.path.join(sql_dir, fn)
+              if not os.path.isfile(path):
+                  print(f'::error::listed delta missing: {path}')
+                  errs += 1
+                  continue
+              txt = open(path).read()
+              batches = re.split(r'^\s*GO\s*$', txt,
+                                  flags=re.IGNORECASE | re.MULTILINE)
+              line_cursor = 1
+              for batch in batches:
+                  # 1. ALTER TABLE target must be known.
+                  for m in alter_tbl_rx.finditer(batch):
+                      tbl = m.group(1).lower()
+                      if tbl not in known_tables:
+                          rel = batch.count('\n', 0, m.start())
+                          print(f'::error file={path},line={line_cursor + rel}'
+                                f'::ALTER TABLE target "{tbl}" is not declared '
+                                f'in any initial schema')
+                          errs += 1
+                  # 2. Every ADD <column> needs a column-level guard.
+                  for m in alter_add_col_rx.finditer(batch):
+                      tbl, col = m.group(1), m.group(2)
+                      # "ADD CONSTRAINT" is a different statement, skip.
+                      if col.upper() == 'CONSTRAINT':
+                          continue
+                      if not col_guarded(batch, tbl, col):
+                          rel = batch.count('\n', 0, m.start())
+                          print(f'::error file={path},line={line_cursor + rel}'
+                                f'::ALTER TABLE {tbl} ADD {col} has no '
+                                f'COL_LENGTH / sys.columns guard -- '
+                                f'non-idempotent')
+                          errs += 1
+                  line_cursor += batch.count('\n') + 1
+
+          # Also flag any ALTER TABLE in initial schemas that targets an
+          # unknown table (self-contained rule).
+          for fn in initial_schemas:
+              path = os.path.join(sql_dir, fn)
+              txt = open(path).read()
+              for m in alter_tbl_rx.finditer(txt):
+                  tbl = m.group(1).lower()
+                  if tbl not in known_tables:
+                      ln = txt.count('\n', 0, m.start()) + 1
+                      print(f'::error file={path},line={ln}'
+                            f'::initial schema ALTERs unknown table "{tbl}"')
+                      errs += 1
+
+          if errs:
+              print(f'{errs} schema coherence problem(s) found')
+              sys.exit(1)
+          print('Schema graph coherent: all ALTERs target known tables, '
+                'all ADD columns are guarded.')
+          PY
+

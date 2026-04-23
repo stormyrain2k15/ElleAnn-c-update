@@ -212,7 +212,57 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 - HTTP `/`, `/healthz`, `/api/health` now explicitly `AUTH_PUBLIC` (was
   defaulting to `AUTH_USER`).
 
-## P0 / P1 / P2 Backlog
+### Final Audit Strictness (this session, Feb 2026)
+- **`elle_video_worker.py` OpSec pass**:
+  - New `_validate_claim()` imposes a strict schema on the server's
+    claim response. `claimed` must be a bool; if true, `job_id`,
+    `text`, `avatar_path` are all required non-empty strings. Any
+    other shape raises `ClaimValidationError` which is handled with an
+    aggressive backoff (4× poll interval) -- no silent retry loop.
+  - `_verify_artifact()` confirms every produced file (TTS wav, raw
+    mp4, final mp4, incoming avatar) exists, is a regular file, and
+    is ≥ `MIN_ARTIFACT_BYTES` (default 512). A 0-byte ffmpeg exit-zero
+    corruption is caught at the step that produced it, not by the
+    Android user.
+  - SIGINT / SIGTERM install a graceful-shutdown handler: polling
+    stops, any mid-flight job is failed explicitly so the server
+    requeues (no orphaned `processing` rows), the poll sleep uses
+    `Event.wait()` so Ctrl-C is instant. Double-signal forces hard
+    `os._exit(130)`.
+  - Verified via `python3 -m py_compile` and a 7-case schema test
+    (all pass). Ruff lint clean.
+- **`ElleJsonExtract.h` strictness**:
+  - String-literal scan now fully consumes JSON escape sequences incl.
+    `\uXXXX` (6 chars). A `\u007D` (close-brace) inside a string can
+    no longer trick the outer depth counter.
+  - Embedded NUL outside a string aborts the scan fail-closed --
+    previously a byte-oriented counter would walk past it and let
+    downstream C APIs truncate the payload.
+  - Runaway nesting bounded at `kMaxDepth = 1024` -- a 2048-deep `{{{`
+    pathological input aborts instead of blowing the parse stack.
+  - New standalone test at `ElleAnn/Debug/test_json_extract.cpp`:
+    15 cases covering plain, prose-wrapped, nested, decoy braces,
+    braces/quotes/unicode-escape inside strings, surrogate-pair
+    round-trip (`\uD83D\uDE00` → U+1F600 → 4-byte UTF-8), NUL,
+    unbalanced, malformed+valid, top-level array rejection, and
+    over-nesting. All 15 pass locally under g++12 -std=c++17 -Wall
+    -Wextra.
+- **CI `sql-schema-e2e` job (new)**:
+  - Parses every initial schema, extracts the canonical table set
+    (51 tables on the current tree), then:
+    * Every `ALTER TABLE <target>` in any delta must name a known
+      table (typo catch before SSMS runtime failure).
+    * Every `ALTER TABLE … ADD <col>` must sit in a batch that
+      guards the column via `COL_LENGTH('dbo.Tbl','Col')` OR a
+      `sys.columns` + `OBJECT_ID` lookup naming that exact table
+      and column -- not a generic `IF NOT EXISTS` on any shape.
+    * Any `ALTER TABLE` in an initial schema must target a
+      same-file `CREATE TABLE`.
+  - Emits per-file-line `::error file=…,line=…::` so GitHub's UI
+    highlights the exact guard gap. Zero offenders on the current
+    tree.
+
+
 
 ### P0 — Blocked on User
 - [ ] User runs local MSBuild with the new Level4 + WAE settings —
@@ -225,20 +275,12 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
         fresh-install DBA audits.
 
 ### P1 — Next Iteration
-- [ ] LLM provider-response schemas — DONE via `ParseOpenAI/Anthropic`
-      rewrite on nlohmann::json. Verify under load against live keys.
-- [ ] LLM HTTP status codes — DONE; non-2xx is now surfaced as failure.
-- [ ] Trailing-garbage rejection in nlohmann::json reads of untrusted
-      payloads — already strict by default in HTTP BodyJSON path.
-- [ ] Surrogate-pair round-trip in `ElleJsonExtract` — current extractor
-      is byte-oriented brace/string counter; surrogates don't break it,
-      but formally verify under a malformed emoji.
+- [x] Video worker strictness (schema + artifact + graceful shutdown).
+- [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).
+- [x] CI `sql-schema-e2e` coherence job (all 51 tables, 0 offenders).
+- [ ] Verify LLM parsers under load against live OpenAI / Anthropic keys.
 
 ### P2 — Future
-- [ ] Split `ElleDB` (the giant `ElleSQLConn.cpp` namespace) by domain —
-      memory/, queues/, world/, identity/, etc. 2.6k LOC monolith.
-      Risky without a local build-test loop; park for next session with
-      user's Windows build feedback.
 - [ ] Stronger identity fabric: single-writer Identity service + event
       stream replacing the DB-polling `RefreshFromDatabase` model.
 - [ ] Embedding-based novelty detector in `EvaluateNovelty` (currently
