@@ -95,6 +95,7 @@ private:
     /* WinHTTP handles */
     void*   m_hSession = nullptr;   /* HINTERNET */
     void*   m_hConnect = nullptr;   /* HINTERNET */
+    bool    m_useTls   = false;     /* set from URL scheme at InitWinHTTP() */
 
     bool InitWinHTTP();
     void CleanupWinHTTP();

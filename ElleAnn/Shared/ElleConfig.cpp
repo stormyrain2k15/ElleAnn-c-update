@@ -309,6 +309,15 @@ void ElleConfig::PopulateFromJSON(const JsonValue& root) {
                 pc.mlock = prov["mlock"].bool_val;
                 pc.mmap = prov.has("mmap") ? prov["mmap"].bool_val : true;
                 pc.use_gpu = prov["use_gpu"].bool_val;
+                /* Provider tuning that was previously declared in the
+                 * schema but never actually read. Landing them here makes
+                 * the shipped elle_master_config.json a real contract. */
+                pc.frequency_penalty = prov.has("frequency_penalty")
+                    ? (float)prov["frequency_penalty"].float_val : 0.0f;
+                pc.presence_penalty  = prov.has("presence_penalty")
+                    ? (float)prov["presence_penalty"].float_val  : 0.0f;
+                pc.rate_limit_rpm    = prov.has("rate_limit_rpm")
+                    ? (uint32_t)prov["rate_limit_rpm"].int_val  : 0;
                 m_llm.providers[name] = pc;
             }
         }
@@ -325,6 +334,13 @@ void ElleConfig::PopulateFromJSON(const JsonValue& root) {
         m_emotion.mood_threshold = (float)emo["mood_formation_threshold"].float_val;
         m_emotion.mood_duration_ticks = (uint32_t)emo["mood_duration_ticks"].int_val;
         m_emotion.sentiment_analysis = emo["sentiment_analysis_enabled"].bool_val;
+
+        /* Reload idempotency: PopulateFromJSON is called on every
+         * ReloadConfig(), and these collections get rebuilt from scratch.
+         * Without clearing we doubled the baselines / triggers on every
+         * reload and the repeated triggers amplified emotional deltas.   */
+        m_emotion.baselines.clear();
+        m_emotion.triggers.clear();
 
         const auto& baselines = emo["baselines"];
         if (!baselines.is_null()) {

@@ -4,10 +4,17 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+const API = BACKEND_URL ? `${BACKEND_URL}/api` : null;
 
 const Home = () => {
   const helloWorldApi = async () => {
+    /* Hard-fail loud if REACT_APP_BACKEND_URL is unset — the old code
+     * built `undefined/api/` and silently 404'd. Surfacing the missing
+     * env var here makes setup failures obvious on first load.         */
+    if (!API) {
+      console.error("REACT_APP_BACKEND_URL is not set — see frontend/.env.example");
+      return;
+    }
     try {
       const response = await axios.get(`${API}/`);
       console.log(response.data.message);

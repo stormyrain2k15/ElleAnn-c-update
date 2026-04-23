@@ -411,5 +411,28 @@
         "data_directory": "C:\\ElleAnn\\Data",
         "log_directory": "C:\\ElleAnn\\Logs",
         "backup_directory": "C:\\ElleAnn\\Backups"
+    },
+
+    "_comment_queues": "Tunables for the QueueWorker reaper. Values map 1:1 to the ElleConfig::GetInt keys used in QueueWorker.cpp.",
+    "queues": {
+        "max_retries":         3,
+        "max_action_attempts": 3
+    },
+
+    "_comment_action": "Action service per-action timeout in ms. Used by QueueWorker to reap stuck actions and by ActionExecutor to age out in-flight work.",
+    "action": {
+        "default_timeout_ms": 60000,
+        "filesystem_root":    "C:\\ElleAnn\\Data\\action_fs"
+    },
+
+    "_comment_family": "Family engine (SVC_FAMILY) tunables. All keys here are read by Services/Elle.Service.Family/Family.cpp via ElleConfig::Instance().GetInt/GetString.",
+    "family": {
+        "tick_ms":           30000,
+        "pregnancies_root":  "C:\\ElleAnn\\pregnancies",
+        "children_root":     "C:\\ElleAnn\\children",
+        "first_child_port":  9200,
+        "port_step":         100,
+        "spawn_delay_ms":    300,
+        "allow_recursion":   0
     }
 }

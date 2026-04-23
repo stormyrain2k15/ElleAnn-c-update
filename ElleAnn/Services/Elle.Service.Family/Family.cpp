@@ -15,8 +15,11 @@
  *        - Insert row into ElleHeart.dbo.family_pregnancies (conceived_ms,
  *          due_ms, gestational_days, status='gestating', snapshot_path).
  *        - Take a personality-stripped snapshot of Elle's install tree:
- *          copy the service binaries, Lua scripts, and SQL schema DDL into
- *          a staging folder — deliberately NOT copying:
+ *          copy the service binaries and DLLs to the STAGING ROOT (so the
+ *          per-exe config can sit beside them — Windows services read
+ *          elle_master_config.json from their exe directory), the Lua
+ *          scripts to staging/scripts/, and the SQL schema DDL to
+ *          staging/sql/. Deliberately NOT copied:
  *             * ElleIdentityCore autobiography / private thoughts
  *             * Bonding / InnerLife relationship state
  *             * Memory / emotion history
@@ -75,6 +78,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include <cstdio>
 
 namespace fs = std::filesystem;
@@ -289,14 +293,19 @@ private:
         fs::path zipPath = m_pregnanciesRoot / ("preg_" + std::to_string(pregId) + ".zip");
         std::error_code ec;
         fs::remove_all(staging, ec);
-        fs::create_directories(staging / "bin",     ec);
+        fs::create_directories(staging,            ec);
         fs::create_directories(staging / "scripts", ec);
         fs::create_directories(staging / "sql",     ec);
 
-        /* Copy binaries */
-        CopyFilesByExt(m_elleInstallRoot, staging / "bin", { L".exe", L".dll" });
-        /* Copy Lua scripts from parent's scripts/ if present, else from the
-         * standard sub-path Elle.Lua.Behavioral/scripts.                  */
+        /* Copy binaries straight into the staging root (NOT staging/bin).
+         * Services on Windows read elle_master_config.json from the exe's
+         * own directory (see ElleServiceBase.cpp:417-426), so the config
+         * we write next MUST be a sibling of every exe.                   */
+        CopyFilesByExt(m_elleInstallRoot, staging, { L".exe", L".dll" });
+
+        /* Lua scripts are copied into staging/scripts. LuaHost tries
+         * <exe_dir>/scripts first (see LuaHost binding below), then falls
+         * back to the historical Lua/Elle.Lua.Behavioral/scripts path.   */
         fs::path luaSrc = m_elleInstallRoot / "scripts";
         if (!fs::exists(luaSrc)) {
             luaSrc = m_elleInstallRoot.parent_path() / "Lua" / "Elle.Lua.Behavioral" / "scripts";
@@ -409,9 +418,20 @@ private:
         /* Write child-specific config. Inherits connection string stub from
          * parent so the DBAs can pre-configure a connection with a catalog
          * wildcard or we point it at the child's new databases explicitly. */
-        std::string coreDb   = "ElleCore_child"   + std::to_string(pregId);
-        std::string heartDb  = "ElleHeart_child"  + std::to_string(pregId);
-        std::string systemDb = "ElleSystem_child" + std::to_string(pregId);
+        std::string coreDb      = "ElleCore_child"      + std::to_string(pregId);
+        std::string heartDb     = "ElleHeart_child"     + std::to_string(pregId);
+        std::string systemDb    = "ElleSystem_child"    + std::to_string(pregId);
+        std::string memoryDb    = "ElleMemory_child"    + std::to_string(pregId);
+        std::string knowledgeDb = "ElleKnowledge_child" + std::to_string(pregId);
+
+        /* Child config MUST match the schema the loader consumes
+         * (ElleConfig.cpp:349-370, 403-435): http_server / services.sql_pipes.
+         * The parent's SQL connection string lives at services.sql_pipes
+         * .connection_string, not "sql.connection_string". Pull it from the
+         * loaded config object directly (GetServiceConfig().sql_connection_string)
+         * so we inherit the REAL value.                                     */
+        std::string parentSql =
+            ElleConfig::Instance().GetService().sql_connection_string;
 
         json cfg = {
             {"identity", {
@@ -420,23 +440,30 @@ private:
                 {"baseline_traits", true},
                 {"parent_pregnancy_id", pregId}
             }},
-            {"http", {
+            {"http_server", {
+                {"enabled",      true},
                 {"port",         port},
-                {"bind_address", "127.0.0.1"}
+                {"bind_address", "127.0.0.1"},
+                {"cors_enabled", true}
             }},
-            {"sql", {
-                {"core_db",   coreDb},
-                {"heart_db",  heartDb},
-                {"system_db", systemDb},
-                {"connection_string", ElleConfig::Instance().GetString(
-                    "sql.connection_string", "")}
+            {"services", {
+                {"sql_pipes", {
+                    {"enabled",           true},
+                    {"connection_string", parentSql},
+                    {"core_db",           coreDb},
+                    {"heart_db",          heartDb},
+                    {"system_db",         systemDb},
+                    {"memory_db",         memoryDb},
+                    {"knowledge_db",      knowledgeDb}
+                }}
             }}
         };
         std::ofstream(childDir / "elle_master_config.json") << cfg.dump(2);
 
         /* Create child DBs + run schema DDL. Idempotent via IF NOT EXISTS. */
-        CreateChildDatabases(coreDb, heartDb, systemDb);
-        RunSchemaAgainstChild(childDir / "sql", coreDb, heartDb, systemDb);
+        CreateChildDatabases({ coreDb, heartDb, systemDb, memoryDb, knowledgeDb });
+        RunSchemaAgainstChild(childDir / "sql",
+                              coreDb, heartDb, systemDb, memoryDb, knowledgeDb);
 
         /* Spawn the full mini-ESI stack in dependency order. Each exe reads
          * elle_master_config.json from its own CWD, so CWD = childDir.
@@ -666,11 +693,9 @@ private:
     /*──────────────────────────────────────────────────────────────────────
      * CHILD DB BOOTSTRAP
      *──────────────────────────────────────────────────────────────────────*/
-    void CreateChildDatabases(const std::string& coreDb,
-                              const std::string& heartDb,
-                              const std::string& systemDb) {
+    void CreateChildDatabases(const std::vector<std::string>& dbs) {
         auto& sql = ElleSQLPool::Instance();
-        for (auto& db : { coreDb, heartDb, systemDb }) {
+        for (auto& db : dbs) {
             std::string stmt =
                 "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = N'" + db + "') "
                 "CREATE DATABASE [" + db + "];";
@@ -678,24 +703,143 @@ private:
         }
     }
 
+    /* Execute every .sql file in the snapshot's sql/ folder against the
+     * child databases. Two non-trivial concerns handled here:
+     *
+     *   1) The shipped DDL contains hard-coded `USE [ElleHeart]`, `USE
+     *      [ElleCore]`, `USE ElleMemory`, `USE [ElleKnowledge]`, and
+     *      `USE [ElleSystem]` statements (see SQL/ElleAnn_*.sql). If we
+     *      ran them verbatim they'd target the PARENT's catalogs — and
+     *      clobber them. We substitute every catalog reference with the
+     *      child's renamed catalog, case-insensitive, bracketed or not.
+     *
+     *   2) The files are batch scripts with `GO` separators. ODBC's
+     *      SQLExecDirect takes one batch, not many, so we split on
+     *      standalone `GO` lines (case-insensitive, whitespace-tolerant)
+     *      and Exec each batch individually. Trailing semicolons are
+     *      fine but we strip any empty batches that a trailing `GO`
+     *      leaves behind.
+     *──────────────────────────────────────────────────────────────────────*/
     void RunSchemaAgainstChild(const fs::path& sqlDir,
-                               const std::string& /*coreDb*/,
-                               const std::string& /*heartDb*/,
-                               const std::string& /*systemDb*/) {
-        /* Execute every .sql in the snapshot's sql/ folder. Each DDL script
-         * is expected to USE its own catalog explicitly; we don't rewrite
-         * database names here — scripts reference DB names via variables
-         * or live in the correct catalog at load time.                    */
+                               const std::string& coreDb,
+                               const std::string& heartDb,
+                               const std::string& systemDb,
+                               const std::string& memoryDb,
+                               const std::string& knowledgeDb) {
         if (!fs::exists(sqlDir)) return;
         std::error_code ec;
+
+        /* Case-insensitive catalog rewrites. Order matters: rewrite the
+         * most-specific names first so "ElleMemory" isn't eaten by a
+         * "Elle" prefix match (there isn't one today — defensive).      */
+        struct Rewrite { std::string parent, child; };
+        const std::vector<Rewrite> rewrites = {
+            { "ElleKnowledge", knowledgeDb },
+            { "ElleMemory",    memoryDb    },
+            { "ElleSystem",    systemDb    },
+            { "ElleHeart",     heartDb     },
+            { "ElleCore",      coreDb      }
+        };
+
+        auto rewriteCatalogs = [&](std::string s) {
+            for (auto& r : rewrites) {
+                /* Replace both `[ElleX]` and bare `ElleX` preceded by
+                 * whitespace / start-of-token characters. Case-insensitive. */
+                for (const std::string& pat : { std::string("[") + r.parent + "]",
+                                                 r.parent }) {
+                    size_t pos = 0;
+                    while (pos < s.size()) {
+                        /* manual case-insensitive find */
+                        size_t hit = std::string::npos;
+                        for (size_t i = pos; i + pat.size() <= s.size(); ++i) {
+                            bool m = true;
+                            for (size_t k = 0; k < pat.size(); ++k) {
+                                char a = (char)tolower((unsigned char)s[i+k]);
+                                char b = (char)tolower((unsigned char)pat[k]);
+                                if (a != b) { m = false; break; }
+                            }
+                            /* Require a word boundary on both sides for bare
+                             * names; bracketed form is self-delimited.    */
+                            if (m && pat[0] != '[' ) {
+                                auto isWord = [](char c){
+                                    return (c>='A'&&c<='Z')||(c>='a'&&c<='z')
+                                         ||(c>='0'&&c<='9')||c=='_';
+                                };
+                                if (i > 0 && isWord(s[i-1])) { m = false; }
+                                if (m && i + pat.size() < s.size()
+                                      && isWord(s[i + pat.size()])) { m = false; }
+                            }
+                            if (m) { hit = i; break; }
+                        }
+                        if (hit == std::string::npos) break;
+                        std::string repl = (pat[0] == '[')
+                                           ? std::string("[") + r.child + "]"
+                                           : r.child;
+                        s.replace(hit, pat.size(), repl);
+                        pos = hit + repl.size();
+                    }
+                }
+            }
+            return s;
+        };
+
+        /* Split a script into batches on standalone GO lines. */
+        auto splitBatches = [](const std::string& script) {
+            std::vector<std::string> out;
+            std::string batch;
+            size_t i = 0;
+            while (i <= script.size()) {
+                /* find end of line */
+                size_t eol = script.find('\n', i);
+                std::string line = script.substr(i, (eol == std::string::npos ? script.size() : eol) - i);
+                /* trim trailing \r and whitespace for GO detection */
+                std::string trimmed = line;
+                while (!trimmed.empty() &&
+                       (trimmed.back()=='\r' || trimmed.back()==' ' || trimmed.back()=='\t'))
+                    trimmed.pop_back();
+                size_t ls = 0;
+                while (ls < trimmed.size() && (trimmed[ls]==' '||trimmed[ls]=='\t')) ls++;
+                trimmed = trimmed.substr(ls);
+                bool isGo = (trimmed.size() == 2
+                             && (trimmed[0]=='G'||trimmed[0]=='g')
+                             && (trimmed[1]=='O'||trimmed[1]=='o'));
+                if (isGo) {
+                    if (!batch.empty()) { out.push_back(batch); batch.clear(); }
+                } else {
+                    batch += line;
+                    batch += '\n';
+                }
+                if (eol == std::string::npos) break;
+                i = eol + 1;
+            }
+            /* trailing batch without a GO */
+            while (!batch.empty() &&
+                   (batch.back()=='\n'||batch.back()=='\r'||batch.back()==' '||batch.back()=='\t'))
+                batch.pop_back();
+            if (!batch.empty()) out.push_back(batch);
+            return out;
+        };
+
+        /* Sort files alphabetically so ordering is deterministic across
+         * runs (some DDL has implicit ordering dependencies).          */
+        std::vector<fs::path> files;
         for (auto& entry : fs::directory_iterator(sqlDir, ec)) {
-            if (!entry.is_regular_file()) continue;
-            if (entry.path().extension() != ".sql") continue;
-            std::ifstream f(entry.path());
+            if (entry.is_regular_file() && entry.path().extension() == ".sql") {
+                files.push_back(entry.path());
+            }
+        }
+        std::sort(files.begin(), files.end());
+
+        for (auto& p : files) {
+            std::ifstream f(p);
             std::stringstream ss; ss << f.rdbuf();
             std::string ddl = ss.str();
             if (ddl.empty()) continue;
-            ElleSQLPool::Instance().Exec(ddl);
+            ddl = rewriteCatalogs(ddl);
+            for (auto& batch : splitBatches(ddl)) {
+                if (batch.find_first_not_of(" \t\r\n;") == std::string::npos) continue;
+                ElleSQLPool::Instance().Exec(batch);
+            }
         }
     }
 

@@ -41,7 +41,11 @@ bool LLMAPIProvider::InitWinHTTP() {
                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!m_hSession) return false;
 
-    /* Parse URL to get host */
+    /* Parse URL to get host AND scheme. Previously this hard-forced
+     * WINHTTP_FLAG_SECURE on every request, which broke LM Studio and
+     * any other local HTTP provider (http://localhost:1234/...). Now
+     * m_useTls is flipped only when the URL scheme is explicitly https://
+     * or when the port is 443.                                          */
     std::wstring wUrl(m_config.api_url.begin(), m_config.api_url.end());
     URL_COMPONENTS urlComp;
     ZeroMemory(&urlComp, sizeof(urlComp));
@@ -49,8 +53,11 @@ bool LLMAPIProvider::InitWinHTTP() {
     wchar_t hostName[256];
     urlComp.lpszHostName = hostName;
     urlComp.dwHostNameLength = 256;
+    urlComp.dwSchemeLength = static_cast<DWORD>(-1); /* ask for scheme */
 
     WinHttpCrackUrl(wUrl.c_str(), 0, 0, &urlComp);
+
+    m_useTls = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) || (urlComp.nPort == 443);
 
     m_hConnect = WinHttpConnect(m_hSession, hostName, urlComp.nPort, 0);
     return m_hConnect != nullptr;
@@ -164,7 +171,7 @@ std::string LLMAPIProvider::HTTPPost(const std::string& path, const std::string&
     std::wstring wPath(path.begin(), path.end());
     HINTERNET hRequest = WinHttpOpenRequest(m_hConnect, L"POST", wPath.c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        WINHTTP_FLAG_SECURE);
+        (m_useTls ? WINHTTP_FLAG_SECURE : 0));
 
     if (!hRequest) return "";
 
@@ -295,7 +302,7 @@ bool LLMAPIProvider::HTTPPostStream(const std::string& path, const std::string& 
     std::wstring wPath(path.begin(), path.end());
     HINTERNET hRequest = WinHttpOpenRequest(m_hConnect, L"POST", wPath.c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        WINHTTP_FLAG_SECURE);
+        (m_useTls ? WINHTTP_FLAG_SECURE : 0));
 
     if (!hRequest) return false;
 
@@ -758,7 +765,29 @@ ILLMProvider* ElleLLMEngine::SelectProvider(bool preferLocal) {
         if (local && local->IsAvailable()) return local;
     }
 
-    /* Try primary, then fallback through all available */
+    /* Honor config-declared primary_provider / fallback_provider. The
+     * engine previously initialised providers in a fixed order and just
+     * returned the first available one — so the config values were dead.
+     * Now primary is tried first, then fallback, then the rest.         */
+    auto nameToId = [](const std::string& n) -> ELLE_LLM_PROVIDER {
+        if (n == "groq")       return LLM_PROVIDER_GROQ;
+        if (n == "openai")     return LLM_PROVIDER_OPENAI;
+        if (n == "anthropic")  return LLM_PROVIDER_ANTHROPIC;
+        if (n == "lm_studio")  return LLM_PROVIDER_LOCAL_LMSTUDIO;
+        if (n == "local_llama")return LLM_PROVIDER_LOCAL_LLAMA;
+        if (n == "custom_api") return LLM_PROVIDER_CUSTOM_API;
+        return (ELLE_LLM_PROVIDER)-1;
+    };
+    auto& cfg = ElleConfig::Instance().GetLLM();
+    for (auto& name : { cfg.primary_provider, cfg.fallback_provider }) {
+        if (name.empty()) continue;
+        ELLE_LLM_PROVIDER id = nameToId(name);
+        if (id == (ELLE_LLM_PROVIDER)-1) continue;
+        auto* p = GetProviderById(id);
+        if (p && p->IsAvailable()) return p;
+    }
+
+    /* Last resort: first available provider. */
     for (auto& p : m_providers) {
         if (p->IsAvailable()) return p.get();
     }
