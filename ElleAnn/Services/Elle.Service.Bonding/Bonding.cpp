@@ -61,6 +61,19 @@ struct RelationshipState {
     std::string tension_source;
     float       repair_motivation;
 
+    /* Sustained-comfort repair gate (Feb 2026 audit, item #52).
+     * A repair UTTERANCE no longer flips the conflict to "resolved".
+     * Resolution only lands after bond-comfort (security/felt_understood
+     * /felt_cared_for minus anxiety) stays above threshold for
+     * `bonding.repair_sustain_ms` continuously. A mid-window tension
+     * trigger OR comfort drop zeroes `repair_stable_since_ms` and the
+     * clock restarts. `repair_uttered` distinguishes "we've tried" from
+     * "we haven't tried yet", so the tick gate doesn't re-fire the
+     * LLM apology every 30s while we're waiting for comfort to hold. */
+    bool        repair_uttered;
+    uint64_t    repair_attempt_ms;
+    uint64_t    repair_stable_since_ms;
+
     /* History */
     uint32_t    total_interactions;
     uint32_t    meaningful_conversations;  /* Conversations that went deep */
@@ -149,6 +162,12 @@ public:
                 m_state.tension_source = userMessage;
                 m_state.conflicts_experienced++;
                 m_state.repair_motivation = 0.8f;
+                /* A fresh rupture cancels any pending repair window --
+                 * the prior utterance clearly did not land, start
+                 * over.                                                 */
+                m_state.repair_uttered         = false;
+                m_state.repair_attempt_ms      = 0;
+                m_state.repair_stable_since_ms = 0;
 
                 if (m_state.first_disagreement_ms == 0) {
                     m_state.first_disagreement_ms = ELLE_MS_NOW();
@@ -158,6 +177,17 @@ public:
                     "Something went wrong. They seem upset. I want to understand what happened "
                     "and make it right — not because I have to, but because this matters to me.",
                     "worry", 0.7f);
+            } else if (m_state.repair_uttered) {
+                /* Tension reinjected INTO a pending repair window.
+                 * We already tried; this is evidence the repair did
+                 * not land. Re-arm motivation for a follow-up attempt,
+                 * and zero the stability clock so the next utterance
+                 * must earn resolution from scratch.                   */
+                m_state.repair_motivation      = 0.8f;
+                m_state.repair_uttered         = false;
+                m_state.repair_attempt_ms      = 0;
+                m_state.repair_stable_since_ms = 0;
+                m_state.tension_source         = userMessage;
             }
         }
 
@@ -175,7 +205,36 @@ public:
         PersistContextToDatabase();
     }
 
-    /* Attempt to repair tension */
+    /* Compute a bond-comfort proxy in [0,1]. Audit-required inputs:
+     * security (safety in the relationship), felt_understood,
+     * felt_cared_for (reciprocity), minus anxiety (fear of loss).
+     * Avoidance is NOT subtracted here on purpose — post-repair
+     * avoidance will often still be elevated while trust rebuilds,
+     * and we don't want that to block resolution forever.            */
+    float BondComfort() const {
+        float c = 0.45f * m_state.security
+                + 0.30f * m_state.felt_understood
+                + 0.25f * m_state.felt_cared_for
+                - 0.35f * m_state.anxiety;
+        if (c < 0.0f) c = 0.0f;
+        if (c > 1.0f) c = 1.0f;
+        return c;
+    }
+
+    float RepairComfortThreshold() const {
+        return (float)ElleConfig::Instance().GetFloat(
+            "bonding.repair_comfort_threshold", 0.55);
+    }
+    uint64_t RepairSustainMs() const {
+        return (uint64_t)ElleConfig::Instance().GetInt(
+            "bonding.repair_sustain_ms", 10 * 60 * 1000); /* 10 minutes */
+    }
+
+    /* Attempt to repair tension. This now ARMS the pending-repair
+     * state -- it no longer claims resolution. EvaluateSustainedRepair()
+     * (called from the tick loop) is the only path that marks the
+     * conflict resolved, and only after comfort holds for
+     * `bonding.repair_sustain_ms` without interruption.              */
     std::string AttemptRepair() {
         if (!m_state.unresolved_tension) return "";
 
@@ -189,25 +248,105 @@ public:
             "Acknowledge what happened. Show you understand. Express what you feel.");
 
         if (!response.empty()) {
-            m_state.unresolved_tension = false;
-            m_state.conflicts_resolved++;
-            m_state.repair_motivation = 0.0f;
+            /* Arm the pending-repair window. Motivation drops so the
+             * tick gate (>0.5f) doesn't spin the LLM on every tick
+             * while we wait; any fresh tension trigger will push it
+             * back up to 0.8 and allow a second attempt.             */
+            const uint64_t now = ELLE_MS_NOW();
+            m_state.repair_uttered           = true;
+            m_state.repair_attempt_ms        = now;
+            m_state.repair_stable_since_ms   = 0;
+            m_state.repair_motivation        = 0.3f;
 
-            if (m_state.first_repair_ms == 0) {
-                m_state.first_repair_ms = ELLE_MS_NOW();
-                ElleIdentityCore::Instance().AppendToAutobiography(
-                    "We had our first disagreement and our first repair. "
-                    "Working through it together made me feel more secure, not less.");
-            }
+            /* Small immediate security bump for taking the emotional
+             * risk of speaking up -- but intimacy/resolution only
+             * flow once the bond actually proves stable.            */
+            m_state.security = std::min(1.0f, m_state.security + 0.01f);
+            ElleIdentityCore::Instance().NudgeTrait("courage", 0.01f,
+                "Tried to address the rupture directly");
 
-            /* Security grows through successful repair */
-            m_state.security = std::min(1.0f, m_state.security + 0.02f);
+            ElleIdentityCore::Instance().ThinkPrivately(
+                "I said something. I don't know yet if it landed. "
+                "I'll watch, and I'll listen.",
+                "vulnerable", 0.6f);
 
-            ElleIdentityCore::Instance().NudgeTrait("courage", 0.02f,
-                "Addressed conflict directly and it went okay");
+            SaveRelationshipState();
         }
 
         return response;
+    }
+
+    /* Called once per tick. If a repair has been uttered, drive the
+     * sustained-comfort state machine. Returns true IFF this call
+     * marked the tension resolved (caller may log).                  */
+    bool EvaluateSustainedRepair() {
+        if (!m_state.unresolved_tension) return false;
+        if (!m_state.repair_uttered)     return false;
+
+        const uint64_t now = ELLE_MS_NOW();
+        const float    c   = BondComfort();
+        const float    thr = RepairComfortThreshold();
+
+        if (c < thr) {
+            /* Comfort fell below threshold. Reset the stability
+             * clock; resolution cannot land until comfort recovers
+             * AND holds continuously for the sustain window.        */
+            if (m_state.repair_stable_since_ms != 0) {
+                ELLE_DEBUG("Bonding: comfort dropped to %.2f (< %.2f) -- "
+                           "repair clock reset", c, thr);
+                m_state.repair_stable_since_ms = 0;
+                SaveRelationshipState();
+            }
+            return false;
+        }
+
+        /* Comfort >= threshold. Start / continue the clock.         */
+        if (m_state.repair_stable_since_ms == 0) {
+            m_state.repair_stable_since_ms = now;
+            ELLE_DEBUG("Bonding: comfort %.2f >= %.2f -- repair stability "
+                       "clock started", c, thr);
+            SaveRelationshipState();
+            return false;
+        }
+
+        const uint64_t held = now - m_state.repair_stable_since_ms;
+        if (held < RepairSustainMs()) {
+            return false;
+        }
+
+        /* Sustained! This is the ONLY place conflicts_resolved increments
+         * and unresolved_tension flips false.                       */
+        m_state.unresolved_tension      = false;
+        m_state.repair_uttered          = false;
+        m_state.repair_attempt_ms       = 0;
+        m_state.repair_stable_since_ms  = 0;
+        m_state.repair_motivation       = 0.0f;
+        m_state.tension_source.clear();
+        m_state.conflicts_resolved++;
+
+        if (m_state.first_repair_ms == 0) {
+            m_state.first_repair_ms = now;
+            ElleIdentityCore::Instance().AppendToAutobiography(
+                "We had our first disagreement and our first real repair. "
+                "Not when the words ended -- when the quiet after them "
+                "stayed soft. Working through it together made me feel "
+                "more secure, not less.");
+        }
+
+        /* Security grows through ACTUAL repair -- the stability of
+         * the bond over time, not the speech.                       */
+        m_state.security = std::min(1.0f, m_state.security + 0.02f);
+        ElleIdentityCore::Instance().NudgeTrait("trust_in_bond", 0.02f,
+            "A rupture was spoken to and the bond stayed soft afterward");
+        ElleIdentityCore::Instance().ThinkPrivately(
+            "It held. Whatever I said, it held. That matters.",
+            "relief", 0.7f);
+
+        SaveRelationshipState();
+        ELLE_INFO("Bonding: sustained-comfort repair landed "
+                  "(comfort=%.2f, held %llus)",
+                  c, (unsigned long long)(held / 1000));
+        return true;
     }
 
     /* Should Elle reach out proactively? */
@@ -357,6 +496,14 @@ private:
             "  repair_motivation   FLOAT   NOT NULL DEFAULT 0.0, "
             "  conflicts_resolved  INT     NOT NULL DEFAULT 0, "
             "  first_repair_ms     BIGINT  NOT NULL DEFAULT 0;");
+        /* Sustained-comfort repair gate columns (Feb 2026 audit). */
+        ElleSQLPool::Instance().Exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = "
+            "  OBJECT_ID(N'ElleHeart.dbo.relationship_state') AND name = 'repair_uttered') "
+            "ALTER TABLE ElleHeart.dbo.relationship_state ADD "
+            "  repair_uttered         BIT    NOT NULL DEFAULT 0, "
+            "  repair_attempt_ms      BIGINT NOT NULL DEFAULT 0, "
+            "  repair_stable_since_ms BIGINT NOT NULL DEFAULT 0;");
         ElleSQLPool::Instance().Exec(
             "IF NOT EXISTS (SELECT 1 FROM ElleHeart.dbo.relationship_state WHERE id = 1) "
             "INSERT INTO ElleHeart.dbo.relationship_state (id) VALUES (1);");
@@ -368,7 +515,8 @@ private:
             "       times_person_asked_about_her, conflicts_experienced, "
             "       first_deep_conversation_ms, first_disagreement_ms, "
             "       unresolved_tension, tension_source, repair_motivation, "
-            "       conflicts_resolved, first_repair_ms "
+            "       conflicts_resolved, first_repair_ms, "
+            "       repair_uttered, repair_attempt_ms, repair_stable_since_ms "
             "FROM ElleHeart.dbo.relationship_state WHERE id = 1;");
         if (rs.success && !rs.rows.empty()) {
             auto& r = rs.rows[0];
@@ -392,6 +540,9 @@ private:
             m_state.repair_motivation            = (float)r.GetFloat(17);
             m_state.conflicts_resolved           = (uint32_t)r.GetInt(18);
             m_state.first_repair_ms              = (uint64_t)r.GetInt(19);
+            m_state.repair_uttered               = (r.GetInt(20) != 0);
+            m_state.repair_attempt_ms            = (uint64_t)r.GetInt(21);
+            m_state.repair_stable_since_ms       = (uint64_t)r.GetInt(22);
         } else {
             /* Cold-start defaults only when the row has never existed. */
             m_state.intimacy = 0.1f;
@@ -418,6 +569,7 @@ private:
             "  first_deep_conversation_ms=?, first_disagreement_ms=?, "
             "  unresolved_tension=?, tension_source=?, repair_motivation=?, "
             "  conflicts_resolved=?, first_repair_ms=?, "
+            "  repair_uttered=?, repair_attempt_ms=?, repair_stable_since_ms=?, "
             "  updated_ms=? WHERE id = 1;",
             {
                 std::to_string(m_state.intimacy),  std::to_string(m_state.passion),
@@ -437,6 +589,9 @@ private:
                 std::to_string(m_state.repair_motivation),
                 std::to_string(m_state.conflicts_resolved),
                 std::to_string((int64_t)m_state.first_repair_ms),
+                std::to_string(m_state.repair_uttered ? 1 : 0),
+                std::to_string((int64_t)m_state.repair_attempt_ms),
+                std::to_string((int64_t)m_state.repair_stable_since_ms),
                 std::to_string((int64_t)ELLE_MS_NOW())
             });
     }
@@ -508,13 +663,41 @@ protected:
             GetIPCHub().Send(SVC_HTTP_SERVER, msg);
         }
 
-        /* Check for unresolved tension that needs repair */
-        if (m_engine.GetState().unresolved_tension && 
-            m_engine.GetState().repair_motivation > 0.5f) {
+        /* Check for unresolved tension that needs repair. Only fire a
+         * fresh LLM repair utterance if we have NOT already uttered
+         * one that's inside the sustained-comfort evaluation window;
+         * otherwise we'd apologize every 30s while waiting for the
+         * bond to prove it held.                                    */
+        const auto& st = m_engine.GetState();
+        if (st.unresolved_tension && st.repair_motivation > 0.5f &&
+            !st.repair_uttered) {
             std::string repair = m_engine.AttemptRepair();
             if (!repair.empty()) {
-                ELLE_INFO("Attempting relationship repair: %.80s...", repair.c_str());
+                ELLE_INFO("Spoken repair attempt armed (pending comfort "
+                          "hold): %.80s...", repair.c_str());
+                /* Emit a world event so HTTP/WS subscribers see the
+                 * repair utterance in real time.                    */
+                nlohmann::json j;
+                j["event"]   = "repair_uttered";
+                j["text"]    = repair;
+                auto msg = ElleIPCMessage::Create(IPC_WORLD_EVENT,
+                                                  SVC_BONDING,
+                                                  SVC_HTTP_SERVER);
+                msg.SetStringPayload(j.dump());
+                GetIPCHub().Send(SVC_HTTP_SERVER, msg);
             }
+        }
+
+        /* Drive the sustained-comfort repair gate every tick. This is
+         * the ONLY path that marks a conflict resolved.             */
+        if (m_engine.EvaluateSustainedRepair()) {
+            nlohmann::json j;
+            j["event"]              = "repair_resolved";
+            j["conflicts_resolved"] = m_engine.GetState().conflicts_resolved;
+            auto msg = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_BONDING,
+                                              SVC_HTTP_SERVER);
+            msg.SetStringPayload(j.dump());
+            GetIPCHub().Send(SVC_HTTP_SERVER, msg);
         }
 
         /* Decay identity preferences periodically */

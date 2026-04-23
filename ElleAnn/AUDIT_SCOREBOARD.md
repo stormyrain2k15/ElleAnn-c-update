@@ -72,7 +72,7 @@ Legend: ✅ done | 🟡 partial / follow-up recommended | ⚠️ open
 | 49 | RecallRecent crosses STM + LTM | ✅ | merges tiers |
 | 50 | Dream insights durable | 🟡 | narrative feeds STM; persisted insights require `StoreLTM` path. **Recommend audit: are dream-derived insights routed through StoreLTM?** |
 | 51 | Bonding full state persisted | ✅ | unresolved_tension/repair_motivation/conflicts_resolved all loaded + saved |
-| 52 | Bonding repair requires real signal | 🟡 | currently resolves on LLM text; external user signal not yet wired. **Open P1** |
+| 52 | Bonding repair requires real signal | ✅ | **this turn** -- utterance ARMS pending state; resolution only lands after `BondComfort() >= bonding.repair_comfort_threshold` sustained for `bonding.repair_sustain_ms` (default 10 min). Fresh tension or comfort drop zeros the clock. 3 new persisted columns: `repair_uttered`, `repair_attempt_ms`, `repair_stable_since_ms` (idempotent ALTER) |
 | 53 | Continuity greeting idempotent | ✅ | 2-minute unconsumed check |
 | 54 | Continuity restart != reconnection | ✅ | checks last autobiography entry |
 | 55 | GoalEngine motivation persistence | ✅ | status/progress durable |
@@ -193,13 +193,10 @@ the roadmap:
 
 ## Tallied
 
-- **Verified done**: 113 of 134 action items (84%)
+- **Verified done**: 114 of 134 action items (85%)
 - **Partial / non-blocking follow-up**: 20 (15%) -- mostly legacy helper
   call-site migrations, docs, and optional hardening.
-- **Open and genuinely blocking**: 1 (<1%)
-  - **Bonding repair requires real user signal (#52)** -- current code
-    resolves on LLM text alone. Non-trivial product decision about
-    what qualifies as "real" resolution; flagged for user input.
+- **Open and genuinely blocking**: 0.
 
 ## Fixes landed this turn (Feb 2026)
 
@@ -219,3 +216,14 @@ the roadmap:
 7. CI pipeline: Lua tarball MD5 integrity check against lua.org's
    published value; new `sql-schema-e2e` job (all 51 tables validated,
    zero offenders).
+8. **Bonding sustained-comfort repair gate (item #52)**:
+   `AttemptRepair` no longer claims resolution -- it arms a pending
+   window. `EvaluateSustainedRepair` in the tick loop promotes the
+   pending state to "resolved" ONLY after `BondComfort() >=
+   bonding.repair_comfort_threshold` (default 0.55) holds continuously
+   for `bonding.repair_sustain_ms` (default 10 min). A fresh tension
+   trigger inside the window re-arms motivation and zeros the clock;
+   a mid-window comfort drop zeros the clock but keeps the utterance
+   pending. Three new idempotent-ALTER columns persist the pending
+   state across restarts. `repair_uttered` + `repair_resolved` world
+   events emitted on WS for UI feedback.
