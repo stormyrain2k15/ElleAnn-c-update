@@ -242,7 +242,7 @@ private:
             ELLE_ERROR("Family: failed to create pregnancy row");
             return 0;
         }
-        int64_t id = rs.rows[0].GetInt(0);
+        int64_t id = rs.rows[0].GetIntOr(0, 0);
         ELLE_INFO("Family: pregnancy #%lld conceived (gestation=%dd, due=%lld)",
                   (long long)id, gestDays, (long long)dueMs);
         return id;
@@ -255,9 +255,9 @@ private:
             "WHERE consumed = 0 ORDER BY id ASC;");
         if (!rs.success) return;
         for (auto& row : rs.rows) {
-            int64_t  attemptId = row.GetInt(0);
-            int64_t  bornMs    = row.GetInt(1);
-            int      gestDays  = (int)row.GetInt(2);
+            int64_t  attemptId = row.GetIntOr(0, 0);
+            int64_t  bornMs    = row.GetIntOr(1, 0);
+            int      gestDays  = (int)row.GetIntOr(2, 0);
             std::string payload = row.values.size() > 3 ? row.values[3] : "";
 
             int64_t pregId = CreatePregnancy(bornMs, gestDays, "x_chromosome_backlog", payload);
@@ -375,8 +375,8 @@ private:
             { std::to_string((int64_t)now) });
         if (!rs.success) return;
         for (auto& row : rs.rows) {
-            int64_t pregId   = row.GetInt(0);
-            int     gestDays = (int)row.GetInt(1);
+            int64_t pregId   = row.GetIntOr(0, 0);
+            int     gestDays = (int)row.GetIntOr(1, 0);
             std::string zipPath = row.values.size() > 2 ? row.values[2] : "";
             if (zipPath.empty() || !fs::exists(zipPath)) {
                 ELLE_WARN("Family: pregnancy #%lld has no snapshot — stillborn",
@@ -397,7 +397,7 @@ private:
         auto rs = ElleSQLPool::Instance().Query(
             "SELECT ISNULL(MAX(port), 0) FROM ElleHeart.dbo.family_children;");
         int maxPort = 0;
-        if (rs.success && !rs.rows.empty()) maxPort = (int)rs.rows[0].GetInt(0);
+        if (rs.success && !rs.rows.empty()) maxPort = (int)rs.rows[0].GetIntOr(0, 0);
         return maxPort <= 0 ? basePort : maxPort + step;
     }
 
@@ -522,7 +522,7 @@ private:
               childDir.u8string(),
               "0", /* placeholder — updated to HTTP pid below */
               std::to_string((int64_t)nowMs) });
-        int64_t childId = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        int64_t childId = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetIntOr(0, 0) : 0;
         if (childId == 0) {
             ELLE_ERROR("Family: failed to create child row for pregnancy #%lld",
                        (long long)pregId);
@@ -689,10 +689,10 @@ private:
             "WHERE status = 'alive';");
         if (!rs.success) return;
         for (auto& row : rs.rows) {
-            int64_t procRowId  = row.GetInt(0);
-            int64_t childId    = row.GetInt(1);
+            int64_t procRowId  = row.GetIntOr(0, 0);
+            int64_t childId    = row.GetIntOr(1, 0);
             std::string svcName = row.values.size() > 2 ? row.values[2] : "?";
-            int     pid         = (int)row.GetInt(3);
+            int     pid         = (int)row.GetIntOr(3, 0);
             if (pid <= 0) continue;
             if (!ProcessIsAlive(pid)) MarkProcessDead(procRowId, childId, svcName);
         }
@@ -706,9 +706,9 @@ private:
             "FROM ElleHeart.dbo.family_children c WHERE c.status = 'alive';");
         if (!rsChildren.success) return;
         for (auto& row : rsChildren.rows) {
-            int64_t childId  = row.GetInt(0);
-            int     httpPid  = (int)row.GetInt(1);
-            int64_t liveCount = row.GetInt(2);
+            int64_t childId  = row.GetIntOr(0, 0);
+            int     httpPid  = (int)row.GetIntOr(1, 0);
+            int64_t liveCount = row.GetIntOr(2, 0);
             bool httpDead = (httpPid > 0 && !ProcessIsAlive(httpPid));
             if (liveCount == 0 || httpDead) MarkChildLost(childId);
         }

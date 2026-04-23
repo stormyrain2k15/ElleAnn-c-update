@@ -181,8 +181,8 @@ private:
         uint32_t lowComfortConsents = 0;
         float sumComfort = 0.0f;
         for (auto& r : rs.rows) {
-            float c = (float)r.GetFloat(0);
-            bool consented = r.GetInt(1) != 0;
+            float c = (float)r.GetFloatOr(0, 0.0);
+            bool consented = r.GetIntOr(1, 0) != 0;
             sumComfort += c;
             if (consented && c < threshold) lowComfortConsents++;
         }

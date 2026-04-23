@@ -1,3 +1,12 @@
+> **HISTORICAL — superseded by [`AUDIT_SCOREBOARD.md`](AUDIT_SCOREBOARD.md)**.
+>
+> This file is kept for archaeological reference only. It documents a
+> past audit wave and may describe the codebase as it was at the time
+> of writing, not as it is now. For the current, line-by-line audit
+> status grounded in the present tree, read `AUDIT_SCOREBOARD.md`.
+
+---
+
 # Second-Wave Audit — Completion Report
 
 All items from the user's second-wave audit are now addressed.

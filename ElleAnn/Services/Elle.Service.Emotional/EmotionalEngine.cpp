@@ -343,12 +343,12 @@ void EmotionalEngine::RefreshXModulation() {
             "FROM ElleHeart.dbo.x_modulation_log ORDER BY computed_ms DESC;");
         if (rs.success && !rs.rows.empty()) {
             auto& r = rs.rows[0];
-            m_xmod.warmth         = (float)r.GetFloat(0);
-            m_xmod.verbal_fluency = (float)r.GetFloat(1);
-            m_xmod.empathy        = (float)r.GetFloat(2);
-            m_xmod.introspection  = (float)r.GetFloat(3);
-            m_xmod.arousal        = (float)r.GetFloat(4);
-            m_xmod.fatigue        = (float)r.GetFloat(5);
+            m_xmod.warmth         = (float)r.GetFloatOr(0, 0.0);
+            m_xmod.verbal_fluency = (float)r.GetFloatOr(1, 0.0);
+            m_xmod.empathy        = (float)r.GetFloatOr(2, 0.0);
+            m_xmod.introspection  = (float)r.GetFloatOr(3, 0.0);
+            m_xmod.arousal        = (float)r.GetFloatOr(4, 0.0);
+            m_xmod.fatigue        = (float)r.GetFloatOr(5, 0.0);
         }
         /* If the query ran but returned nothing, leave cached values — the
          * previous snapshot is better than a sudden reset to 1.0.          */

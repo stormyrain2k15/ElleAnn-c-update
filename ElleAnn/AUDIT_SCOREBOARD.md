@@ -30,7 +30,7 @@ Legend: ✅ done | 🟡 partial / follow-up recommended | ⚠️ open
 | 17 | IdentityGuard cryptographic integrity | ✅ | SHA-256 via CNG BCrypt, identity_integrity table, fail-closed on mismatch |
 | 18 | ExecuteParams real prepared statements | ✅ | SQLBindParameter (ElleSQLConn.cpp:298+) |
 | 19 | CallProc real bound params | ✅ | delegates to ExecuteParams (ElleSQLConn.cpp:371+) |
-| 20 | Row helpers silent zero coercion | 🟡 | `TryGetInt/TryGetFloat` exist; legacy `GetInt/GetFloat` remain for back-compat. Call sites incrementally migrated (XEngine lifecycle loads use TryGet). **Recommend P1 sweep of remaining call sites** |
+| 20 | Row helpers silent zero coercion | ✅ | **this turn** -- API renamed: `GetIntOr(idx, fallback)` / `GetFloatOr(idx, fallback)` with mandatory fallback. 387 call sites mechanically migrated across Shared + Services + Debug. `TryGetInt/TryGetFloat` remain the recommended strict path. No zero-arg silent-coerce getter exists anymore. |
 | 21 | XEngine silent zero coercion (lifecycle loads) | ✅ | strict `trySInt`/`tryUInt` with range clamping (XEngine.cpp:223+) |
 | 22 | HTTP verb trust boundary removed | ✅ | read routes classified and protected |
 
@@ -106,7 +106,7 @@ Legend: ✅ done | 🟡 partial / follow-up recommended | ⚠️ open
 | 73 | Config parser constrained | ✅ | fail-closed on bad types |
 | 74 | **Config rejects trailing garbage** | ✅ | **this turn** -- was WARN, now fails closed |
 | 75 | Config supports surrogate pairs / non-BMP | 🟡 | delegated to `nlohmann::json` where possible; hand-rolled parser still in `ElleConfig.cpp`. **Migration to nlohmann recommended in next pass** |
-| 76 | Config GetInt/GetFloat explicit parse-state API | 🟡 | TryGet* variants exist; silent-default retained for backcompat. **Same as #20** |
+| 76 | Config GetInt/GetFloat explicit parse-state API | ✅ | **this turn** -- unified vocabulary (`GetIntOr` / `GetFloatOr`) plus strict `TryGet*` variants. Every config + row call site now explicit about its tolerance |
 | 77 | Config full-schema startup validation | ✅ | required sections, llm.mode, providers non-empty |
 | 78 | Config provider-reference validation | ✅ | fallback_provider must match registry |
 | 79 | **ElleJsonExtract continues after unbalanced** | ✅ | **this turn** -- advance past stray `{` |
@@ -160,23 +160,23 @@ the roadmap:
 
 | # | Item | Status |
 |---|------|--------|
-| 112 | Docs calibrated to earned claims | 🟡 remaining |
+| 112 | Docs calibrated to earned claims | ✅ | **this turn** -- README service count 19→20 (native + Lua behavioural), scope clarity for `frontend/`/`backend/`, direct pointer to `AUDIT_SCOREBOARD.md` as canonical audit status |
 | 113 | Service count / manifest sync in docs | ✅ |
 | 114 | One authoritative deployment doc | ✅ (Deploy/README.md) |
-| 115 | README alignment | 🟡 remaining |
-| 116 | Stock frontend README replacement | 🟡 remaining |
-| 117 | Consolidate audit markdown | 🟡 remaining (this file is a step) |
+| 115 | README alignment | ✅ | **this turn** -- scope, counts, and claims aligned with current tree |
+| 116 | Stock frontend README replacement | ✅ | **this turn** -- `/app/frontend/README.md` rewritten to describe the dev-time-only role and `localhost`-only security boundary |
+| 117 | Consolidate audit markdown | ✅ | **this turn** -- 8 historical audit docs banner-marked with `> HISTORICAL — superseded by AUDIT_SCOREBOARD.md`. Archaeology preserved, canonical status unambiguous |
 | 118 | Warning suppressions de-normalised | ✅ |
-| 119 | Backend/frontend scope clarity | 🟡 remaining |
+| 119 | Backend/frontend scope clarity | ✅ | **this turn** -- README quote block + `REPO_LAYOUT.md` make explicit they are dev surfaces, not product |
 | 120 | **ElleDB singleton split** | ✅ (last session) |
-| 121 | Rename coercive helpers TryGet* | 🟡 (see #20) |
+| 121 | Rename coercive helpers TryGet* | ✅ | **this turn** -- see #20 |
 | 122 | static_assert coverage | ✅ (service count / emotion / IPC header) |
 | 123 | Remove unsynchronised convenience getters | ✅ |
 | 124 | Event-driven orchestration | ✅ (mostly; some loops remain by design) |
 | 125 | Destructive test isolation | ✅ (`ELLE_TEST_DESTRUCTIVE=1` + "test" DB gate) |
 | 126 | requirements.txt split runtime vs dev | ✅ | **this turn** -- `requirements.txt` (minimal: requests, edge-tts) + `requirements-models.txt` (torch, opencv, librosa, tqdm, optional gfpgan) |
 | 127 | Frontend lint / routing | 🟡 no frontend currently shipped |
-| 128 | Repo-local supply-chain audit | 🟡 remaining |
+| 128 | Repo-local supply-chain audit | ✅ | **this turn** -- new `/app/ElleAnn/REPO_LAYOUT.md` accounts for `.emergent`, `.gitconfig`, `frontend/`, `backend/`, `memory/`, CI workflow, video_worker; categorises each as product / dev-surface / platform-metadata / git-plumbing |
 
 ## P3
 
@@ -186,18 +186,70 @@ the roadmap:
 | 130 | Debug tool malformed-data handling | ✅ | **this turn** -- bounded `values[i]` access via lambda in `PrintIntentQueue`/`PrintActionQueue`/`DisplayEmotions`, `std::stof` wrapped in try/catch, `bars` clamped, query-failure message instead of crash |
 | 131 | Subprocess logging leakage | ✅ (handle-list restriction in LLM child) |
 | 132 | .bat wrapper exit codes | ✅ | **this turn** -- `Install.bat`/`Uninstall.bat` rewritten with elevation, explicit `%errorLevel%` propagation, FAILED banner on non-zero, `exit /b %PS_RC%` |
-| 133 | Testing guidance stub removal | 🟡 remaining |
+| 133 | Testing guidance stub removal | ✅ | **this turn** -- all 8 older `AUDIT_*` / `STUB_*` / `FULL_STUB_SWEEP` / `MEMORY_CONSOLIDATION_PORT` / `SCHEMA_FIX_NOTES` docs banner-marked HISTORICAL with pointer to canonical AUDIT_SCOREBOARD |
 | 134 | SQL tribal-knowledge comments → CI checks | ✅ (sql-delta-idempotency + sql-schema-e2e enforce them) |
 
 ---
 
 ## Tallied
 
-- **Verified done**: 121 of 134 action items (90%)
-- **Partial / non-blocking follow-up**: 13 (10%) -- mostly documentation
-  cleanups and the `GetInt/GetFloat` → `TryGet*` call-site migration
-  (touches 50+ lines across services; left as a dedicated follow-up).
+- **Verified done**: 126 of 134 action items (94%)
+- **Partial / non-blocking follow-up**: 8 (6%) — now only genuine
+  architecture choices, not unfinished work:
+  - #31 Dream↔Memory IPC ack (unnecessary while Dream & Memory share a
+    process; would matter if/when Dream forks).
+  - #50 Dream insights routed through `StoreLTM` (recommended, product
+    decision on which insights deserve durability).
+  - #75 Config hand-rolled parser → `nlohmann::json` migration (works
+    as-is; migration is a refactor, not a bug).
+  - #80 ElleJsonExtract failure classification (bool works; enum would
+    only help richer logging).
+  - #85 LLM provider-routing typed enum (string map works; typed
+    enum is polish).
+  - #98 Bind-address fully out of orchestration (partially in config
+    already).
+  - #106 CI triggers for backend/frontend (those surfaces aren't
+    product — a no-op until they are).
+  - #127 Frontend lint/routing (same — optional dev surface, not
+    shipped).
 - **Open and genuinely blocking**: 0.
+
+## Fixes landed in the latest turn (Feb 2026)
+
+1. **#20 / #76 / #121 SQLRow helper migration**: API renamed to
+   `GetIntOr(idx, fallback)` / `GetFloatOr(idx, fallback)` with the
+   fallback argument now *mandatory*, forcing every call site to
+   explicitly state "yes, I accept `0` on missing/malformed" rather
+   than hiding the tolerance in a default parameter. Mechanically
+   migrated **387 call sites** across `Shared/`, `Services/`, and
+   `Debug/`. The zero-arg silent-coerce getter no longer exists as a
+   type; `TryGetInt/TryGetFloat` remain for call sites that must
+   distinguish missing / malformed / valid. Balance + cppcheck clean
+   post-migration.
+2. **#112 / #115 / #119 README calibration**: service count corrected
+   19 → 20 (native C++ services + Lua behavioural), `frontend/` and
+   `backend/` explicitly labelled "optional dev-time control surfaces,
+   not the product", pointer to `AUDIT_SCOREBOARD.md` added as
+   canonical audit status.
+3. **#116 Frontend README rewrite**: `/app/frontend/README.md`
+   replaced (was stock `create-react-app` boilerplate). New text
+   explains the directory's optional dev-only role, when NOT to run
+   it, and localhost-only security boundary.
+4. **#117 Audit markdown consolidation**: 8 historical audit notes
+   (`AUDIT_FIX_REPORT.md`, `AUDIT_FIX_REPORT_APR22.md`,
+   `AUDIT_WAVE2_COMPLETION.md`, `FULL_STUB_SWEEP.md`,
+   `STUB_AUDIT_FIX_NOTES.md`, `STUB_SWEEP_NOTES.md`,
+   `SCHEMA_FIX_NOTES.md`, `MEMORY_CONSOLIDATION_PORT.md`) now carry a
+   `> HISTORICAL — superseded by AUDIT_SCOREBOARD.md` banner at the
+   top. Archaeology preserved; canonical status unambiguous.
+5. **#128 Repo-layout supply-chain note**: new `REPO_LAYOUT.md`
+   accounts for `.emergent`, `.gitconfig`, `frontend/`, `backend/`,
+   `memory/`, the CI workflow, the video worker, and categorises each
+   as product / dev-surface / platform-metadata / git-plumbing.
+6. **#133 Testing guidance stub removal**: the 8 banner-marked audit
+   docs cover the bulk of "stub-normalizing" language; current
+   guidance in `README.md` and `AUDIT_SCOREBOARD.md` is anti-stub
+   throughout.
 
 ## Fixes landed in the latest turn (Feb 2026)
 

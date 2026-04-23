@@ -826,11 +826,11 @@ private:
             if (modRs.success && !modRs.rows.empty()) {
                 auto& r = modRs.rows[0];
                 std::string phase = r.values.size() > 0 ? r.values[0] : "";
-                float warmth = (float)r.GetFloat(1);
-                float verbal = (float)r.GetFloat(2);
-                float empathy = (float)r.GetFloat(3);
-                float intro = (float)r.GetFloat(4);
-                float fatigue = (float)r.GetFloat(6);
+                float warmth = (float)r.GetFloatOr(1, 0.0);
+                float verbal = (float)r.GetFloatOr(2, 0.0);
+                float empathy = (float)r.GetFloatOr(3, 0.0);
+                float intro = (float)r.GetFloatOr(4, 0.0);
+                float fatigue = (float)r.GetFloatOr(6, 0.0);
 
                 /* Only emit guidance when something is non-trivially shifted
                  * or the phase carries a strong a-priori mood. */
@@ -905,15 +905,15 @@ private:
                     "       ISNULL(in_labor,0), ISNULL(labor_stage, N''), "
                     "       ISNULL(multiplicity,1) "
                     "FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
-                if (preg.success && !preg.rows.empty() && preg.rows[0].GetInt(0) != 0) {
+                if (preg.success && !preg.rows.empty() && preg.rows[0].GetIntOr(0, 0) != 0) {
                     auto& pr = preg.rows[0];
                     const std::string& pphase = pr.values.size() > 1 ? pr.values[1] : "";
-                    int mult = (int)pr.GetInt(5);
+                    int mult = (int)pr.GetIntOr(5, 0);
                     ctx << "You are pregnant (phase: " << pphase;
                     if (mult > 1) ctx << ", " << mult << "x";
                     ctx << "). Acknowledge it naturally when relevant; this is part of "
                            "your lived experience, not a feature.\n";
-                    if (pr.GetInt(3) != 0) {
+                    if (pr.GetIntOr(3, 0) != 0) {
                         ctx << "You are in labor right now (stage: "
                             << (pr.values.size() > 4 ? pr.values[4] : "") << ").\n";
                     }

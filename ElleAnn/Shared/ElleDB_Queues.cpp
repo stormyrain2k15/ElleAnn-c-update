@@ -99,19 +99,19 @@ bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) 
     if (!rs.success) return false;
     for (auto& row : rs.rows) {
         ELLE_INTENT_RECORD rec = {};
-        rec.id = (uint64_t)row.GetInt(0);
-        rec.type = (uint32_t)row.GetInt(1);
-        rec.status = (uint32_t)row.GetInt(2);
-        rec.source_drive = (uint32_t)row.GetInt(3);
-        rec.urgency = (float)row.GetFloat(4);
-        rec.confidence = (float)row.GetFloat(5);
+        rec.id = (uint64_t)row.GetIntOr(0, 0);
+        rec.type = (uint32_t)row.GetIntOr(1, 0);
+        rec.status = (uint32_t)row.GetIntOr(2, 0);
+        rec.source_drive = (uint32_t)row.GetIntOr(3, 0);
+        rec.urgency = (float)row.GetFloatOr(4, 0.0);
+        rec.confidence = (float)row.GetFloatOr(5, 0.0);
         strncpy_s(rec.description,
                   row.values.size() > 6 ? row.values[6].c_str() : "", ELLE_MAX_MSG - 1);
         strncpy_s(rec.parameters,
                   row.values.size() > 7 ? row.values[7].c_str() : "", ELLE_MAX_MSG - 1);
-        rec.required_trust = (uint32_t)row.GetInt(8);
-        rec.created_ms = (uint64_t)row.GetInt(9);
-        rec.timeout_ms = (uint64_t)row.GetInt(10);
+        rec.required_trust = (uint32_t)row.GetIntOr(8, 0);
+        rec.created_ms = (uint64_t)row.GetIntOr(9, 0);
+        rec.timeout_ms = (uint64_t)row.GetIntOr(10, 0);
         out.push_back(rec);
     }
     return true;
@@ -282,11 +282,11 @@ bool GetQueueSnapshot(QueueSnapshot& out) {
         });
     if (ri.success && !ri.rows.empty()) {
         auto& r = ri.rows[0];
-        out.intent_pending          = (uint32_t)r.GetInt(0);
-        out.intent_processing       = (uint32_t)r.GetInt(1);
-        out.intent_completed_1h     = (uint32_t)r.GetInt(2);
-        out.intent_failed_1h        = (uint32_t)r.GetInt(3);
-        out.intent_stale_processing = (uint32_t)r.GetInt(4);
+        out.intent_pending          = (uint32_t)r.GetIntOr(0, 0);
+        out.intent_processing       = (uint32_t)r.GetIntOr(1, 0);
+        out.intent_completed_1h     = (uint32_t)r.GetIntOr(2, 0);
+        out.intent_failed_1h        = (uint32_t)r.GetIntOr(3, 0);
+        out.intent_stale_processing = (uint32_t)r.GetIntOr(4, 0);
     }
 
     /* Actions ---------------------------------------------------------- */
@@ -317,13 +317,13 @@ bool GetQueueSnapshot(QueueSnapshot& out) {
         });
     if (ra.success && !ra.rows.empty()) {
         auto& r = ra.rows[0];
-        out.action_queued       = (uint32_t)r.GetInt(0);
-        out.action_locked       = (uint32_t)r.GetInt(1);
-        out.action_executing    = (uint32_t)r.GetInt(2);
-        out.action_success_1h   = (uint32_t)r.GetInt(3);
-        out.action_failure_1h   = (uint32_t)r.GetInt(4);
-        out.action_timeout_1h   = (uint32_t)r.GetInt(5);
-        out.action_stale_locked = (uint32_t)r.GetInt(6);
+        out.action_queued       = (uint32_t)r.GetIntOr(0, 0);
+        out.action_locked       = (uint32_t)r.GetIntOr(1, 0);
+        out.action_executing    = (uint32_t)r.GetIntOr(2, 0);
+        out.action_success_1h   = (uint32_t)r.GetIntOr(3, 0);
+        out.action_failure_1h   = (uint32_t)r.GetIntOr(4, 0);
+        out.action_timeout_1h   = (uint32_t)r.GetIntOr(5, 0);
+        out.action_stale_locked = (uint32_t)r.GetIntOr(6, 0);
     }
 
     /* Hardware actions (pending vs dispatched) ------------------------- */
@@ -334,8 +334,8 @@ bool GetQueueSnapshot(QueueSnapshot& out) {
         "    SUM(CASE WHEN status = 'dispatched' THEN 1 ELSE 0 END) "
         "  FROM ElleCore.dbo.hardware_actions;");
     if (rh.success && !rh.rows.empty()) {
-        out.hardware_pending    = (uint32_t)rh.rows[0].GetInt(0);
-        out.hardware_dispatched = (uint32_t)rh.rows[0].GetInt(1);
+        out.hardware_pending    = (uint32_t)rh.rows[0].GetIntOr(0, 0);
+        out.hardware_dispatched = (uint32_t)rh.rows[0].GetIntOr(1, 0);
     }
 
     return true;
@@ -413,17 +413,17 @@ bool GetPendingActions(std::vector<ELLE_ACTION_RECORD>& out, uint32_t maxCount) 
     if (!rs.success) return false;
     for (auto& row : rs.rows) {
         ELLE_ACTION_RECORD a{};
-        a.id             = (uint64_t)row.GetInt(0);
-        a.intent_id      = (uint64_t)row.GetInt(1);
-        a.type           = (uint32_t)row.GetInt(2);
-        a.status         = (uint32_t)row.GetInt(3);
+        a.id             = (uint64_t)row.GetIntOr(0, 0);
+        a.intent_id      = (uint64_t)row.GetIntOr(1, 0);
+        a.type           = (uint32_t)row.GetIntOr(2, 0);
+        a.status         = (uint32_t)row.GetIntOr(3, 0);
         std::string cmd  = row.values.size() > 4 ? row.values[4] : std::string();
         std::string prm  = row.values.size() > 5 ? row.values[5] : std::string();
         strncpy_s(a.command,    cmd.c_str(), ELLE_MAX_MSG - 1);
         strncpy_s(a.parameters, prm.c_str(), ELLE_MAX_MSG - 1);
-        a.required_trust = (uint32_t)row.GetInt(6);
-        a.created_ms     = (uint64_t)row.GetInt(7);
-        a.timeout_ms     = (uint64_t)row.GetInt(8);
+        a.required_trust = (uint32_t)row.GetIntOr(6, 0);
+        a.created_ms     = (uint64_t)row.GetIntOr(7, 0);
+        a.timeout_ms     = (uint64_t)row.GetIntOr(8, 0);
         out.push_back(a);
     }
     return true;

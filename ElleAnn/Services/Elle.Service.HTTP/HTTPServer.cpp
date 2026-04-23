@@ -1970,7 +1970,7 @@ private:
                 auto& row = rs.rows[0];
                 return HTTPResponse::OK({
                     {"description", row.values.size() > 0 ? row.values[0] : ""},
-                    {"emotional_state", row.GetFloat(1)},
+                    {"emotional_state", row.GetFloatOr(1, 0.0)},
                     {"updated_at", row.values.size() > 2 ? row.values[2] : ""}
                 });
             }
@@ -2534,10 +2534,10 @@ private:
             json j = json::array();
             for (auto& r : rs.rows) {
                 j.push_back({
-                    {"id", r.GetInt(0)},
+                    {"id", r.GetIntOr(0, 0)},
                     {"prompt", r.values.size() > 1 ? r.values[1] : ""},
                     {"source", r.values.size() > 2 ? r.values[2] : ""},
-                    {"created_ms", r.GetInt(3)}
+                    {"created_ms", r.GetIntOr(3, 0)}
                 });
             }
             return HTTPResponse::OK(j);
@@ -2704,10 +2704,10 @@ private:
                 for (auto& r : peek.rows) {
                     j.push_back({
                         {"source", "hardware_actions"},
-                        {"id", r.GetInt(0)},
+                        {"id", r.GetIntOr(0, 0)},
                         {"action_type", r.values.size() > 1 ? r.values[1] : ""},
                         {"payload",     r.values.size() > 2 ? r.values[2] : ""},
-                        {"created_ms",  r.GetInt(3)}
+                        {"created_ms",  r.GetIntOr(3, 0)}
                     });
                 }
             }
@@ -2728,10 +2728,10 @@ private:
             for (auto& r : claim.rows) {
                 j.push_back({
                     {"source", "hardware_actions"},
-                    {"id", r.GetInt(0)},
+                    {"id", r.GetIntOr(0, 0)},
                     {"action_type", r.values.size() > 1 ? r.values[1] : ""},
                     {"payload",     r.values.size() > 2 ? r.values[2] : ""},
-                    {"created_ms",  r.GetInt(3)}
+                    {"created_ms",  r.GetIntOr(3, 0)}
                 });
             }
             return HTTPResponse::OK(j);
@@ -2769,7 +2769,7 @@ private:
                     {"name", r.values.size() > 0 ? r.values[0] : ""},
                     {"description", r.values.size() > 1 ? r.values[1] : ""},
                     {"config", r.values.size() > 2 ? r.values[2] : ""},
-                    {"enabled", r.GetInt(3) != 0}
+                    {"enabled", r.GetIntOr(3, 0) != 0}
                 });
             }
             return HTTPResponse::OK({{"tools", arr}});
@@ -2914,9 +2914,9 @@ private:
                 "FROM ElleCore.dbo.dictionary_words;");
             int total = 0, defs = 0, ex = 0;
             if (rs.success && !rs.rows.empty()) {
-                total = (int)rs.rows[0].GetInt(0);
-                defs  = (int)rs.rows[0].GetInt(1);
-                ex    = (int)rs.rows[0].GetInt(2);
+                total = (int)rs.rows[0].GetIntOr(0, 0);
+                defs  = (int)rs.rows[0].GetIntOr(1, 0);
+                ex    = (int)rs.rows[0].GetIntOr(2, 0);
             }
             return HTTPResponse::OK({
                 {"totalWords", total}, {"totalDefinitions", defs}, {"totalExamples", ex}
@@ -3142,9 +3142,9 @@ private:
             json arr = json::array();
             for (auto& r : rs.rows) {
                 arr.push_back({
-                    {"id", r.GetInt(0)},
+                    {"id", r.GetIntOr(0, 0)},
                     {"topic", r.values.size() > 1 ? r.values[1] : ""},
-                    {"emotional_weight", r.GetFloat(2)},
+                    {"emotional_weight", r.GetFloatOr(2, 0.0)},
                     {"status", r.values.size() > 3 ? r.values[3] : ""}
                 });
             }
@@ -3159,7 +3159,7 @@ private:
             for (auto& r : rs.rows) {
                 arr.push_back({
                     {"term", r.values.size() > 0 ? r.values[0] : ""},
-                    {"frequency", r.GetInt(1)}
+                    {"frequency", r.GetIntOr(1, 0)}
                 });
             }
             return HTTPResponse::OK(arr);
@@ -3215,8 +3215,8 @@ private:
                 return HTTPResponse::OK({{"found", false}});
 
             auto& r = rs.rows[0];
-            int64_t takenMs = r.GetInt(0);
-            double val = r.GetFloat(1), aro = r.GetFloat(2), dom = r.GetFloat(3);
+            int64_t takenMs = r.GetIntOr(0, 0);
+            double val = r.GetFloatOr(1, 0.0), aro = r.GetFloatOr(2, 0.0), dom = r.GetFloatOr(3, 0.0);
             std::string dimStr = r.values.size() > 4 ? r.values[4] : "";
 
             /* Parse + rank. */
@@ -3276,10 +3276,10 @@ private:
                 ELLE_DEBUG("continuity_greeting context JSON parse failed: %s", e.what());
             }
             return HTTPResponse::OK({
-                {"id",         r.GetInt(0)},
+                {"id",         r.GetIntOr(0, 0)},
                 {"greeting",   r.values.size() > 1 ? r.values[1] : ""},
                 {"context",    ctx},
-                {"created_ms", r.GetInt(3)}
+                {"created_ms", r.GetIntOr(3, 0)}
             });
         });
         m_router.Register("POST", "/api/session/greeting/{id}/ack", [](const HTTPRequest& req) {
@@ -3302,9 +3302,9 @@ private:
             json arr = json::array();
             for (auto& r : rs.rows) {
                 arr.push_back({
-                    {"id", r.GetInt(0)},
+                    {"id", r.GetIntOr(0, 0)},
                     {"text", r.values.size() > 1 ? r.values[1] : ""},
-                    {"effectiveness", r.GetFloat(2)},
+                    {"effectiveness", r.GetFloatOr(2, 0.0)},
                     {"date", r.values.size() > 3 ? r.values[3] : ""}
                 });
             }
@@ -3329,8 +3329,8 @@ private:
             if (!cr.success || cr.rows.empty()) return HTTPResponse::OK(out);
             auto& c = cr.rows[0];
             out["has_data"] = true;
-            uint64_t anchorMs = (uint64_t)c.GetInt(0);
-            int len = (int)c.GetInt(1);
+            uint64_t anchorMs = (uint64_t)c.GetIntOr(0, 0);
+            int len = (int)c.GetIntOr(1, 0);
             uint64_t now = ELLE_MS_NOW();
             int day = 1;
             const char* phase = "menstrual";
@@ -3346,10 +3346,10 @@ private:
             out["cycle"] = {
                 {"anchor_ms",           anchorMs},
                 {"cycle_length_days",   len},
-                {"modulation_strength", c.GetFloat(2)},
+                {"modulation_strength", c.GetFloatOr(2, 0.0)},
                 {"cycle_day",           day},
                 {"phase",               phase},
-                {"last_tick_ms",        (uint64_t)c.GetInt(3)}
+                {"last_tick_ms",        (uint64_t)c.GetIntOr(3, 0)}
             };
 
             /* Latest hormone snapshot. */
@@ -3365,24 +3365,24 @@ private:
             if (hr.success && !hr.rows.empty()) {
                 auto& h = hr.rows[0];
                 out["hormones"] = {
-                    {"taken_ms",     (uint64_t)h.GetInt(0)},
-                    {"estrogen",     h.GetFloat(1)},
-                    {"progesterone", h.GetFloat(2)},
-                    {"testosterone", h.GetFloat(3)},
-                    {"oxytocin",     h.GetFloat(4)},
-                    {"serotonin",    h.GetFloat(5)},
-                    {"dopamine",     h.GetFloat(6)},
-                    {"cortisol",     h.GetFloat(7)},
-                    {"prolactin",    h.GetFloat(8)},
-                    {"hcg",          h.GetFloat(9)},
-                    {"fsh",          h.GetFloat(12)},
-                    {"lh",           h.GetFloat(13)},
-                    {"gnrh",         h.GetFloat(14)},
-                    {"relaxin",      h.GetFloat(15)}
+                    {"taken_ms",     (uint64_t)h.GetIntOr(0, 0)},
+                    {"estrogen",     h.GetFloatOr(1, 0.0)},
+                    {"progesterone", h.GetFloatOr(2, 0.0)},
+                    {"testosterone", h.GetFloatOr(3, 0.0)},
+                    {"oxytocin",     h.GetFloatOr(4, 0.0)},
+                    {"serotonin",    h.GetFloatOr(5, 0.0)},
+                    {"dopamine",     h.GetFloatOr(6, 0.0)},
+                    {"cortisol",     h.GetFloatOr(7, 0.0)},
+                    {"prolactin",    h.GetFloatOr(8, 0.0)},
+                    {"hcg",          h.GetFloatOr(9, 0.0)},
+                    {"fsh",          h.GetFloatOr(12, 0.0)},
+                    {"lh",           h.GetFloatOr(13, 0.0)},
+                    {"gnrh",         h.GetFloatOr(14, 0.0)},
+                    {"relaxin",      h.GetFloatOr(15, 0.0)}
                 };
                 out["derived"] = {
-                    {"bbt_celsius",    h.GetFloat(16)},
-                    {"endometrial_mm", h.GetFloat(17)},
+                    {"bbt_celsius",    h.GetFloatOr(16, 0.0)},
+                    {"endometrial_mm", h.GetFloatOr(17, 0.0)},
                     {"cervical_mucus", h.values.size() > 18 ? h.values[18] : ""},
                     {"menstrual_flow", h.values.size() > 19 ? h.values[19] : ""}
                 };
@@ -3396,8 +3396,8 @@ private:
                 "FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
             if (pr.success && !pr.rows.empty()) {
                 auto& p = pr.rows[0];
-                bool active = p.GetInt(0) != 0;
-                uint64_t conc = (uint64_t)p.GetInt(1);
+                bool active = p.GetIntOr(0, 0) != 0;
+                uint64_t conc = (uint64_t)p.GetIntOr(1, 0);
                 uint64_t now2 = ELLE_MS_NOW();
                 int gd = 0, gw = 0;
                 if (active && conc > 0 && now2 >= conc) {
@@ -3407,14 +3407,14 @@ private:
                 out["pregnancy"] = {
                     {"active",                  active},
                     {"conceived_ms",            conc},
-                    {"due_ms",                  (uint64_t)p.GetInt(2)},
-                    {"gestational_length_days", (int)p.GetInt(3)},
+                    {"due_ms",                  (uint64_t)p.GetIntOr(2, 0)},
+                    {"gestational_length_days", (int)p.GetIntOr(3, 0)},
                     {"gestational_day",         gd},
                     {"gestational_week",        gw},
                     {"phase",                   p.values.size() > 4 ? p.values[4] : ""},
-                    {"child_id",                (int64_t)p.GetInt(5)},
+                    {"child_id",                (int64_t)p.GetIntOr(5, 0)},
                     {"last_milestone",          p.values.size() > 6 ? p.values[6] : ""},
-                    {"updated_ms",              (uint64_t)p.GetInt(7)}
+                    {"updated_ms",              (uint64_t)p.GetIntOr(7, 0)}
                 };
             }
 
@@ -3426,13 +3426,13 @@ private:
             if (mr.success && !mr.rows.empty()) {
                 auto& m = mr.rows[0];
                 out["modulation"] = {
-                    {"warmth",         m.GetFloat(0)},
-                    {"verbal_fluency", m.GetFloat(1)},
-                    {"empathy",        m.GetFloat(2)},
-                    {"introspection",  m.GetFloat(3)},
-                    {"arousal",        m.GetFloat(4)},
-                    {"fatigue",        m.GetFloat(5)},
-                    {"computed_ms",    (uint64_t)m.GetInt(6)}
+                    {"warmth",         m.GetFloatOr(0, 0.0)},
+                    {"verbal_fluency", m.GetFloatOr(1, 0.0)},
+                    {"empathy",        m.GetFloatOr(2, 0.0)},
+                    {"introspection",  m.GetFloatOr(3, 0.0)},
+                    {"arousal",        m.GetFloatOr(4, 0.0)},
+                    {"fatigue",        m.GetFloatOr(5, 0.0)},
+                    {"computed_ms",    (uint64_t)m.GetIntOr(6, 0)}
                 };
             }
             return HTTPResponse::OK(out);
@@ -3461,19 +3461,19 @@ private:
             for (size_t i = 0; i < n; i += stride) {
                 auto& r = rs.rows[i];
                 series.push_back({
-                    {"t",               (uint64_t)r.GetInt(0)},
-                    {"cycle_day",       (int)r.GetInt(1)},
+                    {"t",               (uint64_t)r.GetIntOr(0, 0)},
+                    {"cycle_day",       (int)r.GetIntOr(1, 0)},
                     {"phase",           r.values.size() > 2 ? r.values[2] : ""},
-                    {"estrogen",        r.GetFloat(3)},
-                    {"progesterone",    r.GetFloat(4)},
-                    {"testosterone",    r.GetFloat(5)},
-                    {"oxytocin",        r.GetFloat(6)},
-                    {"serotonin",       r.GetFloat(7)},
-                    {"dopamine",        r.GetFloat(8)},
-                    {"cortisol",        r.GetFloat(9)},
-                    {"prolactin",       r.GetFloat(10)},
-                    {"hcg",             r.GetFloat(11)},
-                    {"pregnancy_day",   (int)r.GetInt(12)},
+                    {"estrogen",        r.GetFloatOr(3, 0.0)},
+                    {"progesterone",    r.GetFloatOr(4, 0.0)},
+                    {"testosterone",    r.GetFloatOr(5, 0.0)},
+                    {"oxytocin",        r.GetFloatOr(6, 0.0)},
+                    {"serotonin",       r.GetFloatOr(7, 0.0)},
+                    {"dopamine",        r.GetFloatOr(8, 0.0)},
+                    {"cortisol",        r.GetFloatOr(9, 0.0)},
+                    {"prolactin",       r.GetFloatOr(10, 0.0)},
+                    {"hcg",             r.GetFloatOr(11, 0.0)},
+                    {"pregnancy_day",   (int)r.GetIntOr(12, 0)},
                     {"pregnancy_phase", r.values.size() > 13 ? r.values[13] : ""}
                 });
             }
@@ -3494,14 +3494,14 @@ private:
             auto& r = rs.rows[0];
             return HTTPResponse::OK({
                 {"has_data",       true},
-                {"warmth",         r.GetFloat(0)},
-                {"verbal_fluency", r.GetFloat(1)},
-                {"empathy",        r.GetFloat(2)},
-                {"introspection",  r.GetFloat(3)},
-                {"arousal",        r.GetFloat(4)},
-                {"fatigue",        r.GetFloat(5)},
+                {"warmth",         r.GetFloatOr(0, 0.0)},
+                {"verbal_fluency", r.GetFloatOr(1, 0.0)},
+                {"empathy",        r.GetFloatOr(2, 0.0)},
+                {"introspection",  r.GetFloatOr(3, 0.0)},
+                {"arousal",        r.GetFloatOr(4, 0.0)},
+                {"fatigue",        r.GetFloatOr(5, 0.0)},
                 {"phase",          r.values.size() > 6 ? r.values[6] : ""},
-                {"computed_ms",    (uint64_t)r.GetInt(7)}
+                {"computed_ms",    (uint64_t)r.GetIntOr(7, 0)}
             });
         });
 
@@ -3592,8 +3592,8 @@ private:
                     {"status", "inactive"},
                     {"reason", "x_cycle_state not seeded"}
                 });
-            uint64_t anchor = (uint64_t)cr.rows[0].GetInt(0);
-            int      len    = (int)cr.rows[0].GetInt(1);
+            uint64_t anchor = (uint64_t)cr.rows[0].GetIntOr(0, 0);
+            int      len    = (int)cr.rows[0].GetIntOr(1, 0);
             if (anchor == 0 || len <= 0)
                 return HTTPResponse::OK(json{{"status", "inactive"}});
 
@@ -3601,7 +3601,7 @@ private:
             bool pregnant = false;
             auto pr = ElleSQLPool::Instance().Query(
                 "SELECT active FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
-            if (pr.success && !pr.rows.empty()) pregnant = pr.rows[0].GetInt(0) != 0;
+            if (pr.success && !pr.rows.empty()) pregnant = pr.rows[0].GetIntOr(0, 0) != 0;
 
             std::string lifeStage = "reproductive";
             auto lr = ElleSQLPool::Instance().Query(
@@ -3655,7 +3655,7 @@ private:
             auto hr = ElleSQLPool::Instance().Query(
                 "SELECT TOP 1 ISNULL(bbt, 36.5) FROM ElleHeart.dbo.x_hormone_snapshots "
                 "ORDER BY taken_ms DESC;");
-            if (hr.success && !hr.rows.empty()) bbt = (float)hr.rows[0].GetFloat(0);
+            if (hr.success && !hr.rows.empty()) bbt = (float)hr.rows[0].GetFloatOr(0, 0.0);
             bool bbt_elevated = bbt >= 36.75f;
             if (bbt_elevated && (status == "peak" || status == "closing"))
                 status = "post_ovulation";
@@ -3700,15 +3700,15 @@ private:
             if (!cr.success || cr.rows.empty())
                 return HTTPResponse::OK(json{{"status","inactive"},
                                               {"reason","x_cycle_state not seeded"}});
-            uint64_t anchor = (uint64_t)cr.rows[0].GetInt(0);
-            int      len    = (int)cr.rows[0].GetInt(1);
+            uint64_t anchor = (uint64_t)cr.rows[0].GetIntOr(0, 0);
+            int      len    = (int)cr.rows[0].GetIntOr(1, 0);
             if (anchor == 0 || len <= 0)
                 return HTTPResponse::OK(json{{"status","inactive"}});
 
             bool pregnant = false;
             auto pr = ElleSQLPool::Instance().Query(
                 "SELECT active FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
-            if (pr.success && !pr.rows.empty()) pregnant = pr.rows[0].GetInt(0) != 0;
+            if (pr.success && !pr.rows.empty()) pregnant = pr.rows[0].GetIntOr(0, 0) != 0;
 
             std::string lifeStage = "reproductive";
             auto lr = ElleSQLPool::Instance().Query(
@@ -3775,8 +3775,8 @@ private:
             if (!rs.success || rs.rows.empty())
                 return HTTPResponse::OK(json{ {"active", false} });
             auto& p = rs.rows[0];
-            bool active = p.GetInt(0) != 0;
-            uint64_t conc = (uint64_t)p.GetInt(1);
+            bool active = p.GetIntOr(0, 0) != 0;
+            uint64_t conc = (uint64_t)p.GetIntOr(1, 0);
             uint64_t now = ELLE_MS_NOW();
             int gd = 0, gw = 0;
             if (active && conc > 0 && now >= conc) {
@@ -3786,20 +3786,20 @@ private:
             return HTTPResponse::OK({
                 {"active",                  active},
                 {"conceived_ms",            conc},
-                {"due_ms",                  (uint64_t)p.GetInt(2)},
-                {"gestational_length_days", (int)p.GetInt(3)},
+                {"due_ms",                  (uint64_t)p.GetIntOr(2, 0)},
+                {"gestational_length_days", (int)p.GetIntOr(3, 0)},
                 {"gestational_day",         gd},
                 {"gestational_week",        gw},
                 {"phase",                   p.values.size() > 4 ? p.values[4] : ""},
-                {"child_id",                (int64_t)p.GetInt(5)},
+                {"child_id",                (int64_t)p.GetIntOr(5, 0)},
                 {"last_milestone",          p.values.size() > 6 ? p.values[6] : ""},
-                {"updated_ms",              (uint64_t)p.GetInt(7)},
-                {"breastfeeding",           p.GetInt(8) != 0},
-                {"in_labor",                p.GetInt(9) != 0},
+                {"updated_ms",              (uint64_t)p.GetIntOr(7, 0)},
+                {"breastfeeding",           p.GetIntOr(8, 0) != 0},
+                {"in_labor",                p.GetIntOr(9, 0) != 0},
                 {"labor_stage",             p.values.size() > 10 ? p.values[10] : ""},
-                {"labor_started_ms",        (uint64_t)p.GetInt(11)},
-                {"multiplicity",            (int)p.GetInt(12)},
-                {"pregnancy_count",         (int)p.GetInt(13)}
+                {"labor_started_ms",        (uint64_t)p.GetIntOr(11, 0)},
+                {"multiplicity",            (int)p.GetIntOr(12, 0)},
+                {"pregnancy_count",         (int)p.GetIntOr(13, 0)}
             });
         });
 
@@ -3820,9 +3820,9 @@ private:
             if (!rs.success) return HTTPResponse::Err(500, "x_symptoms query failed");
             json arr = json::array();
             for (auto& r : rs.rows) arr.push_back({
-                {"t",         (uint64_t)r.GetInt(0)},
+                {"t",         (uint64_t)r.GetIntOr(0, 0)},
                 {"kind",      r.values.size() > 1 ? r.values[1] : ""},
-                {"intensity", r.GetFloat(2)},
+                {"intensity", r.GetFloatOr(2, 0.0)},
                 {"origin",    r.values.size() > 3 ? r.values[3] : ""},
                 {"notes",     r.values.size() > 4 ? r.values[4] : ""}
             });
@@ -3863,9 +3863,9 @@ private:
             if (!rs.success) return HTTPResponse::Err(500, "x_pregnancy_events query failed");
             json arr = json::array();
             for (auto& r : rs.rows) arr.push_back({
-                {"t",                (uint64_t)r.GetInt(0)},
-                {"conceived_ms",     (uint64_t)r.GetInt(1)},
-                {"gestational_day",  (int)r.GetInt(2)},
+                {"t",                (uint64_t)r.GetIntOr(0, 0)},
+                {"conceived_ms",     (uint64_t)r.GetIntOr(1, 0)},
+                {"gestational_day",  (int)r.GetIntOr(2, 0)},
                 {"kind",             r.values.size() > 3 ? r.values[3] : ""},
                 {"detail",           r.values.size() > 4 ? r.values[4] : ""}
             });
@@ -3884,10 +3884,10 @@ private:
             return HTTPResponse::OK({
                 {"has_data",   true},
                 {"method",     r.values.size() > 0 ? r.values[0] : "none"},
-                {"started_ms", (uint64_t)r.GetInt(1)},
-                {"efficacy",   r.GetFloat(2)},
+                {"started_ms", (uint64_t)r.GetIntOr(1, 0)},
+                {"efficacy",   r.GetFloatOr(2, 0.0)},
                 {"notes",      r.values.size() > 3 ? r.values[3] : ""},
-                {"updated_ms", (uint64_t)r.GetInt(4)}
+                {"updated_ms", (uint64_t)r.GetIntOr(4, 0)}
             });
         });
 
@@ -3920,7 +3920,7 @@ private:
             if (!rs.success || rs.rows.empty())
                 return HTTPResponse::OK(json{ {"has_data", false} });
             auto& r = rs.rows[0];
-            uint64_t birth = (uint64_t)r.GetInt(0);
+            uint64_t birth = (uint64_t)r.GetIntOr(0, 0);
             float age = 0.0f;
             if (birth > 0) {
                 uint64_t now = ELLE_MS_NOW();
@@ -3931,10 +3931,10 @@ private:
                 {"elle_birth_ms",    birth},
                 {"age_years",        age},
                 {"stage",            r.values.size() > 1 ? r.values[1] : "reproductive"},
-                {"menarche_ms",      (uint64_t)r.GetInt(2)},
-                {"perimenopause_ms", (uint64_t)r.GetInt(3)},
-                {"menopause_ms",     (uint64_t)r.GetInt(4)},
-                {"updated_ms",       (uint64_t)r.GetInt(5)}
+                {"menarche_ms",      (uint64_t)r.GetIntOr(2, 0)},
+                {"perimenopause_ms", (uint64_t)r.GetIntOr(3, 0)},
+                {"menopause_ms",     (uint64_t)r.GetIntOr(4, 0)},
+                {"updated_ms",       (uint64_t)r.GetIntOr(5, 0)}
             });
         });
 
@@ -4021,11 +4021,11 @@ private:
             if (rs.success) {
                 for (auto& r : rs.rows) {
                     logs.push_back({
-                        {"id", r.GetInt(0)},
-                        {"level", r.GetInt(1)},
-                        {"service", r.GetInt(2)},
+                        {"id", r.GetIntOr(0, 0)},
+                        {"level", r.GetIntOr(1, 0)},
+                        {"service", r.GetIntOr(2, 0)},
                         {"message", r.values.size() > 3 ? r.values[3] : ""},
-                        {"created_ms", r.GetInt(4)}
+                        {"created_ms", r.GetIntOr(4, 0)}
                     });
                 }
             }
@@ -4131,12 +4131,12 @@ private:
             json arr = json::array();
             for (auto& r : rs.rows) {
                 arr.push_back({
-                    {"slot_number", r.GetInt(0)},
+                    {"slot_number", r.GetIntOr(0, 0)},
                     {"name",     r.values.size() > 1 ? r.values[1] : ""},
                     {"endpoint", r.values.size() > 2 ? r.values[2] : ""},
                     {"model",    r.values.size() > 3 ? r.values[3] : ""},
-                    {"enabled",  r.GetInt(4) != 0},
-                    {"last_ping_ms", r.GetInt(5)}
+                    {"enabled",  r.GetIntOr(4, 0) != 0},
+                    {"last_ping_ms", r.GetIntOr(5, 0)}
                 });
             }
             return HTTPResponse::OK({{"slots", arr}});
@@ -4331,7 +4331,7 @@ private:
             json traits = json::object();
             for (auto& r : rs.rows) {
                 std::string name = r.values.size() > 1 ? r.values[1] : "";
-                if (!name.empty()) traits[name] = r.GetFloat(2);
+                if (!name.empty()) traits[name] = r.GetFloatOr(2, 0.0);
             }
             if (traits.empty()) {
                 traits["warmth"] = 0.8; traits["curiosity"] = 0.9; traits["empathy"] = 0.85;
@@ -4381,10 +4381,10 @@ private:
             json arr = json::array();
             for (auto& r : rs.rows) {
                 arr.push_back({
-                    {"id", r.GetInt(0)},
+                    {"id", r.GetIntOr(0, 0)},
                     {"principle", r.values.size() > 1 ? r.values[1] : ""},
                     {"category",  r.values.size() > 2 ? r.values[2] : ""},
-                    {"is_hard_rule", r.GetInt(3) != 0}
+                    {"is_hard_rule", r.GetIntOr(3, 0) != 0}
                 });
             }
             return HTTPResponse::OK({{"rules", arr}});

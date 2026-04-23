@@ -38,11 +38,18 @@ struct SQLRow {
     
     const std::string& operator[](size_t idx) const { return values[idx]; }
 
-    /* Permissive getters — return the default on NULL, out-of-range, OR
-     * on non-numeric cell contents. Preserved for callers that really do
-     * want "silently treat garbage as 0" semantics (legacy paths).      */
-    int64_t     GetInt(size_t idx) const;
-    double      GetFloat(size_t idx) const;
+    /* Row accessors.
+     *
+     * Policy (Feb 2026 audit, item #20/#76/#121): the silent-default
+     * zero-arg style has been eliminated at the type level. If you
+     * accept a fallback, you state it explicitly with
+     * `GetIntOr(idx, fallback)`. If you need to distinguish missing /
+     * malformed / valid, you use `TryGetInt(idx, out)`. There is no
+     * longer a zero-arg overload that silently returns 0 on bad data;
+     * call sites that would have used it now make the tolerance
+     * visible at the call site.                                        */
+    [[nodiscard]] int64_t     GetIntOr(size_t idx, int64_t fallback) const;
+    [[nodiscard]] double      GetFloatOr(size_t idx, double fallback) const;
 
     /* Strict getters — return `false` on NULL, out-of-range, OR
      * non-numeric contents. Caller reads `outVal` only when the helper

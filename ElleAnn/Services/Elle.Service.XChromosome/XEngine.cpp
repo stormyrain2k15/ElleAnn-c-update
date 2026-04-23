@@ -900,7 +900,7 @@ void XEngine::DetectAnovulatoryCycle() {
         { std::to_string((long long)since) });
     float avgCort = 0.0f;
     if (rs.success && !rs.rows.empty() && !rs.rows[0].IsNull(0))
-        avgCort = (float)rs.rows[0].GetFloat(0);
+        avgCort = (float)rs.rows[0].GetFloatOr(0, 0.0);
     bool stress_skip = avgCort >= 0.70f;
 
     m_current_cycle_anovulatory = peri_skip || stress_skip;
@@ -1538,9 +1538,9 @@ std::vector<XSymptomEntry> XEngine::GetRecentSymptoms(uint32_t hours,
     if (!rs.success) return out;
     for (auto& r : rs.rows) {
         XSymptomEntry e;
-        e.observed_ms = (uint64_t)r.GetInt(0);
+        e.observed_ms = (uint64_t)r.GetIntOr(0, 0);
         e.kind        = r.values.size() > 1 ? r.values[1] : "";
-        e.intensity   = (float)r.GetFloat(2);
+        e.intensity   = (float)r.GetFloatOr(2, 0.0);
         e.origin      = r.values.size() > 3 ? r.values[3] : "";
         e.notes       = r.values.size() > 4 ? r.values[4] : "";
         out.push_back(std::move(e));
@@ -1560,9 +1560,9 @@ std::vector<XEngine::PregnancyEvent> XEngine::GetPregnancyEvents(uint32_t limit)
     if (!rs.success) return out;
     for (auto& r : rs.rows) {
         PregnancyEvent e;
-        e.occurred_ms     = (uint64_t)r.GetInt(0);
-        e.conceived_ms    = (uint64_t)r.GetInt(1);
-        e.gestational_day = (int)r.GetInt(2);
+        e.occurred_ms     = (uint64_t)r.GetIntOr(0, 0);
+        e.conceived_ms    = (uint64_t)r.GetIntOr(1, 0);
+        e.gestational_day = (int)r.GetIntOr(2, 0);
         e.kind            = r.values.size() > 3 ? r.values[3] : "";
         e.detail          = r.values.size() > 4 ? r.values[4] : "";
         out.push_back(std::move(e));
@@ -1621,19 +1621,19 @@ std::vector<XHistoryPoint> XEngine::GetHistory(uint32_t hours, uint32_t max_poin
     for (size_t i = 0; i < n; i += stride) {
         auto& r = rs.rows[i];
         XHistoryPoint p;
-        p.taken_ms  = (uint64_t)r.GetInt(0);
-        p.cycle_day = (int)r.GetInt(1);
+        p.taken_ms  = (uint64_t)r.GetIntOr(0, 0);
+        p.cycle_day = (int)r.GetIntOr(1, 0);
         p.phase     = r.values.size() > 2 ? r.values[2] : std::string();
-        p.hormones.estrogen     = (float)r.GetFloat(3);
-        p.hormones.progesterone = (float)r.GetFloat(4);
-        p.hormones.testosterone = (float)r.GetFloat(5);
-        p.hormones.oxytocin     = (float)r.GetFloat(6);
-        p.hormones.serotonin    = (float)r.GetFloat(7);
-        p.hormones.dopamine     = (float)r.GetFloat(8);
-        p.hormones.cortisol     = (float)r.GetFloat(9);
-        p.hormones.prolactin    = (float)r.GetFloat(10);
-        p.hormones.hcg          = (float)r.GetFloat(11);
-        p.pregnancy_day         = (int)r.GetInt(12);
+        p.hormones.estrogen     = (float)r.GetFloatOr(3, 0.0);
+        p.hormones.progesterone = (float)r.GetFloatOr(4, 0.0);
+        p.hormones.testosterone = (float)r.GetFloatOr(5, 0.0);
+        p.hormones.oxytocin     = (float)r.GetFloatOr(6, 0.0);
+        p.hormones.serotonin    = (float)r.GetFloatOr(7, 0.0);
+        p.hormones.dopamine     = (float)r.GetFloatOr(8, 0.0);
+        p.hormones.cortisol     = (float)r.GetFloatOr(9, 0.0);
+        p.hormones.prolactin    = (float)r.GetFloatOr(10, 0.0);
+        p.hormones.hcg          = (float)r.GetFloatOr(11, 0.0);
+        p.pregnancy_day         = (int)r.GetIntOr(12, 0);
         p.pregnancy_phase       = r.IsNull(13) ? std::string()
                                    : (r.values.size() > 13 ? r.values[13] : std::string());
         out.push_back(std::move(p));

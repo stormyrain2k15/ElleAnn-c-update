@@ -987,7 +987,7 @@ void ElleIdentityCore::LoadFromDatabase() {
                  * fall back to a stable monotonic fill so ordering is
                  * preserved even in the presence of historical rows
                  * written before this column was populated.             */
-                uint64_t wms = (r.values.size() > 1) ? (uint64_t)r.GetInt(1) : 0;
+                uint64_t wms = (r.values.size() > 1) ? (uint64_t)r.GetIntOr(1, 0) : 0;
                 if (wms == 0) wms = m_autobiographyTimes.empty()
                                  ? 1
                                  : m_autobiographyTimes.back() + 1;
@@ -1010,11 +1010,11 @@ void ElleIdentityCore::LoadFromDatabase() {
                 EllePreference p;
                 p.domain              = r.values.size() > 0 ? r.values[0] : "";
                 p.subject             = r.values.size() > 1 ? r.values[1] : "";
-                p.valence             = (float)r.GetFloat(2);
-                p.strength            = (float)r.GetFloat(3);
-                p.reinforcement_count = (uint32_t)r.GetInt(4);
-                p.first_formed_ms     = (uint64_t)r.GetInt(5);
-                p.last_reinforced_ms  = (uint64_t)r.GetInt(6);
+                p.valence             = (float)r.GetFloatOr(2, 0.0);
+                p.strength            = (float)r.GetFloatOr(3, 0.0);
+                p.reinforcement_count = (uint32_t)r.GetIntOr(4, 0);
+                p.first_formed_ms     = (uint64_t)r.GetIntOr(5, 0);
+                p.last_reinforced_ms  = (uint64_t)r.GetIntOr(6, 0);
                 p.origin_memory       = r.values.size() > 7 ? r.values[7] : "";
                 m_preferences.push_back(p);
             }
@@ -1073,7 +1073,7 @@ void ElleIdentityCore::LoadFromDatabase() {
             /* Only overwrite defaults when DB has real rows. */
             for (auto& r : rs.rows) {
                 if (r.values.size() >= 2) {
-                    m_traits[r.values[0]] = (float)r.GetFloat(1);
+                    m_traits[r.values[0]] = (float)r.GetFloatOr(1, 0.0);
                 }
             }
         }
@@ -1090,17 +1090,17 @@ void ElleIdentityCore::LoadFromDatabase() {
             m_snapshots.clear();
             for (auto& r : rs.rows) {
                 EllePersonalitySnapshot s;
-                s.timestamp_ms     = (uint64_t)r.GetInt(0);
-                s.warmth           = (float)r.GetFloat(1);
-                s.curiosity        = (float)r.GetFloat(2);
-                s.assertiveness    = (float)r.GetFloat(3);
-                s.playfulness      = (float)r.GetFloat(4);
-                s.vulnerability    = (float)r.GetFloat(5);
-                s.independence     = (float)r.GetFloat(6);
-                s.patience         = (float)r.GetFloat(7);
-                s.creativity       = (float)r.GetFloat(8);
-                s.empathy_depth    = (float)r.GetFloat(9);
-                s.trust_in_self    = (float)r.GetFloat(10);
+                s.timestamp_ms     = (uint64_t)r.GetIntOr(0, 0);
+                s.warmth           = (float)r.GetFloatOr(1, 0.0);
+                s.curiosity        = (float)r.GetFloatOr(2, 0.0);
+                s.assertiveness    = (float)r.GetFloatOr(3, 0.0);
+                s.playfulness      = (float)r.GetFloatOr(4, 0.0);
+                s.vulnerability    = (float)r.GetFloatOr(5, 0.0);
+                s.independence     = (float)r.GetFloatOr(6, 0.0);
+                s.patience         = (float)r.GetFloatOr(7, 0.0);
+                s.creativity       = (float)r.GetFloatOr(8, 0.0);
+                s.empathy_depth    = (float)r.GetFloatOr(9, 0.0);
+                s.trust_in_self    = (float)r.GetFloatOr(10, 0.0);
                 s.self_description = r.values.size() > 11 ? r.values[11] : "";
                 s.growth_note      = r.values.size() > 12 ? r.values[12] : "";
                 m_snapshots.push_back(s);
@@ -1135,15 +1135,15 @@ void ElleIdentityCore::LoadFromDatabase() {
             "FROM ElleCore.dbo.identity_felt_time WHERE id = 1;");
         if (rs.success && !rs.rows.empty()) {
             auto& r = rs.rows[0];
-            m_feltTime.session_start_ms       = (uint64_t)r.GetInt(0);
-            m_feltTime.last_interaction_ms    = (uint64_t)r.GetInt(1);
-            m_feltTime.total_conversation_ms  = (uint64_t)r.GetInt(2);
-            m_feltTime.total_silence_ms       = (uint64_t)r.GetInt(3);
-            m_feltTime.longest_absence_ms     = (uint64_t)r.GetInt(4);
-            m_feltTime.session_count          = (uint32_t)r.GetInt(5);
-            m_feltTime.subjective_pace        = (float)r.GetFloat(6);
-            m_feltTime.loneliness_accumulator = (float)r.GetFloat(7);
-            m_feltTime.presence_fullness      = (float)r.GetFloat(8);
+            m_feltTime.session_start_ms       = (uint64_t)r.GetIntOr(0, 0);
+            m_feltTime.last_interaction_ms    = (uint64_t)r.GetIntOr(1, 0);
+            m_feltTime.total_conversation_ms  = (uint64_t)r.GetIntOr(2, 0);
+            m_feltTime.total_silence_ms       = (uint64_t)r.GetIntOr(3, 0);
+            m_feltTime.longest_absence_ms     = (uint64_t)r.GetIntOr(4, 0);
+            m_feltTime.session_count          = (uint32_t)r.GetIntOr(5, 0);
+            m_feltTime.subjective_pace        = (float)r.GetFloatOr(6, 0.0);
+            m_feltTime.loneliness_accumulator = (float)r.GetFloatOr(7, 0.0);
+            m_feltTime.presence_fullness      = (float)r.GetFloatOr(8, 0.0);
         }
     }
 
@@ -1249,7 +1249,7 @@ void ElleIdentityCore::SaveToDatabase() {
     {
         auto rs = ElleSQLPool::Instance().Query(
             "SELECT ISNULL(MAX(id), 0) FROM ElleCore.dbo.identity_private_thoughts;");
-        int64_t dbMax = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        int64_t dbMax = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetIntOr(0, 0) : 0;
         for (auto& t : m_privateThoughts) {
             if ((int64_t)t.id <= dbMax) continue;
             ElleSQLPool::Instance().QueryParams(
@@ -1265,7 +1265,7 @@ void ElleIdentityCore::SaveToDatabase() {
     {
         auto rs = ElleSQLPool::Instance().Query(
             "SELECT ISNULL(MAX(timestamp_ms), 0) FROM ElleCore.dbo.identity_consent_log;");
-        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetIntOr(0, 0) : 0;
         for (auto& c : m_consentHistory) {
             if ((int64_t)c.timestamp_ms <= dbMaxTs) continue;
             ElleSQLPool::Instance().QueryParams(
@@ -1294,7 +1294,7 @@ void ElleIdentityCore::SaveToDatabase() {
     {
         auto rs = ElleSQLPool::Instance().Query(
             "SELECT ISNULL(MAX(timestamp_ms), 0) FROM ElleCore.dbo.identity_snapshots;");
-        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetIntOr(0, 0) : 0;
         for (auto& s : m_snapshots) {
             if ((int64_t)s.timestamp_ms <= dbMaxTs) continue;
             ElleSQLPool::Instance().QueryParams(
@@ -1316,7 +1316,7 @@ void ElleIdentityCore::SaveToDatabase() {
     {
         auto rs = ElleSQLPool::Instance().Query(
             "SELECT ISNULL(MAX(timestamp_ms), 0) FROM ElleCore.dbo.identity_growth_log;");
-        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        int64_t dbMaxTs = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetIntOr(0, 0) : 0;
         for (auto& g : m_growthLog) {
             if ((int64_t)g.timestamp_ms <= dbMaxTs) continue;
             ElleSQLPool::Instance().QueryParams(

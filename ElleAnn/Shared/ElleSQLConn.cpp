@@ -16,45 +16,45 @@
 /*──────────────────────────────────────────────────────────────────────────────
  * SQLRow helpers
  *──────────────────────────────────────────────────────────────────────────────*/
-int64_t SQLRow::GetInt(size_t idx) const {
-    if (idx >= values.size() || values[idx].empty()) return 0;
+int64_t SQLRow::GetIntOr(size_t idx, int64_t fallback) const {
+    if (idx >= values.size() || values[idx].empty()) return fallback;
     /* Strict parse: strtoll + full-consume. Previous std::stoll/catch
      * silently returned 0 on "1.5", "abc", "  42  " — the first two
      * obscured bad schema assumptions, the third mis-parsed trimmable
      * whitespace as a failure. Now: trim ASCII whitespace, require the
-     * remainder to be a pure integer. Anything else → WARN + 0.        */
+     * remainder to be a pure integer. Anything else → WARN + fallback. */
     const std::string& raw = values[idx];
     size_t b = 0, e = raw.size();
     while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
     while (e > b && (raw[e-1] == ' ' || raw[e-1] == '\t')) --e;
-    if (b == e) return 0;
+    if (b == e) return fallback;
     std::string s = raw.substr(b, e - b);
     errno = 0;
     char* endp = nullptr;
     long long v = std::strtoll(s.c_str(), &endp, 10);
     if (errno == ERANGE || !endp || endp == s.c_str() || *endp != '\0') {
-        ELLE_WARN("SQLRow::GetInt(col=%zu) coerced non-integer '%s' -> 0",
-                  idx, raw.c_str());
-        return 0;
+        ELLE_WARN("SQLRow::GetIntOr(col=%zu) coerced non-integer '%s' -> %lld",
+                  idx, raw.c_str(), (long long)fallback);
+        return fallback;
     }
     return (int64_t)v;
 }
 
-double SQLRow::GetFloat(size_t idx) const {
-    if (idx >= values.size() || values[idx].empty()) return 0.0;
+double SQLRow::GetFloatOr(size_t idx, double fallback) const {
+    if (idx >= values.size() || values[idx].empty()) return fallback;
     const std::string& raw = values[idx];
     size_t b = 0, e = raw.size();
     while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
     while (e > b && (raw[e-1] == ' ' || raw[e-1] == '\t')) --e;
-    if (b == e) return 0.0;
+    if (b == e) return fallback;
     std::string s = raw.substr(b, e - b);
     errno = 0;
     char* endp = nullptr;
     double v = std::strtod(s.c_str(), &endp);
     if (errno == ERANGE || !endp || endp == s.c_str() || *endp != '\0') {
-        ELLE_WARN("SQLRow::GetFloat(col=%zu) coerced non-numeric '%s' -> 0",
-                  idx, raw.c_str());
-        return 0.0;
+        ELLE_WARN("SQLRow::GetFloatOr(col=%zu) coerced non-numeric '%s' -> %g",
+                  idx, raw.c_str(), fallback);
+        return fallback;
     }
     return v;
 }
@@ -391,7 +391,7 @@ SQLResultSet SQLConnection::CallProc(const std::string& proc,
 int64_t SQLConnection::ExecuteScalar(const std::string& sql) {
     SQLResultSet rs = Execute(sql);
     if (rs.success && !rs.rows.empty() && !rs.rows[0].values.empty()) {
-        return rs.rows[0].GetInt(0);
+        return rs.rows[0].GetIntOr(0, 0);
     }
     return 0;
 }

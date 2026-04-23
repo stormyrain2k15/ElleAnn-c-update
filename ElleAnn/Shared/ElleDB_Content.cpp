@@ -77,17 +77,17 @@ std::string GetSubjective(const std::string& key) {
  * MEMORY CRUD helpers for /api/memory/* endpoints
  *──────────────────────────────────────────────────────────────────────────────*/
 static void FillMemoryRow(ElleDB::MemoryRow& r, const SQLRow& row) {
-    r.id = row.GetInt(0);
-    r.type = (int)row.GetInt(1);
-    r.tier = (int)row.GetInt(2);
+    r.id = row.GetIntOr(0, 0);
+    r.type = (int)row.GetIntOr(1, 0);
+    r.tier = (int)row.GetIntOr(2, 0);
     r.content = row.values.size() > 3 ? row.values[3] : std::string();
     r.summary = row.values.size() > 4 ? row.values[4] : std::string();
-    r.emotional_valence = (float)row.GetFloat(5);
-    r.importance = (float)row.GetFloat(6);
-    r.relevance  = (float)row.GetFloat(7);
-    r.access_count   = (int)row.GetInt(8);
-    r.created_ms     = (uint64_t)row.GetInt(9);
-    r.last_access_ms = (uint64_t)row.GetInt(10);
+    r.emotional_valence = (float)row.GetFloatOr(5, 0.0);
+    r.importance = (float)row.GetFloatOr(6, 0.0);
+    r.relevance  = (float)row.GetFloatOr(7, 0.0);
+    r.access_count   = (int)row.GetIntOr(8, 0);
+    r.created_ms     = (uint64_t)row.GetIntOr(9, 0);
+    r.last_access_ms = (uint64_t)row.GetIntOr(10, 0);
 }
 
 bool ListMemories(std::vector<MemoryRow>& out, int memory_type,
@@ -154,14 +154,14 @@ bool CreateConversation(int32_t user_id, const std::string& title, int32_t& newI
         { std::to_string(user_id), title });
     if (!rs.success) { ELLE_ERROR("CreateConversation: %s", rs.error.c_str()); return false; }
     if (!rs.rows.empty()) {
-        newId = (int32_t)rs.rows[0].GetInt(0);
+        newId = (int32_t)rs.rows[0].GetIntOr(0, 0);
         return newId > 0;
     }
     /* Fallback: re-query by MAX(id) for this user */
     auto r2 = ElleSQLPool::Instance().QueryParams(
         "SELECT TOP 1 id FROM ElleCore.dbo.conversations WHERE user_id = ? ORDER BY id DESC;",
         { std::to_string(user_id) });
-    if (r2.success && !r2.rows.empty()) { newId = (int32_t)r2.rows[0].GetInt(0); return true; }
+    if (r2.success && !r2.rows.empty()) { newId = (int32_t)r2.rows[0].GetIntOr(0, 0); return true; }
     return false;
 }
 
@@ -176,13 +176,13 @@ bool ListConversations(std::vector<ConversationRow>& out, uint32_t limit) {
     if (!rs.success) return false;
     for (auto& row : rs.rows) {
         ConversationRow c;
-        c.id = (int32_t)row.GetInt(0);
-        c.user_id = (int32_t)row.GetInt(1);
+        c.id = (int32_t)row.GetIntOr(0, 0);
+        c.user_id = (int32_t)row.GetIntOr(1, 0);
         c.title = row.values.size() > 2 ? row.values[2] : "";
         c.started_at = row.values.size() > 3 ? row.values[3] : "";
         c.last_message_at = row.values.size() > 4 ? row.values[4] : "";
-        c.total_messages = (int32_t)row.GetInt(5);
-        c.is_active = row.GetInt(6) != 0;
+        c.total_messages = (int32_t)row.GetIntOr(5, 0);
+        c.is_active = row.GetIntOr(6, 0) != 0;
         out.push_back(c);
     }
     return true;
@@ -198,13 +198,13 @@ bool GetConversation(int32_t convId, ConversationRow& out) {
         { std::to_string(convId) });
     if (!rs.success || rs.rows.empty()) return false;
     auto& row = rs.rows[0];
-    out.id = (int32_t)row.GetInt(0);
-    out.user_id = (int32_t)row.GetInt(1);
+    out.id = (int32_t)row.GetIntOr(0, 0);
+    out.user_id = (int32_t)row.GetIntOr(1, 0);
     out.title = row.values.size() > 2 ? row.values[2] : "";
     out.started_at = row.values.size() > 3 ? row.values[3] : "";
     out.last_message_at = row.values.size() > 4 ? row.values[4] : "";
-    out.total_messages = (int32_t)row.GetInt(5);
-    out.is_active = row.GetInt(6) != 0;
+    out.total_messages = (int32_t)row.GetIntOr(5, 0);
+    out.is_active = row.GetIntOr(6, 0) != 0;
     return true;
 }
 
@@ -244,7 +244,7 @@ int64_t CountTable(const std::string& table) {
     auto rs = ElleSQLPool::Instance().Query(
         "SELECT COUNT(*) FROM ElleCore.dbo.[" + table + "];");
     if (!rs.success || rs.rows.empty()) return -1;
-    return rs.rows[0].GetInt(0);
+    return rs.rows[0].GetIntOr(0, 0);
 }
 
 bool RecordMetric(const std::string& name, double value) {
@@ -285,8 +285,8 @@ bool GetCrystalProfile(int32_t user_id, CrystalProfile& out) {
     out.comfort_patterns        = row.values.size() > 2 ? row.values[2] : "";
     out.trigger_patterns        = row.values.size() > 3 ? row.values[3] : "";
     out.preferred_tone          = row.values.size() > 4 ? row.values[4] : "";
-    out.trust_level             = (float)row.GetFloat(5);
-    out.intimacy_level          = (float)row.GetFloat(6);
+    out.trust_level             = (float)row.GetFloatOr(5, 0.0);
+    out.intimacy_level          = (float)row.GetFloatOr(6, 0.0);
     return true;
 }
 
@@ -301,11 +301,11 @@ bool GetOpenThreads(std::vector<ElleThread>& out, uint32_t limit) {
     if (!rs.success) return false;
     for (auto& r : rs.rows) {
         ElleThread t;
-        t.id                   = (int32_t)r.GetInt(0);
+        t.id                   = (int32_t)r.GetIntOr(0, 0);
         t.topic                = r.values.size() > 1 ? r.values[1] : "";
         t.status               = r.values.size() > 2 ? r.values[2] : "";
-        t.emotional_weight     = (float)r.GetFloat(3);
-        t.intensity            = (float)r.GetFloat(4);
+        t.emotional_weight     = (float)r.GetFloatOr(3, 0.0);
+        t.intensity            = (float)r.GetFloatOr(4, 0.0);
         t.summary              = r.values.size() > 5 ? r.values[5] : "";
         t.unresolved_questions = r.values.size() > 6 ? r.values[6] : "";
         out.push_back(t);
@@ -324,10 +324,10 @@ bool GetUserPresence(int32_t user_id, UserPresence& out) {
     if (!rs.success || rs.rows.empty()) { out.found = false; return false; }
     auto& r = rs.rows[0];
     out.found                   = true;
-    out.silence_minutes         = (int32_t)r.GetInt(0);
-    out.threshold_minutes       = (int32_t)r.GetInt(1);
+    out.silence_minutes         = (int32_t)r.GetIntOr(0, 0);
+    out.threshold_minutes       = (int32_t)r.GetIntOr(1, 0);
     out.silence_interpretation  = r.values.size() > 2 ? r.values[2] : "";
-    out.abnormal_silence_count  = (int32_t)r.GetInt(3);
+    out.abnormal_silence_count  = (int32_t)r.GetIntOr(3, 0);
     return true;
 }
 
@@ -355,13 +355,13 @@ static void RowToSubject(const SQLRow& r, LearnedSubject& s) {
     /* Column order used everywhere below — single source of truth. */
     /* id, subject, category, proficiency_level, who_taught, where_learned,
        time_to_learn_hours, notes, date_started, date_completed */
-    s.id                  = (int32_t)r.GetInt(0);
+    s.id                  = (int32_t)r.GetIntOr(0, 0);
     s.subject             = r.values.size() > 1 ? r.values[1] : "";
     s.category            = r.values.size() > 2 ? r.values[2] : "";
-    s.proficiency_level   = (int32_t)r.GetInt(3);
+    s.proficiency_level   = (int32_t)r.GetIntOr(3, 0);
     s.who_taught          = r.values.size() > 4 ? r.values[4] : "";
     s.where_learned       = r.values.size() > 5 ? r.values[5] : "";
-    s.time_to_learn_hours = (float)r.GetFloat(6);
+    s.time_to_learn_hours = (float)r.GetFloatOr(6, 0.0);
     s.notes               = r.values.size() > 7 ? r.values[7] : "";
     s.date_started        = r.values.size() > 8 ? r.values[8] : "";
     s.date_completed      = r.values.size() > 9 ? r.values[9] : "";
@@ -425,7 +425,7 @@ bool CreateSubject(const LearnedSubject& in, int32_t& newId) {
         "SELECT TOP 1 id FROM ElleCore.dbo.learned_subjects "
         "WHERE notes LIKE ? ORDER BY id DESC;",
         { std::string("%[[ins_mark=") + std::to_string(mark) + "]]%" });
-    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetInt(0);
+    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetIntOr(0, 0);
 
     /* Strip the marker from notes now that we've recovered the id. */
     if (newId > 0) {
@@ -470,13 +470,13 @@ bool ListSubjectReferences(int32_t subject_id, std::vector<EducationReference>& 
     if (!rs.success) return false;
     for (auto& r : rs.rows) {
         EducationReference e;
-        e.id                = (int32_t)r.GetInt(0);
-        e.subject_id        = (int32_t)r.GetInt(1);
+        e.id                = (int32_t)r.GetIntOr(0, 0);
+        e.subject_id        = (int32_t)r.GetIntOr(1, 0);
         e.reference_type    = r.values.size() > 2 ? r.values[2] : "";
         e.reference_title   = r.values.size() > 3 ? r.values[3] : "";
         e.reference_content = r.values.size() > 4 ? r.values[4] : "";
         e.file_path         = r.values.size() > 5 ? r.values[5] : "";
-        e.relevance_score   = (float)r.GetFloat(6);
+        e.relevance_score   = (float)r.GetFloatOr(6, 0.0);
         e.notes             = r.values.size() > 7 ? r.values[7] : "";
         out.push_back(e);
     }
@@ -503,8 +503,8 @@ bool ListSubjectMilestones(int32_t subject_id, std::vector<LearningMilestone>& o
     if (!rs.success) return false;
     for (auto& r : rs.rows) {
         LearningMilestone m;
-        m.id          = (int32_t)r.GetInt(0);
-        m.subject_id  = (int32_t)r.GetInt(1);
+        m.id          = (int32_t)r.GetIntOr(0, 0);
+        m.subject_id  = (int32_t)r.GetIntOr(1, 0);
         m.milestone   = r.values.size() > 2 ? r.values[2] : "";
         m.description = r.values.size() > 3 ? r.values[3] : "";
         m.achieved_at = r.values.size() > 4 ? r.values[4] : "";
@@ -536,12 +536,12 @@ bool ListSkills(std::vector<Skill>& out, const std::string& category) {
     if (!rs.success) return false;
     for (auto& r : rs.rows) {
         Skill s;
-        s.id                      = (int32_t)r.GetInt(0);
+        s.id                      = (int32_t)r.GetIntOr(0, 0);
         s.skill_name              = r.values.size() > 1 ? r.values[1] : "";
         s.category                = r.values.size() > 2 ? r.values[2] : "";
-        s.proficiency             = (int32_t)r.GetInt(3);
-        s.learned_from_subject_id = (int32_t)r.GetInt(4);
-        s.times_used              = (int32_t)r.GetInt(5);
+        s.proficiency             = (int32_t)r.GetIntOr(3, 0);
+        s.learned_from_subject_id = (int32_t)r.GetIntOr(4, 0);
+        s.times_used              = (int32_t)r.GetIntOr(5, 0);
         s.last_used               = r.values.size() > 6 ? r.values[6] : "";
         s.notes                   = r.values.size() > 7 ? r.values[7] : "";
         out.push_back(s);
@@ -569,7 +569,7 @@ bool CreateSkill(const Skill& in, int32_t& newId) {
     auto r2 = ElleSQLPool::Instance().QueryParams(
         "SELECT TOP 1 id FROM ElleCore.dbo.skills WHERE skill_name = ?;",
         { in.skill_name });
-    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetInt(0);
+    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetIntOr(0, 0);
     return newId > 0;
 }
 
@@ -608,18 +608,18 @@ static std::string MakeUuid16() {
 static void RowToVideoJob(const SQLRow& r, VideoJob& j) {
     /* id, job_uuid, text, avatar_path, call_id, status, progress,
        output_path, error, created_ms, started_ms, finished_ms */
-    j.id          = r.GetInt(0);
+    j.id          = r.GetIntOr(0, 0);
     j.job_uuid    = r.values.size() > 1 ? r.values[1] : "";
     j.text        = r.values.size() > 2 ? r.values[2] : "";
     j.avatar_path = r.values.size() > 3 ? r.values[3] : "";
-    j.call_id     = r.GetInt(4);
+    j.call_id     = r.GetIntOr(4, 0);
     j.status      = r.values.size() > 5 ? r.values[5] : "";
-    j.progress    = (int32_t)r.GetInt(6);
+    j.progress    = (int32_t)r.GetIntOr(6, 0);
     j.output_path = r.values.size() > 7 ? r.values[7] : "";
     j.error       = r.values.size() > 8 ? r.values[8] : "";
-    j.created_ms  = r.GetInt(9);
-    j.started_ms  = r.GetInt(10);
-    j.finished_ms = r.GetInt(11);
+    j.created_ms  = r.GetIntOr(9, 0);
+    j.started_ms  = r.GetIntOr(10, 0);
+    j.finished_ms = r.GetIntOr(11, 0);
 }
 static const char* kVideoJobSelect =
     "SELECT id, job_uuid, text, ISNULL(avatar_path,''), ISNULL(call_id, 0), status, "
@@ -648,7 +648,7 @@ bool CreateVideoJob(const std::string& text, const std::string& avatar_path,
     auto r2 = ElleSQLPool::Instance().QueryParams(
         "SELECT TOP 1 id FROM ElleCore.dbo.video_jobs WHERE job_uuid = ?;",
         { out.job_uuid });
-    if (r2.success && !r2.rows.empty()) out.id = r2.rows[0].GetInt(0);
+    if (r2.success && !r2.rows.empty()) out.id = r2.rows[0].GetIntOr(0, 0);
     return true;
 }
 
@@ -717,7 +717,7 @@ bool RegisterAvatar(const UserAvatar& in, int32_t& newId) {
         "SELECT TOP 1 id FROM ElleCore.dbo.user_avatars "
         "WHERE user_id = ? AND file_path = ? ORDER BY id DESC;",
         { std::to_string(in.user_id), in.file_path });
-    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetInt(0);
+    if (r2.success && !r2.rows.empty()) newId = (int32_t)r2.rows[0].GetIntOr(0, 0);
     return newId > 0;
 }
 
@@ -729,12 +729,12 @@ bool GetDefaultAvatar(int32_t user_id, UserAvatar& out) {
         { std::to_string(user_id) });
     if (!rs.success || rs.rows.empty()) return false;
     auto& r = rs.rows[0];
-    out.id         = (int32_t)r.GetInt(0);
-    out.user_id    = (int32_t)r.GetInt(1);
+    out.id         = (int32_t)r.GetIntOr(0, 0);
+    out.user_id    = (int32_t)r.GetIntOr(1, 0);
     out.label      = r.values.size() > 2 ? r.values[2] : "";
     out.file_path  = r.values.size() > 3 ? r.values[3] : "";
     out.mime_type  = r.values.size() > 4 ? r.values[4] : "";
-    out.is_default = r.GetInt(5) != 0;
+    out.is_default = r.GetIntOr(5, 0) != 0;
     return true;
 }
 
@@ -747,12 +747,12 @@ bool ListAvatars(int32_t user_id, std::vector<UserAvatar>& out) {
     if (!rs.success) return false;
     for (auto& r : rs.rows) {
         UserAvatar a;
-        a.id         = (int32_t)r.GetInt(0);
-        a.user_id    = (int32_t)r.GetInt(1);
+        a.id         = (int32_t)r.GetIntOr(0, 0);
+        a.user_id    = (int32_t)r.GetIntOr(1, 0);
         a.label      = r.values.size() > 2 ? r.values[2] : "";
         a.file_path  = r.values.size() > 3 ? r.values[3] : "";
         a.mime_type  = r.values.size() > 4 ? r.values[4] : "";
-        a.is_default = r.GetInt(5) != 0;
+        a.is_default = r.GetIntOr(5, 0) != 0;
         out.push_back(a);
     }
     return true;
@@ -772,13 +772,13 @@ bool GetDictionaryLoaderState(DictionaryLoaderState& out) {
     }
     auto& r = rs.rows[0];
     out.status     = r.values.size() > 0 ? r.values[0] : "idle";
-    out.loaded     = (int32_t)r.GetInt(1);
-    out.failed     = (int32_t)r.GetInt(2);
-    out.skipped    = (int32_t)r.GetInt(3);
+    out.loaded     = (int32_t)r.GetIntOr(1, 0);
+    out.failed     = (int32_t)r.GetIntOr(2, 0);
+    out.skipped    = (int32_t)r.GetIntOr(3, 0);
     out.last_word  = r.values.size() > 4 ? r.values[4] : "";
     out.error      = r.values.size() > 5 ? r.values[5] : "";
-    out.started_ms = r.GetInt(6);
-    out.updated_ms = r.GetInt(7);
+    out.started_ms = r.GetIntOr(6, 0);
+    out.updated_ms = r.GetIntOr(7, 0);
     return true;
 }
 
@@ -787,7 +787,7 @@ bool UpsertDictionaryLoaderState(const DictionaryLoaderState& in) {
     auto exists = ElleSQLPool::Instance().Query(
         "SELECT TOP 1 id FROM ElleCore.dbo.dictionary_loader_state ORDER BY id DESC;");
     if (exists.success && !exists.rows.empty()) {
-        int64_t id = exists.rows[0].GetInt(0);
+        int64_t id = exists.rows[0].GetIntOr(0, 0);
         return ElleSQLPool::Instance().QueryParams(
             "UPDATE ElleCore.dbo.dictionary_loader_state "
             "SET status = ?, loaded = ?, failed = ?, skipped = ?, "
@@ -828,7 +828,7 @@ int64_t CountDictionaryWords() {
     auto rs = ElleSQLPool::Instance().Query(
         "SELECT COUNT(*) FROM ElleCore.dbo.dictionary_words;");
     if (!rs.success || rs.rows.empty()) return 0;
-    return rs.rows[0].GetInt(0);
+    return rs.rows[0].GetIntOr(0, 0);
 }
 
 /*══════════════════════════════════════════════════════════════════════════════
@@ -853,7 +853,7 @@ bool DeriveDriveState(ELLE_DRIVE_STATE& out) {
     auto gcount = ElleSQLPool::Instance().Query(
         "SELECT COUNT(*) FROM ElleCore.dbo.goals WHERE status = 0;"); /* GOAL_ACTIVE */
     int32_t activeGoals = (gcount.success && !gcount.rows.empty())
-                          ? (int32_t)gcount.rows[0].GetInt(0) : 0;
+                          ? (int32_t)gcount.rows[0].GetIntOr(0, 0) : 0;
 
     /* Derive. Clamped to [0,1]. */
     float interest = haveEmo ? emo.dimensions[0] : 0.5f;  /* dim 0 ≈ interest */
@@ -917,9 +917,9 @@ bool LoadLatestEmotionSnapshot(ELLE_EMOTION_STATE& out) {
         "  FROM ElleCore.dbo.emotion_snapshots ORDER BY id DESC;");
     if (!rs.success || rs.rows.empty()) return false;
     auto& r = rs.rows[0];
-    out.valence   = (float)r.GetFloat(0);
-    out.arousal   = (float)r.GetFloat(1);
-    out.dominance = (float)r.GetFloat(2);
+    out.valence   = (float)r.GetFloatOr(0, 0.0);
+    out.arousal   = (float)r.GetFloatOr(1, 0.0);
+    out.dominance = (float)r.GetFloatOr(2, 0.0);
 
     /* Parse the space-separated dimension list. */
     if (r.values.size() > 3) {
@@ -955,21 +955,21 @@ bool GetEmotionHistory(uint32_t hours,
     for (size_t i = 0; i < total; i += stride) {
         auto& r = rs.rows[i];
         EmotionHistoryPoint p;
-        p.valence   = (float)r.GetFloat(0);
-        p.arousal   = (float)r.GetFloat(1);
-        p.dominance = (float)r.GetFloat(2);
-        p.taken_ms  = r.GetInt(3);
+        p.valence   = (float)r.GetFloatOr(0, 0.0);
+        p.arousal   = (float)r.GetFloatOr(1, 0.0);
+        p.dominance = (float)r.GetFloatOr(2, 0.0);
+        p.taken_ms  = r.GetIntOr(3, 0);
         out.push_back(p);
     }
     /* Always include the most recent point even if stride skipped it. */
     if (!rs.rows.empty()) {
         auto& last = rs.rows.back();
-        if (out.empty() || out.back().taken_ms != last.GetInt(3)) {
+        if (out.empty() || out.back().taken_ms != last.GetIntOr(3, 0)) {
             EmotionHistoryPoint p;
-            p.valence   = (float)last.GetFloat(0);
-            p.arousal   = (float)last.GetFloat(1);
-            p.dominance = (float)last.GetFloat(2);
-            p.taken_ms  = last.GetInt(3);
+            p.valence   = (float)last.GetFloatOr(0, 0.0);
+            p.arousal   = (float)last.GetFloatOr(1, 0.0);
+            p.dominance = (float)last.GetFloatOr(2, 0.0);
+            p.taken_ms  = last.GetIntOr(3, 0);
             out.push_back(p);
         }
     }

@@ -335,22 +335,22 @@ bool RecallMemories(const std::string& query,
 
     for (auto& row : rs.rows) {
         ELLE_MEMORY_RECORD rec = {};
-        rec.id                = (uint64_t)row.GetInt(0);
-        rec.type              = (uint32_t)row.GetInt(1);
-        rec.tier              = (uint32_t)row.GetInt(2);
+        rec.id                = (uint64_t)row.GetIntOr(0, 0);
+        rec.type              = (uint32_t)row.GetIntOr(1, 0);
+        rec.tier              = (uint32_t)row.GetIntOr(2, 0);
         strncpy_s(rec.content, row.values.size() > 3 ? row.values[3].c_str() : "",
                   ELLE_MAX_MSG - 1);
         strncpy_s(rec.summary, row.values.size() > 4 ? row.values[4].c_str() : "",
                   sizeof(rec.summary) - 1);
-        rec.emotional_valence = (float)row.GetFloat(5);
-        rec.importance        = (float)row.GetFloat(6);
-        rec.relevance         = (float)row.GetFloat(7);
-        rec.position_x        = (float)row.GetFloat(8);
-        rec.position_y        = (float)row.GetFloat(9);
-        rec.position_z        = (float)row.GetFloat(10);
-        rec.access_count      = (uint32_t)row.GetInt(11);
-        rec.created_ms        = (uint64_t)row.GetInt(12);
-        rec.last_access_ms    = (uint64_t)row.GetInt(13);
+        rec.emotional_valence = (float)row.GetFloatOr(5, 0.0);
+        rec.importance        = (float)row.GetFloatOr(6, 0.0);
+        rec.relevance         = (float)row.GetFloatOr(7, 0.0);
+        rec.position_x        = (float)row.GetFloatOr(8, 0.0);
+        rec.position_y        = (float)row.GetFloatOr(9, 0.0);
+        rec.position_z        = (float)row.GetFloatOr(10, 0.0);
+        rec.access_count      = (uint32_t)row.GetIntOr(11, 0);
+        rec.created_ms        = (uint64_t)row.GetIntOr(12, 0);
+        rec.last_access_ms    = (uint64_t)row.GetIntOr(13, 0);
         out.push_back(rec);
     }
 
@@ -387,22 +387,22 @@ bool RecallRecentLTM(std::vector<ELLE_MEMORY_RECORD>& out, uint32_t maxCount) {
 
     for (auto& row : rs.rows) {
         ELLE_MEMORY_RECORD rec = {};
-        rec.id                = (uint64_t)row.GetInt(0);
-        rec.type              = (uint32_t)row.GetInt(1);
-        rec.tier              = (uint32_t)row.GetInt(2);
+        rec.id                = (uint64_t)row.GetIntOr(0, 0);
+        rec.type              = (uint32_t)row.GetIntOr(1, 0);
+        rec.tier              = (uint32_t)row.GetIntOr(2, 0);
         strncpy_s(rec.content, row.values.size() > 3 ? row.values[3].c_str() : "",
                   ELLE_MAX_MSG - 1);
         strncpy_s(rec.summary, row.values.size() > 4 ? row.values[4].c_str() : "",
                   sizeof(rec.summary) - 1);
-        rec.emotional_valence = (float)row.GetFloat(5);
-        rec.importance        = (float)row.GetFloat(6);
-        rec.relevance         = (float)row.GetFloat(7);
-        rec.position_x        = (float)row.GetFloat(8);
-        rec.position_y        = (float)row.GetFloat(9);
-        rec.position_z        = (float)row.GetFloat(10);
-        rec.access_count      = (uint32_t)row.GetInt(11);
-        rec.created_ms        = (uint64_t)row.GetInt(12);
-        rec.last_access_ms    = (uint64_t)row.GetInt(13);
+        rec.emotional_valence = (float)row.GetFloatOr(5, 0.0);
+        rec.importance        = (float)row.GetFloatOr(6, 0.0);
+        rec.relevance         = (float)row.GetFloatOr(7, 0.0);
+        rec.position_x        = (float)row.GetFloatOr(8, 0.0);
+        rec.position_y        = (float)row.GetFloatOr(9, 0.0);
+        rec.position_z        = (float)row.GetFloatOr(10, 0.0);
+        rec.access_count      = (uint32_t)row.GetIntOr(11, 0);
+        rec.created_ms        = (uint64_t)row.GetIntOr(12, 0);
+        rec.last_access_ms    = (uint64_t)row.GetIntOr(13, 0);
         out.push_back(rec);
     }
     return true;
@@ -436,15 +436,15 @@ bool GetEntity(const std::string& name, ELLE_WORLD_ENTITY& out) {
         { key });
     if (!rs.success || rs.rows.empty()) return false;
     auto& row = rs.rows[0];
-    out.id = (uint64_t)row.GetInt(0);
+    out.id = (uint64_t)row.GetIntOr(0, 0);
     strncpy_s(out.name,        row.values.size() > 1 ? row.values[1].c_str() : "", ELLE_MAX_NAME - 1);
     strncpy_s(out.type,        row.values.size() > 2 ? row.values[2].c_str() : "", ELLE_MAX_TAG  - 1);
     strncpy_s(out.description, row.values.size() > 3 ? row.values[3].c_str() : "", ELLE_MAX_MSG  - 1);
-    out.familiarity         = (float)row.GetFloat(4);
-    out.sentiment           = (float)row.GetFloat(5);
-    out.trust               = (float)row.GetFloat(6);
-    out.interaction_count   = (uint32_t)row.GetInt(7);
-    out.last_interaction_ms = (uint64_t)row.GetInt(8);
+    out.familiarity         = (float)row.GetFloatOr(4, 0.0);
+    out.sentiment           = (float)row.GetFloatOr(5, 0.0);
+    out.trust               = (float)row.GetFloatOr(6, 0.0);
+    out.interaction_count   = (uint32_t)row.GetIntOr(7, 0);
+    out.last_interaction_ms = (uint64_t)row.GetIntOr(8, 0);
     strncpy_s(out.mental_model, row.values.size() > 9 ? row.values[9].c_str() : "", ELLE_MAX_MSG - 1);
     return true;
 }
@@ -471,15 +471,15 @@ bool GetAllEntities(std::vector<ELLE_WORLD_ENTITY>& out) {
     if (!rs.success) return false;
     for (auto& row : rs.rows) {
         ELLE_WORLD_ENTITY e{};
-        e.id = (uint64_t)row.GetInt(0);
+        e.id = (uint64_t)row.GetIntOr(0, 0);
         strncpy_s(e.name,        row.values.size() > 1 ? row.values[1].c_str() : "", ELLE_MAX_NAME - 1);
         strncpy_s(e.type,        row.values.size() > 2 ? row.values[2].c_str() : "", ELLE_MAX_TAG  - 1);
         strncpy_s(e.description, row.values.size() > 3 ? row.values[3].c_str() : "", ELLE_MAX_MSG  - 1);
-        e.familiarity         = (float)row.GetFloat(4);
-        e.sentiment           = (float)row.GetFloat(5);
-        e.trust               = (float)row.GetFloat(6);
-        e.interaction_count   = (uint32_t)row.GetInt(7);
-        e.last_interaction_ms = (uint64_t)row.GetInt(8);
+        e.familiarity         = (float)row.GetFloatOr(4, 0.0);
+        e.sentiment           = (float)row.GetFloatOr(5, 0.0);
+        e.trust               = (float)row.GetFloatOr(6, 0.0);
+        e.interaction_count   = (uint32_t)row.GetIntOr(7, 0);
+        e.last_interaction_ms = (uint64_t)row.GetIntOr(8, 0);
         strncpy_s(e.mental_model, row.values.size() > 9 ? row.values[9].c_str() : "", ELLE_MAX_MSG - 1);
         out.push_back(e);
     }
@@ -551,11 +551,11 @@ bool GetTrustState(ELLE_TRUST_STATE& out) {
         return false;
     }
     auto& r = rs.rows[0];
-    out.score         = (int32_t)r.GetInt(0);
-    out.level         = (uint32_t)r.GetInt(1);
-    out.successes     = (uint32_t)r.GetInt(2);
-    out.failures      = (uint32_t)r.GetInt(3);
-    out.total_actions = (uint32_t)r.GetInt(4);
+    out.score         = (int32_t)r.GetIntOr(0, 0);
+    out.level         = (uint32_t)r.GetIntOr(1, 0);
+    out.successes     = (uint32_t)r.GetIntOr(2, 0);
+    out.failures      = (uint32_t)r.GetIntOr(3, 0);
+    out.total_actions = (uint32_t)r.GetIntOr(4, 0);
     return true;
 }
 
@@ -601,9 +601,9 @@ bool GetRecentLogs(std::vector<ELLE_LOG_ENTRY>& out, uint32_t count,
     out.reserve(rs.rows.size());
     for (auto& row : rs.rows) {
         ELLE_LOG_ENTRY e = {};
-        e.level        = (uint32_t)row.GetInt(0);
-        e.source_svc   = (uint32_t)row.GetInt(1);
-        e.timestamp_ms = (uint64_t)row.GetInt(2);
+        e.level        = (uint32_t)row.GetIntOr(0, 0);
+        e.source_svc   = (uint32_t)row.GetIntOr(1, 0);
+        e.timestamp_ms = (uint64_t)row.GetIntOr(2, 0);
         const std::string m = row.values.size() > 3 ? row.values[3] : std::string();
         strncpy_s(e.message, m.c_str(), ELLE_MAX_MSG - 1);
         out.push_back(e);
@@ -634,18 +634,18 @@ bool GetWorkerStatuses(std::vector<ELLE_SERVICE_STATUS>& out) {
     out.reserve(rs.rows.size());
     for (auto& row : rs.rows) {
         ELLE_SERVICE_STATUS s = {};
-        s.service_id         = (uint32_t)row.GetInt(0);
+        s.service_id         = (uint32_t)row.GetIntOr(0, 0);
         const std::string nm = row.values.size() > 1 ? row.values[1] : std::string();
         strncpy_s(s.name, nm.c_str(), ELLE_MAX_NAME - 1);
-        s.running            = (uint32_t)row.GetInt(2);
-        s.healthy            = (uint32_t)row.GetInt(3);
-        s.uptime_ms          = (uint64_t)row.GetInt(4);
-        s.last_heartbeat_ms  = (uint64_t)row.GetInt(5);
-        s.messages_processed = (uint32_t)row.GetInt(6);
-        s.errors             = (uint32_t)row.GetInt(7);
-        s.cpu_percent        = (float)row.GetFloat(8);
-        s.memory_bytes       = (uint64_t)row.GetInt(9);
-        s.thread_count       = (uint32_t)row.GetInt(10);
+        s.running            = (uint32_t)row.GetIntOr(2, 0);
+        s.healthy            = (uint32_t)row.GetIntOr(3, 0);
+        s.uptime_ms          = (uint64_t)row.GetIntOr(4, 0);
+        s.last_heartbeat_ms  = (uint64_t)row.GetIntOr(5, 0);
+        s.messages_processed = (uint32_t)row.GetIntOr(6, 0);
+        s.errors             = (uint32_t)row.GetIntOr(7, 0);
+        s.cpu_percent        = (float)row.GetFloatOr(8, 0.0);
+        s.memory_bytes       = (uint64_t)row.GetIntOr(9, 0);
+        s.thread_count       = (uint32_t)row.GetIntOr(10, 0);
         const std::string st = row.values.size() > 11 ? row.values[11] : std::string();
         strncpy_s(s.status_text, st.c_str(), sizeof(s.status_text) - 1);
         out.push_back(s);
@@ -713,7 +713,7 @@ uint64_t StoreGoalReturningId(const ELLE_GOAL_RECORD& goal) {
             std::to_string(goal.attempts)
         });
     if (!rs.success || rs.rows.empty()) return 0;
-    return (uint64_t)rs.rows[0].GetInt(0);
+    return (uint64_t)rs.rows[0].GetIntOr(0, 0);
 }
 
 bool UpdateGoalProgress(uint64_t goalId, float progress) {
@@ -766,20 +766,20 @@ bool GetActiveGoals(std::vector<ELLE_GOAL_RECORD>& out) {
     if (!rs.success) return false;
     for (auto& row : rs.rows) {
         ELLE_GOAL_RECORD g{};
-        g.id             = (uint64_t)row.GetInt(0);
+        g.id             = (uint64_t)row.GetIntOr(0, 0);
         std::string desc = row.values.size() > 1 ? row.values[1] : std::string();
         strncpy_s(g.description, desc.c_str(), ELLE_MAX_MSG - 1);
-        g.status         = (uint32_t)row.GetInt(2);
-        g.priority       = (uint32_t)row.GetInt(3);
-        g.progress       = (float)row.GetFloat(4);
-        g.motivation     = (float)row.GetFloat(5);
-        g.source_drive   = (uint32_t)row.GetInt(6);
-        g.parent_goal_id = (uint32_t)row.GetInt(7);
+        g.status         = (uint32_t)row.GetIntOr(2, 0);
+        g.priority       = (uint32_t)row.GetIntOr(3, 0);
+        g.progress       = (float)row.GetFloatOr(4, 0.0);
+        g.motivation     = (float)row.GetFloatOr(5, 0.0);
+        g.source_drive   = (uint32_t)row.GetIntOr(6, 0);
+        g.parent_goal_id = (uint32_t)row.GetIntOr(7, 0);
         std::string crit = row.values.size() > 8 ? row.values[8] : std::string();
         strncpy_s(g.success_criteria, crit.c_str(), ELLE_MAX_MSG - 1);
-        g.created_ms     = (uint64_t)row.GetInt(9);
-        g.deadline_ms    = (uint64_t)row.GetInt(10);
-        g.attempts       = (uint32_t)row.GetInt(11);
+        g.created_ms     = (uint64_t)row.GetIntOr(9, 0);
+        g.deadline_ms    = (uint64_t)row.GetIntOr(10, 0);
+        g.attempts       = (uint32_t)row.GetIntOr(11, 0);
         out.push_back(g);
     }
     return true;

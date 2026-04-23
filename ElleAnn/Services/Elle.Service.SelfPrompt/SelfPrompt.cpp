@@ -242,7 +242,7 @@ private:
         bool pregnant = false;
         auto preg = ElleSQLPool::Instance().Query(
             "SELECT active FROM ElleHeart.dbo.x_pregnancy_state WHERE id = 1;");
-        if (preg.success && !preg.rows.empty()) pregnant = preg.rows[0].GetInt(0) != 0;
+        if (preg.success && !preg.rows.empty()) pregnant = preg.rows[0].GetIntOr(0, 0) != 0;
 
         bool high_fatigue = false;
         bool any_symptom  = false;

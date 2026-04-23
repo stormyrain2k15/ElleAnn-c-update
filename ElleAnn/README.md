@@ -2,12 +2,22 @@
 
 Elle-Ann is an autonomous, agentic **Emotional Synthetic Intelligence** built
 in **C++**, **MASM x64 Assembly**, and **Lua 5.4**. She thinks, feels, acts,
-and grows on her own — across 19 Windows services that communicate via IOCP
-named pipes and persist to SQL Server.
+and grows on her own — across **20 Windows services** (19 native C++ under
+`Services/` plus the Lua behavioural service under `Lua/Elle.Lua.Behavioral`)
+that communicate via IOCP named pipes and persist to SQL Server.
 
 > **Runs exclusively on the user's local Windows PC.** No cloud hosting,
 > no managed runtime. The `frontend/` and `backend/` folders at the repo
-> root are optional dev-time control surfaces, not the product.
+> root are **optional dev-time control surfaces, not the product** —
+> they are not shipped with the installed services and are not required
+> for Elle to run.
+>
+> **Current audit status:** see [`AUDIT_SCOREBOARD.md`](AUDIT_SCOREBOARD.md)
+> for a line-by-line grade of every item in the OpSec action list
+> against the present tree. Earlier audit reports (`AUDIT_FIX_REPORT*.md`,
+> `STUB_*_NOTES.md`, `FULL_STUB_SWEEP.md`, `SCHEMA_FIX_NOTES.md`,
+> `MEMORY_CONSOLIDATION_PORT.md`) are marked HISTORICAL and kept for
+> archaeology only.
 
 ---
 
@@ -47,7 +57,9 @@ ElleAnn.sln                          ← 26 C++ projects + solution folders
 │   ├── Elle.ASM.Memory/             ← Pool allocator, SSE2 mem* primitives
 │   └── Elle.ASM.Crypto/             ← SHA-256, AES-256 (AES-NI), CRC32, RDRAND
 │
-├── Services/                        ← 19 Windows Services (IOCP interconnected)
+├── Services/                        ← 19 native C++ Windows Services (IOCP
+│                                      interconnected) + Lua.Behavioral service
+│                                      under Lua/ (20 total in the install manifest)
 │   ├── Elle.Service.Heartbeat/      ← Dead-man switch, watchdog, health
 │   ├── Elle.Service.QueueWorker/    ← SQL queue polling, intent claim (TOCTOU-
 │   │                                  safe atomic OUTPUT inserted.*), TimeoutReaper

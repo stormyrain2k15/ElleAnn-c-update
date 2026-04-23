@@ -1,70 +1,51 @@
-# Getting Started with Create React App
+# Elle-Ann Repo-Root Frontend (optional dev control surface)
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+**The product is the Windows service bundle under `../ElleAnn/`.**
+This `frontend/` directory is an *optional, dev-time only* web UI used
+for exploring the HTTP / WebSocket control surface exposed by
+`Elle.Service.HTTP` on the local machine. It is **not installed** with
+the service bundle, it does **not** ship to end users, and Elle-Ann
+runs to full functionality with this directory entirely absent.
 
-## Available Scripts
+If you do not need a browser-based dev inspector, ignore this folder.
 
-In the project directory, you can run:
+## When you would run it
 
-### `npm start`
+- You are developing against `/api/*` and want a fast reload loop with
+  live WebSocket rendering.
+- You want to eyeball the control surface without writing a client.
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+## When you should NOT run it
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+- End-user install. The canonical install path is
+  `ElleAnn/Deploy/Install.bat` on a Windows PC; no browser involved.
+- CI / production. The CRA dev server is not a production web
+  server and is not hardened for exposure beyond `localhost`.
 
-### `npm test`
+## Local run
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+```bash
+cd frontend
+yarn install
+yarn start       # http://localhost:3000, talks to REACT_APP_BACKEND_URL
+```
 
-### `npm run build`
+`REACT_APP_BACKEND_URL` must point at the locally running
+`Elle.Service.HTTP` (default `http://localhost:8000`). The frontend
+has no persistent state of its own; every view is a projection of
+the live C++ services.
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+## What is NOT here (and why)
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+- Any production build pipeline. Use `yarn build` if you need a static
+  bundle for a dev workstation, but do not deploy the output anywhere
+  user-reachable without a real reverse proxy + auth in front of it.
+- Any bundled secrets. The frontend reads nothing but
+  `REACT_APP_BACKEND_URL` from `.env`.
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+## If you've seen this file be a stock `create-react-app` README
 
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+It was, until the Feb 2026 audit pass (item #116). The original
+boilerplate described how to run CRA's tutorial rather than what this
+surface actually is for the project, which misled newcomers into
+thinking the frontend was part of the product.
