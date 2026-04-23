@@ -43,7 +43,7 @@ extern "C" {
 #define ELLE_MAX_THREADS        16
 #define ELLE_MAX_GOALS          64
 #define ELLE_MAX_MEMORIES_STM   256
-#define ELLE_MAX_EMOTIONS       102
+#define ELLE_MAX_EMOTIONS       94
 #define ELLE_MAX_DRIVES         12
 #define ELLE_MAX_QUEUE_DEPTH    1024
 #define ELLE_PIPE_BUFFER_SIZE   65536
@@ -55,9 +55,10 @@ extern "C" {
 #define ELLE_IOCP_THREADS       4
 
 /*──────────────────────────────────────────────────────────────────────────────
- * EMOTIONAL DIMENSIONS (102 total)
+ * EMOTIONAL DIMENSIONS (94 total)
  * Organized: Primary(8) + Secondary(16) + Tertiary(32) + Meta(16) +
- *            Social(14) + Existential(8) + Drives(8) = 102
+ *            Social(14) + Existential(8) = 94
+ * Drives are modelled separately below via ELLE_DRIVE_ID (12 values).
  *──────────────────────────────────────────────────────────────────────────────*/
 typedef enum ELLE_EMOTION_ID {
     /* PRIMARY (8) */
@@ -166,7 +167,7 @@ typedef enum ELLE_EMOTION_ID {
     EMO_CONFINEMENT,
     EMO_UNITY,
 
-    ELLE_EMOTION_COUNT  /* == 102 */
+    ELLE_EMOTION_COUNT  /* == 94 */
 } ELLE_EMOTION_ID;
 
 #ifdef __cplusplus
@@ -540,7 +541,7 @@ typedef enum ELLE_IPC_MSG_TYPE {
  * EMOTIONAL STATE VECTOR
  *──────────────────────────────────────────────────────────────────────────────*/
 typedef struct ELLE_EMOTION_STATE {
-    float       dimensions[ELLE_MAX_EMOTIONS];   /* 102 floats, 0.0-1.0 */
+    float       dimensions[ELLE_MAX_EMOTIONS];   /* 94 floats, 0.0-1.0 */
     float       valence;                          /* -1.0 to 1.0 overall */
     float       arousal;                          /* 0.0 to 1.0 */
     float       dominance;                        /* 0.0 to 1.0 */

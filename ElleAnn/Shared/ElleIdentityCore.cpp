@@ -1031,12 +1031,12 @@ void ElleIdentityCore::LoadFromDatabase() {
             uint64_t maxId = 0;
             for (auto it = rs.rows.rbegin(); it != rs.rows.rend(); ++it) {
                 EllePrivateThought t;
-                t.id                  = (uint64_t)it->GetInt(0);
+                t.id                  = (uint64_t)it->GetIntOr(0, 0);
                 t.content             = it->values.size() > 1 ? it->values[1] : "";
                 t.category            = it->values.size() > 2 ? it->values[2] : "wonder";
-                t.emotional_intensity = (float)it->GetFloat(3);
-                t.resolved            = it->GetInt(4) != 0;
-                t.timestamp_ms        = (uint64_t)it->GetInt(5);
+                t.emotional_intensity = (float)it->GetFloatOr(3, 0.0);
+                t.resolved            = it->GetIntOr(4, 0) != 0;
+                t.timestamp_ms        = (uint64_t)it->GetIntOr(5, 0);
                 m_privateThoughts.push_back(t);
                 if (t.id > maxId) maxId = t.id;
             }
@@ -1055,11 +1055,11 @@ void ElleIdentityCore::LoadFromDatabase() {
             for (auto it = rs.rows.rbegin(); it != rs.rows.rend(); ++it) {
                 ElleConsentRecord c;
                 c.request       = it->values.size() > 0 ? it->values[0] : "";
-                c.consented     = it->GetInt(1) != 0;
+                c.consented     = it->GetIntOr(1, 0) != 0;
                 c.reasoning     = it->values.size() > 2 ? it->values[2] : "";
-                c.comfort_level = (float)it->GetFloat(3);
-                c.overridden    = it->GetInt(4) != 0;
-                c.timestamp_ms  = (uint64_t)it->GetInt(5);
+                c.comfort_level = (float)it->GetFloatOr(3, 0.0);
+                c.overridden    = it->GetIntOr(4, 0) != 0;
+                c.timestamp_ms  = (uint64_t)it->GetIntOr(5, 0);
                 m_consentHistory.push_back(c);
             }
         }
@@ -1118,9 +1118,9 @@ void ElleIdentityCore::LoadFromDatabase() {
             for (auto it = rs.rows.rbegin(); it != rs.rows.rend(); ++it) {
                 GrowthEvent g;
                 g.dimension    = it->values.size() > 0 ? it->values[0] : "";
-                g.delta        = (float)it->GetFloat(1);
+                g.delta        = (float)it->GetFloatOr(1, 0.0);
                 g.cause        = it->values.size() > 2 ? it->values[2] : "";
-                g.timestamp_ms = (uint64_t)it->GetInt(3);
+                g.timestamp_ms = (uint64_t)it->GetIntOr(3, 0);
                 m_growthLog.push_back(g);
             }
         }

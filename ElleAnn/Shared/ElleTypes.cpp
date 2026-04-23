@@ -3,7 +3,7 @@
  ******************************************************************************/
 #include "ElleTypes.h"
 
-/* Order MUST match enum ELLE_EMOTION_ID exactly. 102 entries. */
+/* Order MUST match enum ELLE_EMOTION_ID exactly. 94 entries. */
 const ELLE_EMOTION_META kEmotionMeta[ELLE_EMOTION_COUNT] = {
     /* PRIMARY (8) */
     {"joy",            "primary"},

@@ -6,11 +6,11 @@
 ;******************************************************************************
 
 .data
-    /* ml64 caps segment alignment at 16 bytes. The 64-byte request here
-     * was harmless on some toolchains but is rejected as A2189 on recent
-     * ones. 16-byte alignment still satisfies every AES-NI / SSE access
-     * these constants participate in — SHA-256 K[] and the hash-state
-     * vectors are read 16 bytes at a time in the round functions.       */
+    ; ml64 caps segment alignment at 16 bytes. The 64-byte request here
+    ; was harmless on some toolchains but is rejected as A2189 on recent
+    ; ones. 16-byte alignment still satisfies every AES-NI / SSE access
+    ; these constants participate in — SHA-256 K[] and the hash-state
+    ; vectors are read 16 bytes at a time in the round functions.
     ALIGN 16
     ; SHA-256 round constants (K)
     sha256_k DWORD 0428a2f98h, 071374491h, 0b5c0fbcfh, 0e9b5dba5h
