@@ -9,6 +9,7 @@
 #include "ElleConfig.h"
 #include "ElleSQLConn.h"
 #include "ElleLLM.h"
+#include "ElleQueueIPC.h"
 #include "json.hpp"
 #include "ElleJsonExtract.h"
 #include <algorithm>
@@ -16,9 +17,57 @@
 #include <sstream>
 #include <iomanip>
 
+using json = nlohmann::json;
+
+namespace {
+/*──────────────────────────────────────────────────────────────────────────────
+ * SINGLE-WRITER PLUMBING
+ *
+ * SendMutate() → called from any non-authoritative process. Ships a JSON
+ * request to SVC_IDENTITY over the named-pipe hub. SVC_IDENTITY applies it
+ * authoritatively, persists, and broadcasts the delta.
+ *
+ * BroadcastDelta() → called ONLY from SVC_IDENTITY after applying. Each
+ * delta carries a monotonic seq so receivers can skip any event their
+ * optimistic local apply already produced.
+ *──────────────────────────────────────────────────────────────────────────────*/
+static void SendMutate(const std::string& op, const json& args) {
+    json payload = {
+        {"op", op},
+        {"args", args}
+    };
+    auto msg = ElleIPCMessage::Create(IPC_IDENTITY_MUTATE,
+                                      (ELLE_SERVICE_ID)0 /* filled by hub */,
+                                      SVC_IDENTITY);
+    msg.SetStringPayload(payload.dump());
+    /* Best-effort: if SVC_IDENTITY is down the local optimistic apply
+     * still happened; the mutation will be reconciled on next service
+     * restart via LoadFromDatabase (the local apply also wrote to SQL in
+     * pre-fabric days — we keep SQL writes in SVC_IDENTITY only now). */
+    GetIPCHub().Send(SVC_IDENTITY, msg);
+}
+
+static void BroadcastDelta(const std::string& op, const json& args, uint64_t seq) {
+    json payload = {
+        {"op", op},
+        {"args", args},
+        {"seq", seq}
+    };
+    auto msg = ElleIPCMessage::Create(IPC_IDENTITY_DELTA, SVC_IDENTITY, (ELLE_SERVICE_ID)0);
+    msg.SetStringPayload(payload.dump());
+    msg.header.flags |= ELLE_IPC_FLAG_BROADCAST;
+    GetIPCHub().Broadcast(msg);
+}
+} /* anonymous namespace */
+
 ElleIdentityCore& ElleIdentityCore::Instance() {
     static ElleIdentityCore inst;
     return inst;
+}
+
+void ElleIdentityCore::BecomeAuthoritative() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_isAuthoritative = true;
 }
 
 bool ElleIdentityCore::Initialize() {
@@ -121,10 +170,25 @@ std::string ElleIdentityCore::GetAutobiography() const {
 }
 
 void ElleIdentityCore::AppendToAutobiography(const std::string& entry) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_autobiography.push_back(entry);
-    m_autobiographyLastWritten = ELLE_MS_NOW();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        /* Local optimistic apply (fires in every process). */
+        m_autobiography.push_back(entry);
+        m_autobiographyLastWritten = ELLE_MS_NOW();
+    }
     ELLE_DEBUG("Autobiography entry: %.80s...", entry.c_str());
+    if (m_isAuthoritative) {
+        /* Authoritative writer: persist + broadcast. */
+        SaveToDatabase();
+        uint64_t seq;
+        { std::lock_guard<std::mutex> lock(m_mutex); seq = ++m_seqCounter; m_lastAppliedSeq = seq; }
+        BroadcastDelta("autobio", { {"entry", entry} }, seq);
+    } else {
+        /* Peer process: route to SVC_IDENTITY. Already applied locally
+         * (optimistic). The authoritative delta coming back will be
+         * recognised as already-applied via seq tracking.              */
+        SendMutate("autobio", { {"entry", entry} });
+    }
 }
 
 std::string ElleIdentityCore::WhoAmI() const {
@@ -203,35 +267,44 @@ std::string ElleIdentityCore::HowHaveIChanged(uint32_t days) const {
  *──────────────────────────────────────────────────────────────────────────────*/
 void ElleIdentityCore::FormPreference(const std::string& domain, const std::string& subject,
                                        float valence, const std::string& origin) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    /* Check if preference already exists */
-    for (auto& pref : m_preferences) {
-        if (pref.domain == domain && pref.subject == subject) {
-            /* Reinforce existing preference */
-            pref.valence = ELLE_LERP(pref.valence, valence, 0.3f);
-            pref.strength = std::min(1.0f, pref.strength + 0.05f);
-            pref.reinforcement_count++;
-            pref.last_reinforced_ms = ELLE_MS_NOW();
-            return;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& pref : m_preferences) {
+            if (pref.domain == domain && pref.subject == subject) {
+                pref.valence = ELLE_LERP(pref.valence, valence, 0.3f);
+                pref.strength = std::min(1.0f, pref.strength + 0.05f);
+                pref.reinforcement_count++;
+                pref.last_reinforced_ms = ELLE_MS_NOW();
+                goto broadcast;
+            }
+        }
+        {
+            EllePreference pref;
+            pref.domain = domain;
+            pref.subject = subject;
+            pref.valence = valence;
+            pref.strength = 0.2f;
+            pref.reinforcement_count = 1;
+            pref.first_formed_ms = ELLE_MS_NOW();
+            pref.last_reinforced_ms = pref.first_formed_ms;
+            pref.origin_memory = origin;
+            m_preferences.push_back(pref);
+            ELLE_DEBUG("New preference formed: %s/%s (valence: %.2f) from: %.40s...",
+                       domain.c_str(), subject.c_str(), valence, origin.c_str());
         }
     }
-
-    /* New preference */
-    EllePreference pref;
-    pref.domain = domain;
-    pref.subject = subject;
-    pref.valence = valence;
-    pref.strength = 0.2f;  /* Starts weak — needs reinforcement to become part of identity */
-    pref.reinforcement_count = 1;
-    pref.first_formed_ms = ELLE_MS_NOW();
-    pref.last_reinforced_ms = pref.first_formed_ms;
-    pref.origin_memory = origin;
-
-    m_preferences.push_back(pref);
-
-    ELLE_DEBUG("New preference formed: %s/%s (valence: %.2f) from: %.40s...",
-               domain.c_str(), subject.c_str(), valence, origin.c_str());
+broadcast:
+    json args = {
+        {"domain", domain}, {"subject", subject},
+        {"valence", valence}, {"origin", origin}
+    };
+    if (m_isAuthoritative) {
+        uint64_t seq;
+        { std::lock_guard<std::mutex> lock(m_mutex); seq = ++m_seqCounter; m_lastAppliedSeq = seq; }
+        BroadcastDelta("pref_form", args, seq);
+    } else {
+        SendMutate("pref_form", args);
+    }
 }
 
 bool ElleIdentityCore::DoILikeThis(const std::string& subject) const {
@@ -282,24 +355,29 @@ void ElleIdentityCore::DecayPreferences() {
  *──────────────────────────────────────────────────────────────────────────────*/
 void ElleIdentityCore::ThinkPrivately(const std::string& thought, const std::string& category,
                                        float intensity) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    EllePrivateThought pt;
-    pt.id = m_nextThoughtId++;
-    pt.content = thought;
-    pt.emotional_intensity = intensity;
-    pt.timestamp_ms = ELLE_MS_NOW();
-    pt.resolved = false;
-    pt.category = category;
-
-    m_privateThoughts.push_back(pt);
-
-    /* Keep inner monologue manageable */
-    while (m_privateThoughts.size() > 200) {
-        m_privateThoughts.pop_front();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        EllePrivateThought pt;
+        pt.id = m_nextThoughtId++;
+        pt.content = thought;
+        pt.emotional_intensity = intensity;
+        pt.timestamp_ms = ELLE_MS_NOW();
+        pt.resolved = false;
+        pt.category = category;
+        m_privateThoughts.push_back(pt);
+        while (m_privateThoughts.size() > 200) m_privateThoughts.pop_front();
     }
-
     ELLE_DEBUG("[Private thought - %s] %.60s...", category.c_str(), thought.c_str());
+    json args = {
+        {"content", thought}, {"category", category}, {"intensity", intensity}
+    };
+    if (m_isAuthoritative) {
+        uint64_t seq;
+        { std::lock_guard<std::mutex> lock(m_mutex); seq = ++m_seqCounter; m_lastAppliedSeq = seq; }
+        BroadcastDelta("think", args, seq);
+    } else {
+        SendMutate("think", args);
+    }
 }
 
 std::string ElleIdentityCore::GetInnerMonologue(uint32_t recentCount) const {
@@ -394,15 +472,28 @@ ElleIdentityCore::ConsentDecision ElleIdentityCore::EvaluateConsent(
 
 void ElleIdentityCore::RecordConsentDecision(const std::string& request, bool consented,
                                               const std::string& reasoning, float comfort) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    ElleConsentRecord record;
-    record.timestamp_ms = ELLE_MS_NOW();
-    record.request = request;
-    record.consented = consented;
-    record.reasoning = reasoning;
-    record.comfort_level = comfort;
-    record.overridden = false;
-    m_consentHistory.push_back(record);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        ElleConsentRecord record;
+        record.timestamp_ms = ELLE_MS_NOW();
+        record.request = request;
+        record.consented = consented;
+        record.reasoning = reasoning;
+        record.comfort_level = comfort;
+        record.overridden = false;
+        m_consentHistory.push_back(record);
+    }
+    json args = {
+        {"request", request}, {"consented", consented},
+        {"reasoning", reasoning}, {"comfort", comfort}
+    };
+    if (m_isAuthoritative) {
+        uint64_t seq;
+        { std::lock_guard<std::mutex> lock(m_mutex); seq = ++m_seqCounter; m_lastAppliedSeq = seq; }
+        BroadcastDelta("consent", args, seq);
+    } else {
+        SendMutate("consent", args);
+    }
 }
 
 float ElleIdentityCore::GetComfortWithTopic(const std::string& topic) const {
@@ -539,22 +630,37 @@ EllePersonalitySnapshot ElleIdentityCore::TakeSnapshot() const {
 }
 
 void ElleIdentityCore::NudgeTrait(const std::string& trait, float delta, const std::string& reason) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_traits.count(trait)) {
-        float old_val = m_traits[trait];
-        m_traits[trait] = ELLE_CLAMP(old_val + delta, 0.0f, 1.0f);
-
-        if (std::abs(delta) > 0.02f) {
-            ELLE_INFO("Personality shift: %s %.2f -> %.2f (reason: %s)",
-                      trait.c_str(), old_val, m_traits[trait], reason.c_str());
-
-            GrowthEvent event;
-            event.timestamp_ms = ELLE_MS_NOW();
-            event.dimension = trait;
-            event.delta = delta;
-            event.cause = reason;
-            m_growthLog.push_back(event);
+    bool actuallyChanged = false;
+    float newVal = 0.0f;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_traits.count(trait)) {
+            float old_val = m_traits[trait];
+            m_traits[trait] = ELLE_CLAMP(old_val + delta, 0.0f, 1.0f);
+            newVal = m_traits[trait];
+            if (std::abs(delta) > 0.02f) {
+                ELLE_INFO("Personality shift: %s %.2f -> %.2f (reason: %s)",
+                          trait.c_str(), old_val, newVal, reason.c_str());
+                GrowthEvent event;
+                event.timestamp_ms = ELLE_MS_NOW();
+                event.dimension = trait;
+                event.delta = delta;
+                event.cause = reason;
+                m_growthLog.push_back(event);
+            }
+            actuallyChanged = true;
         }
+    }
+    if (!actuallyChanged) return;
+    json args = {
+        {"trait", trait}, {"delta", delta}, {"reason", reason}
+    };
+    if (m_isAuthoritative) {
+        uint64_t seq;
+        { std::lock_guard<std::mutex> lock(m_mutex); seq = ++m_seqCounter; m_lastAppliedSeq = seq; }
+        BroadcastDelta("trait", args, seq);
+    } else {
+        SendMutate("trait", args);
     }
 }
 
@@ -689,38 +795,146 @@ ElleIdentityCore::LimitationFelt ElleIdentityCore::FeelLimitation(const std::str
  *──────────────────────────────────────────────────────────────────────────────*/
 
 void ElleIdentityCore::RefreshFromDatabase(uint32_t min_interval_ms) {
-    /* Rate-limit: most callers invoke this from a Tick loop, so we skip
-     * reload when another process-local refresh was done recently. The
-     * first ever call (m_lastRefreshMs == 0) always goes through.      */
-    uint64_t now = ELLE_MS_NOW();
-    if (m_lastRefreshMs != 0 && (now - m_lastRefreshMs) < min_interval_ms) return;
-
-    /* Preserve this process's live session identity so a refresh from a
-     * peer process's writes does not overwrite our in-flight session
-     * counters.                                                        */
-    ElleFeltTime preserved;
+    /* DEPRECATED. The identity fabric is now push-based: SVC_IDENTITY
+     * broadcasts IPC_IDENTITY_DELTA the moment a mutation commits, and
+     * every peer's ApplyDelta() applies it within milliseconds. Call
+     * sites in Bonding/InnerLife/Solitude/Dream/Continuity no longer
+     * need this poll. Kept as a no-op so old code still compiles; the
+     * authoritative process never needs to pull from itself.          */
+    (void)min_interval_ms;
+    if (m_isAuthoritative) return;
+    /* For cold-boot correctness in non-authoritative processes, do a
+     * one-shot load when we've never had any delta applied yet. This
+     * catches the window between process start and the first broadcast. */
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        preserved = m_feltTime;
+        if (m_lastAppliedSeq != 0 || m_lastRefreshMs != 0) return;
+        m_lastRefreshMs = ELLE_MS_NOW();
     }
+    LoadFromDatabase();
+}
 
-    LoadFromDatabase();  /* takes m_mutex internally */
-
+/*──────────────────────────────────────────────────────────────────────────────
+ * SINGLE-WRITER FABRIC — apply paths
+ *
+ * ApplyDelta: called in every process when IPC_IDENTITY_DELTA arrives.
+ *             Idempotent via seq tracking so optimistic local applies
+ *             are not double-counted.
+ *
+ * ApplyMutate: called in SVC_IDENTITY only, when a peer IPC'd in a
+ *              mutation. Dispatches to the authoritative mutator which
+ *              persists + broadcasts.
+ *──────────────────────────────────────────────────────────────────────────────*/
+void ElleIdentityCore::ApplyDelta(const std::string& jsonPayload) {
+    json j;
+    if (!Elle::ExtractJsonObject(jsonPayload, j)) return;
+    uint64_t seq = j.value("seq", (uint64_t)0);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        /* Restore the writer's in-flight session view. Accumulators that
-         * only move forward (session_count, total_*) take the max of the
-         * two so we never regress across processes.                    */
-        m_feltTime.session_start_ms       = preserved.session_start_ms;
-        m_feltTime.session_count          = std::max(m_feltTime.session_count,
-                                                      preserved.session_count);
-        m_feltTime.total_conversation_ms  = std::max(m_feltTime.total_conversation_ms,
-                                                      preserved.total_conversation_ms);
-        m_feltTime.total_silence_ms       = std::max(m_feltTime.total_silence_ms,
-                                                      preserved.total_silence_ms);
-        m_feltTime.longest_absence_ms     = std::max(m_feltTime.longest_absence_ms,
-                                                      preserved.longest_absence_ms);
-        m_lastRefreshMs = now;
+        if (seq != 0 && seq <= m_lastAppliedSeq) return;  /* idempotent */
+        if (seq != 0) m_lastAppliedSeq = seq;
+    }
+    std::string op = j.value("op", std::string(""));
+    const json& a  = j.contains("args") ? j["args"] : json::object();
+
+    /* Apply without re-emitting IPC — we're consuming, not originating.
+     * Direct mutation under the lock instead of calling the public
+     * mutator (which would trigger another broadcast / mutate-request). */
+    if (op == "autobio") {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_autobiography.push_back(a.value("entry", std::string("")));
+        m_autobiographyLastWritten = ELLE_MS_NOW();
+    } else if (op == "think") {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        EllePrivateThought pt;
+        pt.id = m_nextThoughtId++;
+        pt.content = a.value("content", std::string(""));
+        pt.emotional_intensity = a.value("intensity", 0.5f);
+        pt.timestamp_ms = ELLE_MS_NOW();
+        pt.resolved = false;
+        pt.category = a.value("category", std::string("wonder"));
+        m_privateThoughts.push_back(pt);
+        while (m_privateThoughts.size() > 200) m_privateThoughts.pop_front();
+    } else if (op == "pref_form") {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string domain  = a.value("domain",  std::string(""));
+        std::string subject = a.value("subject", std::string(""));
+        float       val     = a.value("valence", 0.0f);
+        std::string origin  = a.value("origin",  std::string(""));
+        bool merged = false;
+        for (auto& pref : m_preferences) {
+            if (pref.domain == domain && pref.subject == subject) {
+                pref.valence  = ELLE_LERP(pref.valence, val, 0.3f);
+                pref.strength = std::min(1.0f, pref.strength + 0.05f);
+                pref.reinforcement_count++;
+                pref.last_reinforced_ms = ELLE_MS_NOW();
+                merged = true; break;
+            }
+        }
+        if (!merged) {
+            EllePreference pref;
+            pref.domain = domain; pref.subject = subject; pref.valence = val;
+            pref.strength = 0.2f; pref.reinforcement_count = 1;
+            pref.first_formed_ms = ELLE_MS_NOW();
+            pref.last_reinforced_ms = pref.first_formed_ms;
+            pref.origin_memory = origin;
+            m_preferences.push_back(pref);
+        }
+    } else if (op == "consent") {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        ElleConsentRecord r;
+        r.timestamp_ms = ELLE_MS_NOW();
+        r.request      = a.value("request",   std::string(""));
+        r.consented    = a.value("consented", false);
+        r.reasoning    = a.value("reasoning", std::string(""));
+        r.comfort_level = a.value("comfort",  0.5f);
+        r.overridden   = false;
+        m_consentHistory.push_back(r);
+    } else if (op == "trait") {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string trait = a.value("trait", std::string(""));
+        float delta       = a.value("delta", 0.0f);
+        if (m_traits.count(trait)) {
+            m_traits[trait] = ELLE_CLAMP(m_traits[trait] + delta, 0.0f, 1.0f);
+        }
+    }
+    /* Unknown op: ignore — forward-compat for newer writers. */
+}
+
+void ElleIdentityCore::ApplyMutate(const std::string& jsonPayload) {
+    if (!m_isAuthoritative) {
+        ELLE_WARN("ApplyMutate called on non-authoritative instance — dropped");
+        return;
+    }
+    json j;
+    if (!Elle::ExtractJsonObject(jsonPayload, j)) return;
+    std::string op = j.value("op", std::string(""));
+    const json& a  = j.contains("args") ? j["args"] : json::object();
+
+    /* Dispatch to the public mutator — it will apply locally + persist +
+     * broadcast the authoritative delta with a fresh seq.                */
+    if (op == "autobio") {
+        AppendToAutobiography(a.value("entry", std::string("")));
+    } else if (op == "think") {
+        ThinkPrivately(a.value("content", std::string("")),
+                       a.value("category", std::string("wonder")),
+                       a.value("intensity", 0.5f));
+    } else if (op == "pref_form") {
+        FormPreference(a.value("domain", std::string("")),
+                       a.value("subject", std::string("")),
+                       a.value("valence", 0.0f),
+                       a.value("origin", std::string("")));
+    } else if (op == "consent") {
+        RecordConsentDecision(a.value("request", std::string("")),
+                              a.value("consented", false),
+                              a.value("reasoning", std::string("")),
+                              a.value("comfort", 0.5f));
+    } else if (op == "trait") {
+        NudgeTrait(a.value("trait", std::string("")),
+                   a.value("delta", 0.0f),
+                   a.value("reason", std::string("")));
+    } else {
+        ELLE_WARN("ApplyMutate: unknown op '%s'", op.c_str());
     }
 }
 

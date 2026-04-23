@@ -58,9 +58,8 @@ protected:
 
     void OnTick() override {
         auto& identity = ElleIdentityCore::Instance();
-        /* Cross-process identity sync — pick up peer writes (Continuity,
-         * Bonding, InnerLife, Dream) before we read trait / thought state. */
-        identity.RefreshFromDatabase();
+        /* Identity sync is now push-based (IPC_IDENTITY_DELTA from SVC_IDENTITY).
+         * Old RefreshFromDatabase poll removed.                          */
         uint64_t absence = identity.TimeSinceLastContact();
 
         /* Determine solitude phase based on absence duration */

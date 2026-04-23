@@ -54,9 +54,8 @@ protected:
     }
 
     void OnTick() override {
-        /* Cross-process identity sync so we see preferences / traits /
-         * consent history written by peer services.                     */
-        ElleIdentityCore::Instance().RefreshFromDatabase();
+        /* Identity sync is now push-based. Old RefreshFromDatabase poll
+         * removed — IPC_IDENTITY_DELTA mirrors peer mutations in ~ms.   */
 
         AuditRecentDecisions();
     }

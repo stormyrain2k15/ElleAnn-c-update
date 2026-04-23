@@ -481,7 +481,18 @@ typedef enum ELLE_IPC_MSG_TYPE {
      * process on a new port.
      * IPC_FAMILY_BIRTH is Family's own broadcast (status updates, births). */
     IPC_FAMILY_CONCEPTION_ATTEMPT,
-    IPC_FAMILY_BIRTH
+    IPC_FAMILY_BIRTH,
+    /* Identity single-writer fabric. Any non-SVC_IDENTITY service that
+     * calls a mutating method on ElleIdentityCore::Instance() now
+     * transparently sends IPC_IDENTITY_MUTATE to SVC_IDENTITY — the sole
+     * process that owns the authoritative state + writes it to SQL. After
+     * applying, SVC_IDENTITY broadcasts IPC_IDENTITY_DELTA so every peer
+     * process updates its local mirror in ~milliseconds (not the 60s
+     * eventual-consistency window the old RefreshFromDatabase poll had).
+     * Payload on both is a JSON string:
+     *   {"op":"<name>","args":{...},"seq":<monotonic uint64>}             */
+    IPC_IDENTITY_MUTATE,
+    IPC_IDENTITY_DELTA
 } ELLE_IPC_MSG_TYPE;
 
 #define ELLE_IPC_FLAG_URGENT      0x0001

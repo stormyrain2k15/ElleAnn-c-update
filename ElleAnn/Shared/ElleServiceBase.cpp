@@ -4,6 +4,7 @@
  * Handles SCM lifecycle, double-click install, console mode, core init.
  ******************************************************************************/
 #include "ElleServiceBase.h"
+#include "ElleIdentityCore.h"
 #include <iostream>
 #include <sstream>
 
@@ -478,6 +479,15 @@ bool ElleServiceBase::InitializeCore() {
             m_ipcHub.Send(SVC_HEARTBEAT, reply);
             /* Also update our own heartbeat in DB */
             ElleDB::UpdateWorkerHeartbeat(m_serviceId);
+        }
+        /* Identity single-writer fabric: every IPC_IDENTITY_DELTA is
+         * applied to this process's local mirror before the service-
+         * specific handler sees it. Deltas are keyed by a monotonic seq
+         * so optimistic local applies are not double-counted. This is
+         * the push-based replacement for RefreshFromDatabase polling —
+         * peers see identity mutations within milliseconds, not 60s.   */
+        if (msg.header.msg_type == IPC_IDENTITY_DELTA) {
+            ElleIdentityCore::Instance().ApplyDelta(msg.GetStringPayload());
         }
         /* Forward to service-specific handler */
         this->OnMessage(msg, sender);

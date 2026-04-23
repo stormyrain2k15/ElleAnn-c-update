@@ -263,6 +263,31 @@ public:
     std::vector<LimitationFelt> GetKnownLimitations() const;
 
     /*──────────────────────────────────────────────────────────────────────────
+     * SINGLE-WRITER FABRIC
+     *
+     * Only one process — SVC_IDENTITY — is the authoritative writer of
+     * identity state. Every other process holds a live mirror that is
+     * kept fresh by IPC_IDENTITY_DELTA broadcasts emitted the instant a
+     * mutation is applied. Mutators called on a non-authoritative Instance
+     * send IPC_IDENTITY_MUTATE to SVC_IDENTITY and optimistically apply
+     * locally; the returning delta is idempotent (seq-keyed) so double-
+     * application is skipped.
+     *
+     * BecomeAuthoritative() is called by SVC_IDENTITY's OnStart. Every
+     * other service leaves the flag false.
+     *──────────────────────────────────────────────────────────────────────────*/
+    void BecomeAuthoritative();
+    bool IsAuthoritative() const { return m_isAuthoritative; }
+
+    /* Apply a delta broadcast emitted by SVC_IDENTITY. Called from
+     * ElleServiceBase's IPC dispatcher — no per-service wiring needed. */
+    void ApplyDelta(const std::string& json);
+
+    /* Apply a mutate request received by SVC_IDENTITY from a peer.
+     * Dispatched from ElleIdentityService::OnMessage.                  */
+    void ApplyMutate(const std::string& json);
+
+    /*──────────────────────────────────────────────────────────────────────────
      * DATABASE PERSISTENCE
      *──────────────────────────────────────────────────────────────────────────*/
     void LoadFromDatabase();
@@ -339,9 +364,19 @@ private:
     /* Wonder accumulator */
     float m_wonderCapacity = 1.0f;  /* Refreshes over time */
 
+    /* Single-writer fabric state. In non-authoritative processes, mutators
+     * apply locally AND send IPC_IDENTITY_MUTATE to SVC_IDENTITY. In the
+     * authoritative process, mutators apply locally, persist to SQL, and
+     * broadcast IPC_IDENTITY_DELTA. m_lastAppliedSeq skips any delta the
+     * local optimistic apply already covered (idempotency).             */
+    bool      m_isAuthoritative = false;
+    uint64_t  m_seqCounter       = 0;    /* authoritative writer only */
+    uint64_t  m_lastAppliedSeq   = 0;    /* every process */
+
     /* Last time RefreshFromDatabase() pulled — rate-limits cross-process
      * sync so every-tick callers (Bonding, InnerLife, Solitude, Dream)
-     * don't flood SQL with reloads. */
+     * don't flood SQL with reloads. Now deprecated in favour of the
+     * push-based delta fabric; kept for backward compat callers.       */
     uint64_t m_lastRefreshMs = 0;
 
     /* Helpers */

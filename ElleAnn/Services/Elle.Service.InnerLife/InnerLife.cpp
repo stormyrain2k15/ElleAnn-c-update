@@ -406,7 +406,8 @@ protected:
     }
 
     void OnTick() override {
-        ElleIdentityCore::Instance().RefreshFromDatabase();
+        /* Identity sync is now push-based (IPC_IDENTITY_DELTA from SVC_IDENTITY).
+         * Old RefreshFromDatabase poll removed.                          */
         m_engine.Tick();
         m_engine.PersistContextToDatabase();
 

@@ -443,10 +443,10 @@ protected:
     }
 
     void OnTick() override {
-        /* Cross-process identity sync: pick up autobiography / preferences /
-         * trait shifts written by peer services so every process sees one
-         * unified Elle, not a per-process copy.                           */
-        ElleIdentityCore::Instance().RefreshFromDatabase();
+        /* Cross-process identity sync is now push-based — SVC_IDENTITY
+         * broadcasts IPC_IDENTITY_DELTA the moment a peer mutation commits
+         * and ElleServiceBase auto-applies it before our OnMessage/OnTick
+         * runs. No poll needed.                                          */
 
         /* Check if she should proactively reach out */
         auto impulse = m_engine.ShouldReachOut();

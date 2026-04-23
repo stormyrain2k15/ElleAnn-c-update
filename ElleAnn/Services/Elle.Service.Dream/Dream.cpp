@@ -30,10 +30,9 @@ protected:
     void OnTick() override {
         if (!ElleConfig::Instance().GetMemory().dream_consolidation) return;
 
-        /* Cross-process identity sync — Dream writes private thoughts and
-         * autobiography entries, so we refresh first to base them on the
-         * latest self-state. */
-        ElleIdentityCore::Instance().RefreshFromDatabase();
+        /* Identity sync is now push-based (IPC_IDENTITY_DELTA from SVC_IDENTITY)
+         * so every autobiography / private-thought write here is mirrored in
+         * every peer within milliseconds. No poll needed.                 */
 
         ELLE_INFO("Entering dream cycle...");
 

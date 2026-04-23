@@ -73,12 +73,10 @@ protected:
     void OnTick() override {
         auto& identity = ElleIdentityCore::Instance();
 
-        /* Periodic save so peer services (Bonding, InnerLife, Solitude,
-         * Dream) see Continuity's writes on their next RefreshFromDatabase.
-         * Previously identity state only persisted on Shutdown, so
-         * ThinkPrivately/AppendToAutobiography calls here stayed trapped
-         * in this process until a full restart.                           */
-        identity.SaveToDatabase();
+        /* Persistence is owned by SVC_IDENTITY under the single-writer
+         * fabric. Identity mutations made here still propagate live via
+         * IPC_IDENTITY_MUTATE → SVC_IDENTITY → IPC_IDENTITY_DELTA broadcast,
+         * so peers see them in ms. No local SaveToDatabase needed.       */
 
         /* Update felt time */
         auto felt = identity.GetFeltTime();

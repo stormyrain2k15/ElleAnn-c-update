@@ -8,6 +8,7 @@
 #include "../../Shared/ElleServiceBase.h"
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
+#include "../../Shared/ElleIdentityCore.h"
 #include <fstream>
 #include <sstream>
 
@@ -20,6 +21,14 @@ public:
 
 protected:
     bool OnStart() override {
+        /* Take ownership of the identity singleton for the whole system.
+         * Every other process running ElleIdentityCore::Instance() is a
+         * thin client that sends IPC_IDENTITY_MUTATE here and applies the
+         * returning IPC_IDENTITY_DELTA broadcast to its local mirror.   */
+        ElleIdentityCore::Instance().Initialize();
+        ElleIdentityCore::Instance().BecomeAuthoritative();
+        ELLE_INFO("Identity service is now AUTHORITATIVE (single-writer fabric)");
+
         auto identityPath = ElleConfig::Instance().GetString("security.identity_file_path",
                                                               "C:\\ElleAnn\\identity.sig");
         m_identityPath = identityPath;
@@ -43,11 +52,24 @@ protected:
     }
 
     void OnStop() override {
+        /* Final persist — captures any delta that arrived between the
+         * last periodic save and now.                                   */
+        ElleIdentityCore::Instance().SaveToDatabase();
         ELLE_INFO("Identity guard stopped");
     }
 
+    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID /*sender*/) override {
+        if (msg.header.msg_type == IPC_IDENTITY_MUTATE) {
+            /* Apply authoritatively — ElleIdentityCore persists + broadcasts
+             * the delta back out to every peer's mirror.                */
+            ElleIdentityCore::Instance().ApplyMutate(msg.GetStringPayload());
+        }
+    }
+
     void OnTick() override {
-        /* Check identity file integrity */
+        /* Periodic persist of authoritative state. Peers are live via
+         * broadcast — this is durability only.                          */
+        ElleIdentityCore::Instance().SaveToDatabase();
         std::string currentHash;
         if (ComputeIdentityHash(currentHash)) {
             if (currentHash != m_originalHash) {
