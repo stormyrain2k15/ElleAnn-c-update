@@ -317,7 +317,8 @@ private:
             /* Self-reflection can nudge personality traits */
             /* If reflection mentions growth, nudge relevant traits */
             std::string lower = reflection;
-            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
 
             if (lower.find("braver") != std::string::npos || 
                 lower.find("courage") != std::string::npos) {

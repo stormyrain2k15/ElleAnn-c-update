@@ -308,39 +308,41 @@ int ElleServiceBase::DoubleClickInstall() {
 }
 
 bool ElleServiceBase::IsRunningFromSCM() {
-    /* Heuristic: if parent process is services.exe, we're from SCM */
+    /* Heuristic: if parent process is services.exe, we're from SCM. Use
+     * the explicit wide-char variants (`PROCESSENTRY32W` / `Process32FirstW`
+     * / `Process32NextW`) instead of the unsuffixed macros. On this SDK
+     * the unsuffixed `PROCESSENTRY32` expands (via #define) to the A-
+     * suffix identifier, but the SDK declares only the struct tag and
+     * the W-suffix typedef — there is no `PROCESSENTRY32A` symbol, which
+     * is why earlier attempts failed with C2065. The W variant is always
+     * present and needs no conditional compilation. szExeFile is WCHAR[]
+     * there, compared against L"services.exe" with _wcsicmp.           */
     DWORD parentPid = 0;
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap != INVALID_HANDLE_VALUE) {
-        /* Use the TCHAR-based default types plus _tcsicmp so this code
-         * compiles identically under /D UNICODE and /D _MBCS. Earlier
-         * attempts to force the A suffix variants (PROCESSENTRY32A etc.)
-         * were rejected by this SDK toolchain; the default variants are
-         * always available. Comparison is against _T("services.exe") --
-         * widened at compile time when UNICODE is defined.           */
-        PROCESSENTRY32 pe;
+        PROCESSENTRY32W pe;
         pe.dwSize = sizeof(pe);
         DWORD myPid = GetCurrentProcessId();
-        if (Process32First(hSnap, &pe)) {
+        if (Process32FirstW(hSnap, &pe)) {
             do {
                 if (pe.th32ProcessID == myPid) {
                     parentPid = pe.th32ParentProcessID;
                     break;
                 }
-            } while (Process32Next(hSnap, &pe));
+            } while (Process32NextW(hSnap, &pe));
         }
 
         /* Check if parent is services.exe */
         if (parentPid) {
-            if (Process32First(hSnap, &pe)) {
+            if (Process32FirstW(hSnap, &pe)) {
                 do {
                     if (pe.th32ProcessID == parentPid) {
-                        bool isSvc = (_tcsicmp(pe.szExeFile,
-                                               _T("services.exe")) == 0);
+                        bool isSvc = (_wcsicmp(pe.szExeFile,
+                                               L"services.exe") == 0);
                         CloseHandle(hSnap);
                         return isSvc;
                     }
-                } while (Process32Next(hSnap, &pe));
+                } while (Process32NextW(hSnap, &pe));
             }
         }
         CloseHandle(hSnap);

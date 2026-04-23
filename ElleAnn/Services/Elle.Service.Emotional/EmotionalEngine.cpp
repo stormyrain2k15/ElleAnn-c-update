@@ -6,6 +6,7 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <sstream>
 
@@ -159,7 +160,8 @@ EmotionalEngine::EmotionalEngine() {
         /* Map name to emotion ID */
         for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
             std::string emoName = s_emotionNames[i];
-            std::transform(emoName.begin(), emoName.end(), emoName.begin(), ::tolower);
+            std::transform(emoName.begin(), emoName.end(), emoName.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
             if (emoName == name) {
                 m_state.baseline[i] = val;
                 m_state.dimensions[i] = val;
@@ -274,14 +276,16 @@ void EmotionalEngine::ProcessMultipleStimuli(
 void EmotionalEngine::ProcessTriggers(const std::string& text) {
     auto& cfg = ElleConfig::Instance().GetEmotion();
     std::string lower = text;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c){ return (char)std::tolower(c); });
 
     for (auto& trigger : cfg.triggers) {
         if (lower.find(trigger.pattern) != std::string::npos) {
             /* Map trigger emotion name to ID */
             for (int i = 0; i < ELLE_EMOTION_COUNT; i++) {
                 std::string emoName = s_emotionNames[i];
-                std::transform(emoName.begin(), emoName.end(), emoName.begin(), ::tolower);
+                std::transform(emoName.begin(), emoName.end(), emoName.begin(),
+                               [](unsigned char c){ return (char)std::tolower(c); });
                 if (emoName == trigger.emotion) {
                     ProcessStimulus((ELLE_EMOTION_ID)i, trigger.delta);
                     break;

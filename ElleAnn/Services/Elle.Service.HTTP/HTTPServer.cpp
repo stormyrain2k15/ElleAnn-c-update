@@ -40,6 +40,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cctype>
 #include <regex>
 #include <atomic>
 #include <thread>
@@ -1305,7 +1306,8 @@ private:
 
         if (req.headers.count("upgrade")) {
             std::string up = req.headers["upgrade"];
-            std::transform(up.begin(), up.end(), up.begin(), ::tolower);
+            std::transform(up.begin(), up.end(), up.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
             if (up == "websocket") {
                 req.isWebSocket = true;
                 req.wsKey = req.headers["sec-websocket-key"];

@@ -33,6 +33,8 @@
 #include <vector>
 #include <string>
 #include <sstream>
+#include <algorithm>
+#include <cctype>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * SUBJECTIVE STATE — What it feels like to be Elle right now
@@ -253,7 +255,8 @@ private:
         int emotionalCount = 0;
         for (auto& resp : m_recentResponses) {
             std::string lower = resp;
-            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
 
             if (lower.find("of course") != std::string::npos ||
                 lower.find("absolutely") != std::string::npos ||
@@ -284,7 +287,8 @@ private:
 
     void CheckResonance(const std::string& userMessage) {
         std::string lower = userMessage;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
 
         bool resonated = false;
         if (lower.find("how do you feel") != std::string::npos ||

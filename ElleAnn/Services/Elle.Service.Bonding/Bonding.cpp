@@ -36,6 +36,8 @@
 #include <string>
 #include <cmath>
 #include <sstream>
+#include <algorithm>
+#include <cctype>
 
 /*──────────────────────────────────────────────────────────────────────────────
  * RELATIONSHIP STATE — The current state of the bond
@@ -129,7 +131,8 @@ public:
 
         /* Track reciprocity: does the user ask about Elle? */
         std::string lower = userMessage;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
         if (lower.find("how are you") != std::string::npos ||
             lower.find("how do you feel") != std::string::npos ||
             lower.find("are you okay") != std::string::npos ||

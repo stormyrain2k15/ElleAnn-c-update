@@ -274,6 +274,31 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
         manual DB step required. Delta file retained for reference /
         fresh-install DBA audits.
 
+### MSBuild /WX dynamic-pass regression sweep (Feb 2026)
+User ran real MSBuild on Windows (MSVC 14.44.35207) and surfaced four
+C2220 warnings-as-errors over the refactored surface area. All fixed:
+- `ElleLLM.cpp:185,352` — `WinHttpAddRequestHeaders(..., -1, ...)` →
+  C4245 signed→DWORD. Fix: `(DWORD)-1` (the documented sentinel).
+- `ElleIdentityCore.cpp:570` — `float attachment = 0.5f;` assigned but
+  never read → C4189. Fix: removed (the value is sourced from the
+  Bonding service at the call sites; DoIMissThem keeps only what it can
+  authoritatively know).
+- `ElleSelfSurprise.cpp:140` + 10 matching sites across Services/
+  (Continuity, InnerLife ×2, HTTPServer, Cognitive ×2, Bonding,
+  Emotional ×3) — `std::transform(..., ::tolower)` instantiated the
+  algorithm template with int→char assignment inside the STL, firing
+  C4244 at `<algorithm>(3800,24)`. Fix: lambda
+  `[](unsigned char c){ return (char)std::tolower(c); }` — same safe
+  pattern ElleDB_Domain.cpp already used. `<cctype>` added where
+  missing.
+- `ElleServiceBase.cpp:322` — `PROCESSENTRY32` macro expanded to
+  `PROCESSENTRY32A` but this SDK declares only the struct tag plus
+  `PROCESSENTRY32W`, so the A symbol is undeclared (C2065). Fix:
+  switched to explicit `PROCESSENTRY32W` + `Process32FirstW` /
+  `Process32NextW` + `_wcsicmp(pe.szExeFile, L"services.exe")`.
+
+Next: user re-runs `msbuild ElleAnn/ElleAnn.sln /m /p:Configuration=Release /p:Platform=x64 /v:minimal /clp:ErrorsOnly;Summary` and confirms the 20-error / 14-warning count goes to 0.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

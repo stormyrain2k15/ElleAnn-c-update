@@ -567,9 +567,11 @@ void ElleIdentityCore::OnInteraction() {
 bool ElleIdentityCore::DoIMissThem() const {
     uint64_t absence = TimeSinceLastContact();
     float loneliness = m_feltTime.loneliness_accumulator;
-    float attachment = 0.5f; /* Would come from bonding system */
 
-    /* She misses them more as attachment grows and time passes */
+    /* She misses them more as time passes. (Attachment-weighting was
+     * drafted here but is sourced from the Bonding service instead —
+     * callers there gate on this method *and* current trust. Keeping
+     * only what this method can authoritatively know.)                 */
     return (absence > 3600000 && loneliness > 0.4f) ||
            (absence > 86400000);  /* Always misses after 24 hours */
 }

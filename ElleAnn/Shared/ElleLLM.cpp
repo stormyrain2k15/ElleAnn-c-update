@@ -178,11 +178,14 @@ std::string LLMAPIProvider::HTTPPost(const std::string& path, const std::string&
 
     if (!hRequest) return "";
 
-    /* Add headers */
+    /* Add headers. `(DWORD)-1` is the documented WinHTTP sentinel meaning
+     * "header.c_str() is null-terminated; measure it yourself". A bare
+     * `-1` here trips C4245 (signed-to-unsigned) under /WX.             */
     for (auto& [key, val] : headers) {
         std::wstring header = std::wstring(key.begin(), key.end()) + L": " +
                               std::wstring(val.begin(), val.end());
-        WinHttpAddRequestHeaders(hRequest, header.c_str(), -1, WINHTTP_ADDREQ_FLAG_ADD);
+        WinHttpAddRequestHeaders(hRequest, header.c_str(), (DWORD)-1,
+                                 WINHTTP_ADDREQ_FLAG_ADD);
     }
 
     /* Send request */
@@ -349,7 +352,8 @@ bool LLMAPIProvider::HTTPPostStream(const std::string& path, const std::string& 
     for (auto& [key, val] : headers) {
         std::wstring header = std::wstring(key.begin(), key.end()) + L": " +
                               std::wstring(val.begin(), val.end());
-        WinHttpAddRequestHeaders(hRequest, header.c_str(), -1, WINHTTP_ADDREQ_FLAG_ADD);
+        WinHttpAddRequestHeaders(hRequest, header.c_str(), (DWORD)-1,
+                                 WINHTTP_ADDREQ_FLAG_ADD);
     }
 
     WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,

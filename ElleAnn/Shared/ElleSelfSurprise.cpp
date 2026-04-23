@@ -6,6 +6,7 @@
 #include "ElleLogger.h"
 #include "ElleJsonExtract.h"
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 
 ElleSelfSurprise& ElleSelfSurprise::Instance() {
@@ -137,7 +138,13 @@ ElleSelfSurprise::DeliberationNeed ElleSelfSurprise::ShouldIThinkFirst(
     need.suggested_delay_ms = 0;
 
     std::string lower = input;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    /* Wrap ::tolower in a lambda that returns char (not int) — passing
+     * ::tolower directly to std::transform instantiates the algorithm
+     * with an int→char assignment inside the STL, which trips C4244
+     * at <algorithm>. The unsigned-char cast in is also correct per the
+     * cctype contract (undefined on char < 0).                         */
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c){ return (char)std::tolower(c); });
 
     /* Questions about identity, existence, feelings need time */
     if (lower.find("what are you") != std::string::npos ||

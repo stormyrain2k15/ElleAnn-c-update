@@ -119,7 +119,8 @@ IntentParser::ParseResult IntentParser::RuleBasedParse(const std::string& text) 
     result.raw_text = text;
 
     std::string lower = text;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c){ return (char)std::tolower(c); });
 
     for (auto& pattern : s_patterns) {
         if (lower.find(pattern.keyword) != std::string::npos) {
@@ -159,7 +160,8 @@ IntentParser::ParseResult IntentParser::ParseWithLLM(const std::string& text, co
 
     try {
         std::string label = j.value("intent_type", std::string("chat"));
-        std::transform(label.begin(), label.end(), label.begin(), ::tolower);
+        std::transform(label.begin(), label.end(), label.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
         static const std::unordered_map<std::string, ELLE_INTENT_TYPE> labelMap = {
             { "chat",              INTENT_CHAT               },
             { "hardware_command",  INTENT_HARDWARE_COMMAND   },
