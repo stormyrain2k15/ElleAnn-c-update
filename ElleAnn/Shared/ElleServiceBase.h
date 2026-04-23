@@ -22,6 +22,8 @@
 #include <string>
 #include <functional>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -80,6 +82,14 @@ protected:
     /* Access the running flag */
     std::atomic<bool>& Running() { return m_running; }
 
+    /* Sleep that yields immediately when shutdown is requested.
+     * Prefer this in tick loops and background threads over raw Sleep()/
+     * sleep_for — a plain Sleep(500) means a 500ms stop latency per
+     * sleep and forces SCM timeouts during shutdown. InterruptibleSleep
+     * wakes on either the timeout OR m_running flipping to false, so
+     * a stop request observed mid-sleep aborts promptly.                */
+    void InterruptibleSleep(uint32_t ms);
+
     /* Access to the currently-running service singleton. Helper classes
      * (ActionExecutor, HTTPHandler, etc.) use this to publish IPC messages
      * without being members of the service class themselves.              */
@@ -94,6 +104,11 @@ private:
     uint32_t        m_tickIntervalMs = 100;
 
     ElleIPCHub      m_ipcHub;
+
+    /* Signalling primitives for InterruptibleSleep — flipped during the
+     * transition m_running true → false. */
+    std::mutex                 m_stopMutex;
+    std::condition_variable    m_stopCv;
 
     /*──────────────────────────────────────────────────────────────────────────
      * SCM INTEGRATION

@@ -36,8 +36,20 @@ struct SQLRow {
     std::vector<std::string> values;
     
     const std::string& operator[](size_t idx) const { return values[idx]; }
+
+    /* Permissive getters — return the default on NULL, out-of-range, OR
+     * on non-numeric cell contents. Preserved for callers that really do
+     * want "silently treat garbage as 0" semantics (legacy paths).      */
     int64_t     GetInt(size_t idx) const;
     double      GetFloat(size_t idx) const;
+
+    /* Strict getters — return `false` on NULL, out-of-range, OR
+     * non-numeric contents. Caller reads `outVal` only when the helper
+     * returns true. Prefer these for any code path where a bad cell
+     * should NOT silently become 0/0.0 (audit fields, counters, ids).  */
+    bool        TryGetInt(size_t idx, int64_t& outVal) const;
+    bool        TryGetFloat(size_t idx, double& outVal) const;
+
     bool        IsNull(size_t idx) const;
 };
 

@@ -116,6 +116,9 @@ DWORD WINAPI ElleServiceBase::ServiceCtrlHandler(DWORD control, DWORD eventType,
         case SERVICE_CONTROL_SHUTDOWN:
             svc->ReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 10000);
             svc->m_running = false;
+            /* Wake every thread in InterruptibleSleep so stop latency is
+             * bounded by OnTick duration instead of m_tickIntervalMs. */
+            svc->m_stopCv.notify_all();
             svc->OnStop();
             svc->ShutdownCore();
             svc->ReportStatus(SERVICE_STOPPED);
@@ -350,6 +353,7 @@ int ElleServiceBase::RunConsole() {
     SetConsoleCtrlHandler([](DWORD type) -> BOOL {
         if (s_instance) {
             s_instance->m_running = false;
+            s_instance->m_stopCv.notify_all();
             s_instance->OnStop();
         }
         return TRUE;
@@ -376,6 +380,7 @@ int ElleServiceBase::RunConsole() {
             std::getline(std::cin, input);
             if (input == "quit" || input == "exit" || input == "q") {
                 m_running = false;
+                m_stopCv.notify_all();
             } else if (input == "status") {
                 std::cout << "Running: " << (m_running ? "yes" : "no") << "\n"
                           << "IPC Messages Sent: " << m_ipcHub.MessagesSent() << "\n"
@@ -389,7 +394,7 @@ int ElleServiceBase::RunConsole() {
             }
         }
         OnTick();
-        Sleep(m_tickIntervalMs);
+        InterruptibleSleep(m_tickIntervalMs);
     }
 
     OnStop();
@@ -399,13 +404,24 @@ int ElleServiceBase::RunConsole() {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
+ * INTERRUPTIBLE SLEEP — wakes on shutdown signal for prompt stop latency
+ *──────────────────────────────────────────────────────────────────────────────*/
+void ElleServiceBase::InterruptibleSleep(uint32_t ms) {
+    if (ms == 0) return;
+    if (!m_running.load(std::memory_order_acquire)) return;
+    std::unique_lock<std::mutex> lk(m_stopMutex);
+    m_stopCv.wait_for(lk, std::chrono::milliseconds(ms),
+                      [this]{ return !m_running.load(std::memory_order_acquire); });
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
  * SERVICE MAIN LOOP
  *──────────────────────────────────────────────────────────────────────────────*/
 void ElleServiceBase::ServiceLoop() {
     m_running = true;
     while (m_running) {
         OnTick();
-        Sleep(m_tickIntervalMs);
+        InterruptibleSleep(m_tickIntervalMs);
     }
 }
 

@@ -8,6 +8,8 @@
 #include <sqlext.h>
 #include <sstream>
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <set>
 #include <random>
 
@@ -16,12 +18,81 @@
  *──────────────────────────────────────────────────────────────────────────────*/
 int64_t SQLRow::GetInt(size_t idx) const {
     if (idx >= values.size() || values[idx].empty()) return 0;
-    try { return std::stoll(values[idx]); } catch (...) { return 0; }
+    /* Strict parse: strtoll + full-consume. Previous std::stoll/catch
+     * silently returned 0 on "1.5", "abc", "  42  " — the first two
+     * obscured bad schema assumptions, the third mis-parsed trimmable
+     * whitespace as a failure. Now: trim ASCII whitespace, require the
+     * remainder to be a pure integer. Anything else → WARN + 0.        */
+    const std::string& raw = values[idx];
+    size_t b = 0, e = raw.size();
+    while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
+    while (e > b && (raw[e-1] == ' ' || raw[e-1] == '\t')) --e;
+    if (b == e) return 0;
+    std::string s = raw.substr(b, e - b);
+    errno = 0;
+    char* endp = nullptr;
+    long long v = std::strtoll(s.c_str(), &endp, 10);
+    if (errno == ERANGE || !endp || endp == s.c_str() || *endp != '\0') {
+        ELLE_WARN("SQLRow::GetInt(col=%zu) coerced non-integer '%s' -> 0",
+                  idx, raw.c_str());
+        return 0;
+    }
+    return (int64_t)v;
 }
 
 double SQLRow::GetFloat(size_t idx) const {
     if (idx >= values.size() || values[idx].empty()) return 0.0;
-    try { return std::stod(values[idx]); } catch (...) { return 0.0; }
+    const std::string& raw = values[idx];
+    size_t b = 0, e = raw.size();
+    while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
+    while (e > b && (raw[e-1] == ' ' || raw[e-1] == '\t')) --e;
+    if (b == e) return 0.0;
+    std::string s = raw.substr(b, e - b);
+    errno = 0;
+    char* endp = nullptr;
+    double v = std::strtod(s.c_str(), &endp);
+    if (errno == ERANGE || !endp || endp == s.c_str() || *endp != '\0') {
+        ELLE_WARN("SQLRow::GetFloat(col=%zu) coerced non-numeric '%s' -> 0",
+                  idx, raw.c_str());
+        return 0.0;
+    }
+    return v;
+}
+
+bool SQLRow::TryGetInt(size_t idx, int64_t& outVal) const {
+    if (idx >= values.size() || values[idx].empty() ||
+        values[idx] == "NULL") return false;
+    const std::string& raw = values[idx];
+    size_t b = 0, e = raw.size();
+    while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
+    while (e > b && (raw[e-1] == ' ' || raw[e-1] == '\t')) --e;
+    if (b == e) return false;
+    std::string s = raw.substr(b, e - b);
+    errno = 0;
+    char* endp = nullptr;
+    long long v = std::strtoll(s.c_str(), &endp, 10);
+    if (errno == ERANGE || !endp || endp == s.c_str() || *endp != '\0')
+        return false;
+    outVal = (int64_t)v;
+    return true;
+}
+
+bool SQLRow::TryGetFloat(size_t idx, double& outVal) const {
+    if (idx >= values.size() || values[idx].empty() ||
+        values[idx] == "NULL") return false;
+    const std::string& raw = values[idx];
+    size_t b = 0, e = raw.size();
+    while (b < e && (raw[b] == ' ' || raw[b] == '\t')) ++b;
+    while (e > b && (raw[e-1] == ' ' || raw[e-1] == '\t')) --e;
+    if (b == e) return false;
+    std::string s = raw.substr(b, e - b);
+    errno = 0;
+    char* endp = nullptr;
+    double v = std::strtod(s.c_str(), &endp);
+    if (errno == ERANGE || !endp || endp == s.c_str() || *endp != '\0')
+        return false;
+    outVal = v;
+    return true;
 }
 
 bool SQLRow::IsNull(size_t idx) const {

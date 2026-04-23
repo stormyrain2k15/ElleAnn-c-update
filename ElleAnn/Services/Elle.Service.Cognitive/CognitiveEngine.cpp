@@ -537,7 +537,10 @@ private:
                                            0.15f)) {
                     pushUnique(recalled);
                 }
-            } catch (...) {}
+            } catch (const std::exception& e) {
+                ELLE_DEBUG("RecallMemories(name=%s) failed: %s",
+                           name.c_str(), e.what());
+            }
         }
 
         /* Tier 2b: Also recall by the full user text (catches topic matches) */
@@ -548,7 +551,9 @@ private:
                                        0.2f)) {
                 pushUnique(topicHits);
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            ELLE_DEBUG("RecallMemories(userText) failed: %s", e.what());
+        }
 
         /* Rank by composite score: importance + recency + access */
         uint64_t now = ELLE_MS_NOW();
@@ -668,14 +673,30 @@ private:
         ctx << identity << "\n\n";
 
         /* 6a. Intimacy layer — who this user is to Elle (trust, tone,
-         *     vulnerability/comfort patterns). If no CrystalProfile exists
-         *     yet, fall back to defaults. user_id may be "default" (string)
-         *     so we try to resolve it to an int, else 1.                    */
-        int32_t userIdInt = 1;
-        try { userIdInt = std::stoi(userId); } catch (...) { userIdInt = 1; }
+         *     vulnerability/comfort patterns). Previously userId missing
+         *     or unparseable silently became user #1 — so every
+         *     anonymous WS client pulled the primary user's Crystal
+         *     profile and Elle adopted the wrong intimacy context.
+         *     Now: "default" / unparseable / missing yields userIdInt=0
+         *     (sentinel "anonymous"), which short-circuits the Crystal
+         *     lookup below.                                              */
+        int32_t userIdInt = 0;
+        if (!userId.empty() && userId != "default") {
+            char* endp = nullptr;
+            errno = 0;
+            long long parsed = std::strtoll(userId.c_str(), &endp, 10);
+            if (errno == 0 && endp && *endp == '\0' &&
+                parsed >= 1 && parsed <= INT32_MAX) {
+                userIdInt = (int32_t)parsed;
+            } else {
+                ELLE_WARN("Chat envelope user_id=%s unparseable — "
+                          "using anonymous context", userId.c_str());
+            }
+        }
 
         ElleDB::CrystalProfile crystal;
-        bool hasCrystal = ElleDB::GetCrystalProfile(userIdInt, crystal);
+        bool hasCrystal = (userIdInt > 0) &&
+                          ElleDB::GetCrystalProfile(userIdInt, crystal);
         if (hasCrystal) {
             ctx << "Who this user is to you:\n";
             if (!crystal.preferred_tone.empty())
@@ -954,7 +975,10 @@ private:
 
         /* 8. Persist Elle's response */
         try { ElleDB::StoreMessage(convId, 2 /*elle*/, responseText, m_cachedEmotions, 0.0f); }
-        catch (...) {}
+        catch (const std::exception& e) {
+            ELLE_WARN("StoreMessage(elle) convId=%lld failed: %s",
+                      (long long)convId, e.what());
+        }
 
         /* 9. Store episodic memory of the exchange + link to entities */
         try {
@@ -979,7 +1003,9 @@ private:
             }
             mem.tag_count = (uint32_t)tagIdx;
             ElleDB::StoreMemory(mem);
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            ELLE_WARN("StoreMemory(episodic) failed: %s", e.what());
+        }
 
         /* 10. Reply */
         uint64_t elapsed = ELLE_MS_NOW() - t0;
@@ -1134,7 +1160,10 @@ private:
                         std::string nm = pj.value("emotion", std::string(""));
                         if (pj.contains("delta")) {
                             try { delta = pj["delta"].get<float>(); }
-                            catch (...) {}
+                            catch (const std::exception& e) {
+                                ELLE_DEBUG("INTENT_RESOLVE_EMOTION: non-numeric "
+                                           "'delta' field (%s) — keeping default", e.what());
+                            }
                         }
                         std::string lo; lo.reserve(nm.size());
                         for (char c : nm) lo.push_back((char)tolower((unsigned char)c));

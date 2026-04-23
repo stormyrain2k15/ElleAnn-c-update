@@ -128,8 +128,12 @@ void DictionaryLoader::WorkerRun(uint32_t startIdx, uint32_t limit) {
         }
         PersistState();
 
-        /* Rate-limit: dictionaryapi.dev is free. ~100 ms between calls. */
-        Sleep(120);
+        /* Rate-limit: dictionaryapi.dev is free. ~100 ms between calls.
+         * Poll m_running every 40 ms so a Shutdown() request aborts the
+         * run within ~40 ms worst case instead of the full 120 ms sleep. */
+        for (int slept = 0; slept < 120 && m_running.load(); slept += 40) {
+            Sleep(40);
+        }
     }
 
     {

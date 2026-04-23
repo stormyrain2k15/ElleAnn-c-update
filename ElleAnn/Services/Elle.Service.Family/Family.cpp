@@ -596,10 +596,58 @@ private:
                 { std::to_string((int)httpPid), std::to_string(childId) });
         }
 
+        /* Birth outcome. Previously we flipped pregnancy.status='born'
+         * even when CreateProcessW failed for every service — the child
+         * row existed but no processes were alive, so the "born" claim
+         * was a lie that hid spawn regressions from monitoring.
+         *
+         * Rules:
+         *   • HTTP came up                  → born (canonical health
+         *                                     endpoint is reachable)
+         *   • HTTP failed but ≥1 service up → stillborn_partial (child
+         *                                     exists on paper; humans
+         *                                     should manually inspect)
+         *   • Nothing came up               → stillborn (no alive procs)
+         *
+         * In all non-born outcomes we ALSO flip the summary row to
+         * 'lost' immediately so MonitorLiveChildren doesn't count it as
+         * alive on the next tick.                                        */
+        const char* birthStatus = "born";
+        if (httpPid == 0)     birthStatus = (spawned > 0) ? "stillborn_partial"
+                                                          : "stillborn";
+
         ElleSQLPool::Instance().QueryParams(
             "UPDATE ElleHeart.dbo.family_pregnancies "
-            "SET status = 'born', child_id = ? WHERE id = ?;",
-            { std::to_string(childId), std::to_string(pregId) });
+            "SET status = ?, child_id = ? WHERE id = ?;",
+            { birthStatus, std::to_string(childId), std::to_string(pregId) });
+
+        if (httpPid == 0) {
+            ElleSQLPool::Instance().QueryParams(
+                "UPDATE ElleHeart.dbo.family_children "
+                "SET status = 'lost', lost_ms = ? WHERE id = ?;",
+                { std::to_string((int64_t)ELLE_MS_NOW()),
+                  std::to_string(childId) });
+            ELLE_ERROR("Family: pregnancy #%lld failed to birth child #%lld "
+                       "(%u/%zu services spawned, HTTP did NOT come up) — "
+                       "marked as '%s'",
+                       (long long)pregId, (long long)childId,
+                       spawned, childStack.size(), birthStatus);
+            /* Still emit a WORLD_EVENT so UI reflects the failure. */
+            json failEv = {
+                {"type",             "family_stillbirth"},
+                {"pregnancy_id",     pregId},
+                {"child_id",         childId},
+                {"port",             port},
+                {"status",           birthStatus},
+                {"services_spawned", spawned},
+                {"services_failed",  failed}
+            };
+            auto failMsg = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_FAMILY,
+                                                  SVC_HTTP_SERVER);
+            failMsg.SetStringPayload(failEv.dump());
+            GetIPCHub().Send(SVC_HTTP_SERVER, failMsg);
+            return;
+        }
 
         ELLE_INFO("Family: birth of child #%lld from pregnancy #%lld on port %d "
                   "— spawned %u/%zu services (%u failed), HTTP pid=%lu",

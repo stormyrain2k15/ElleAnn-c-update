@@ -180,11 +180,35 @@ struct HTTPRequest {
         return v;
     }
 
-    /* Attempt to parse body as JSON, return empty object on failure */
+    /* Attempt to parse body as JSON.
+     *   • Empty body → empty object (benign; many GETs/DELETEs work this way).
+     *   • Non-empty malformed body → throws std::invalid_argument.
+     *
+     * Previous behaviour silently returned an empty object on parse
+     * failure, so a handler doing body.value("user_id", 0) couldn't tell
+     * "client posted garbage" from "client posted {}". The outer
+     * HandleClient wrapper catches std::invalid_argument and returns 400.
+     * Use TryBodyJSON() if you need soft-fail behaviour.                */
     json BodyJSON() const {
         if (body.empty()) return json::object();
         try { return json::parse(body); }
-        catch (...) { return json::object(); }
+        catch (const std::exception& e) {
+            throw std::invalid_argument(
+                std::string("invalid JSON body: ") + e.what());
+        }
+    }
+
+    /* Non-throwing variant — returns false and populates outErr when the
+     * body is non-empty but not valid JSON. Callers that want to distinguish
+     * "malformed" from "missing" use this directly instead of relying on
+     * the throwing BodyJSON() behaviour.                                 */
+    bool TryBodyJSON(json& out, std::string& outErr) const {
+        if (body.empty()) { out = json::object(); return true; }
+        try { out = json::parse(body); return true; }
+        catch (const std::exception& e) {
+            outErr = e.what();
+            return false;
+        }
     }
 };
 
@@ -324,26 +348,54 @@ public:
          *
          * Policy:
          *   • Activated when http.auth_enabled=true in config.
-         *   • GET/HEAD/OPTIONS are always allowed (read-only + preflight).
-         *   • Every other method must present either:
+         *   • All mutating methods (POST/PUT/PATCH/DELETE) require auth.
+         *   • GET/HEAD are read-only by default, BUT specific GET paths
+         *     that leak sensitive data OR trigger downstream mutations
+         *     (e.g. the hardware_actions dispatch claim, queue drains,
+         *     diag endpoints) are listed in kSensitiveReadPrefixes and
+         *     also require auth.
+         *   • OPTIONS always bypasses for CORS preflight compatibility.
+         *   • Auth is either:
          *       Authorization: Bearer <http.jwt_secret>
          *     OR
          *       x-admin-key: <http_server.admin_key | http.jwt_secret>
-         *   • The compare is constant-time so partial-guess attacks
-         *     can't be timed.
-         *   • When auth_enabled=true but no secret is configured, we
-         *     refuse writes with 503 instead of silently letting
-         *     anonymous requests through — fail-closed, not fail-open.
+         *   • Constant-time compare so partial-guess attacks aren't
+         *     timed. Fail-closed 503 if auth_enabled=true but no secret.
          *
          * Per-route fine-grained checks (e.g. x-admin-key on /morals)
-         * still run after this gate. This is defense in depth, not a
-         * replacement.
+         * still run after this gate. Defense in depth.
          *──────────────────────────────────────────────────────────────*/
         if (httpCfg.auth_enabled) {
             const std::string& method = req.method;
-            bool isRead = (method == "GET" || method == "HEAD" ||
-                           method == "OPTIONS");
-            if (!isRead) {
+            bool isPreflight = (method == "OPTIONS");
+            bool isRead = (method == "GET" || method == "HEAD");
+
+            /* GET endpoints that must be gated because they either expose
+             * sensitive data or perform a side-effecting atomic claim on
+             * the backing store (hardware_actions dispatch is the poster
+             * child — a bare GET poll drains pending rows).              */
+            static const char* kSensitiveReadPrefixes[] = {
+                "/api/ai/hardware/actions/pending",
+                "/api/diag/",
+                "/api/admin/",
+                "/api/morals/",
+                "/api/identity/",
+                "/api/intents/pending",
+                "/api/actions/pending",
+                "/api/memory/export",
+            };
+            bool isSensitiveRead = false;
+            if (isRead) {
+                for (const char* p : kSensitiveReadPrefixes) {
+                    if (req.path.rfind(p, 0) == 0) {
+                        isSensitiveRead = true;
+                        break;
+                    }
+                }
+            }
+
+            bool mustAuth = !isPreflight && (!isRead || isSensitiveRead);
+            if (mustAuth) {
                 const std::string& secret = httpCfg.jwt_secret;
                 std::string adminKey = ElleConfig::Instance().GetString(
                     "http_server.admin_key", secret);
@@ -370,7 +422,6 @@ public:
                                               std::tolower((unsigned char)y);
                                    })) {
                         std::string tok = v.substr(kBearer.size());
-                        /* trim leading whitespace just in case */
                         while (!tok.empty() && (tok.front() == ' ' ||
                                                 tok.front() == '\t'))
                             tok.erase(0, 1);
@@ -386,7 +437,7 @@ public:
                 }
                 if (!ok) {
                     return HTTPResponse::Err(401,
-                        "authentication required for mutating requests");
+                        "authentication required");
                 }
             }
         }
@@ -1071,14 +1122,32 @@ private:
             HTTPResponse resp = m_router.Dispatch(req);
             SendResponse(clientSocket, resp);
 
+        } catch (const std::invalid_argument& e) {
+            /* Bubbled up from HTTPRequest::BodyJSON() on malformed JSON.
+             * Return the client-facing error; no stack trace logged at
+             * ERROR because this is a client-side fault, not ours. */
+            ELLE_DEBUG("HTTP 400: %s", e.what());
+            try { SendResponse(clientSocket, HTTPResponse::Err(400, e.what())); }
+            catch (const std::exception& se) {
+                ELLE_WARN("HTTP 400 write failed: %s", se.what());
+                closesocket(clientSocket);
+            }
         } catch (const std::exception& e) {
             ELLE_ERROR("HTTP handler exception: %s", e.what());
             try { SendResponse(clientSocket, HTTPResponse::Err(500, e.what())); }
-            catch (...) { closesocket(clientSocket); }
+            catch (const std::exception& se) {
+                ELLE_WARN("HTTP 500 write failed: %s", se.what());
+                closesocket(clientSocket);
+            }
         } catch (...) {
-            ELLE_ERROR("HTTP handler unknown exception");
+            ELLE_ERROR("HTTP handler unknown exception on %s %s",
+                       /* best-effort context — req may have been parsed */
+                       "?", "?");
             try { SendResponse(clientSocket, HTTPResponse::Err(500, "unknown")); }
-            catch (...) { closesocket(clientSocket); }
+            catch (const std::exception& se) {
+                ELLE_WARN("HTTP 500 write failed: %s", se.what());
+                closesocket(clientSocket);
+            }
         }
     }
 
@@ -1204,6 +1273,96 @@ private:
      * WEBSOCKET HANDSHAKE + READ LOOP
      *────────────────────────────────────────────────────────────────────────*/
     void HandleWebSocketUpgrade(SOCKET clientSocket, const HTTPRequest& req) {
+        /* Auth gate for the WS upgrade. When auth_enabled=true in config,
+         * the upgrade must present the same credentials a mutating REST
+         * call would — either Authorization: Bearer <jwt_secret>, or the
+         * x-admin-key header, or sec-websocket-protocol containing the
+         * token (for browsers that can't set Authorization on WS).
+         *
+         * Previously the WS channel bypassed the central auth gate
+         * entirely — anyone could upgrade, subscribe, and send chat
+         * through the command channel regardless of auth config.       */
+        const auto& httpCfg = ElleConfig::Instance().GetHTTP();
+        if (httpCfg.auth_enabled) {
+            const std::string& secret = httpCfg.jwt_secret;
+            std::string adminKey = ElleConfig::Instance().GetString(
+                "http_server.admin_key", secret);
+            if (secret.empty() && adminKey.empty()) {
+                ELLE_WARN("WS upgrade refused: auth_enabled=true but no "
+                          "jwt_secret/admin_key configured");
+                SendResponse(clientSocket,
+                             HTTPResponse::Err(503, "auth misconfigured"));
+                return;
+            }
+            auto constTimeEq = [](const std::string& a, const std::string& b) {
+                if (a.size() != b.size()) return false;
+                unsigned diff = 0;
+                for (size_t i = 0; i < a.size(); ++i)
+                    diff |= (unsigned char)a[i] ^ (unsigned char)b[i];
+                return diff == 0;
+            };
+            bool ok = false;
+            auto authIt = req.headers.find("authorization");
+            if (authIt != req.headers.end()) {
+                static const std::string kBearer = "Bearer ";
+                const std::string& v = authIt->second;
+                if (v.size() > kBearer.size() &&
+                    std::equal(kBearer.begin(), kBearer.end(), v.begin(),
+                               [](char x, char y){
+                                   return std::tolower((unsigned char)x) ==
+                                          std::tolower((unsigned char)y);
+                               })) {
+                    std::string tok = v.substr(kBearer.size());
+                    while (!tok.empty() && (tok.front() == ' ' ||
+                                            tok.front() == '\t'))
+                        tok.erase(0, 1);
+                    if (!secret.empty() && constTimeEq(tok, secret)) ok = true;
+                }
+            }
+            if (!ok) {
+                auto keyIt = req.headers.find("x-admin-key");
+                if (keyIt != req.headers.end() && !adminKey.empty() &&
+                    constTimeEq(keyIt->second, adminKey)) ok = true;
+            }
+            /* Browser fallback: accept `sec-websocket-protocol: elle.<token>`
+             * since JS WebSocket() can't set Authorization headers but
+             * CAN set a subprotocol. The server echoes only the protocol
+             * back, never the raw token.                                */
+            if (!ok) {
+                auto protoIt = req.headers.find("sec-websocket-protocol");
+                if (protoIt != req.headers.end()) {
+                    static const std::string kElle = "elle.";
+                    std::string v = protoIt->second;
+                    /* protocol list is comma-separated */
+                    size_t p = 0;
+                    while (p < v.size() && !ok) {
+                        size_t comma = v.find(',', p);
+                        std::string one = v.substr(p,
+                            comma == std::string::npos ? v.size() - p : comma - p);
+                        while (!one.empty() && (one.front() == ' ' ||
+                                                one.front() == '\t'))
+                            one.erase(0, 1);
+                        while (!one.empty() && (one.back() == ' ' ||
+                                                one.back() == '\t'))
+                            one.pop_back();
+                        if (one.size() > kElle.size() &&
+                            one.compare(0, kElle.size(), kElle) == 0) {
+                            std::string tok = one.substr(kElle.size());
+                            if (!secret.empty() && constTimeEq(tok, secret)) ok = true;
+                        }
+                        if (comma == std::string::npos) break;
+                        p = comma + 1;
+                    }
+                }
+            }
+            if (!ok) {
+                ELLE_WARN("WS upgrade refused: missing/invalid auth");
+                SendResponse(clientSocket,
+                             HTTPResponse::Err(401, "WS auth required"));
+                return;
+            }
+        }
+
         if (req.wsKey.empty()) {
             SendResponse(clientSocket, HTTPResponse::Err(400, "Missing Sec-WebSocket-Key"));
             return;
@@ -1312,7 +1471,11 @@ private:
                     HandleWebSocketMessage(client, payload);
                 }
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            ELLE_DEBUG("WS client loop exited with exception: %s", e.what());
+        } catch (...) {
+            ELLE_WARN("WS client loop exited with unknown exception");
+        }
 
         client->alive = false;
         closesocket(client->socket);
@@ -1756,7 +1919,7 @@ private:
         /* ============== Tokens / Conversations — dbo.conversations + messages ==== */
         m_router.Register("POST", "/api/tokens/conversations", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            int32_t userId = body.value("user_id", 1);
+            int32_t userId = body.value("user_id", 0);
             std::string title = body.value("title", std::string("New conversation"));
             int32_t newId = 0;
             if (!ElleDB::CreateConversation(userId, title, newId))
@@ -1824,7 +1987,7 @@ private:
         });
         m_router.Register("POST", "/api/tokens/video-calls", [](const HTTPRequest& req) {
             json body = req.BodyJSON();
-            int32_t userId = body.value("user_id", 1);
+            int32_t userId = body.value("user_id", 0);
             int32_t convId = body.value("conversation_id", 0);
             std::string callId;
             if (!ElleDB::StartVoiceCall(userId, convId, callId))
@@ -1947,7 +2110,7 @@ private:
                     return HTTPResponse::Err(400, "provide file_path or base64");
 
                 ElleDB::UserAvatar a;
-                a.user_id    = body.value("user_id", 1);
+                a.user_id    = body.value("user_id", 0);
                 a.label      = label;
                 a.file_path  = filePath;
                 a.mime_type  = mime;
@@ -1965,7 +2128,7 @@ private:
             }
         });
         m_router.Register("GET", "/api/video/avatar", [](const HTTPRequest& req) {
-            int32_t userId = req.QueryInt("user_id", 1);
+            int32_t userId = req.QueryInt("user_id", 0);
             ElleDB::UserAvatar a;
             if (!ElleDB::GetDefaultAvatar(userId, a))
                 return HTTPResponse::OK({{"avatar", nullptr}, {"note", "no avatar configured"}});
@@ -1979,7 +2142,7 @@ private:
             });
         });
         m_router.Register("GET", "/api/video/avatars", [](const HTTPRequest& req) {
-            int32_t userId = req.QueryInt("user_id", 1);
+            int32_t userId = req.QueryInt("user_id", 0);
             std::vector<ElleDB::UserAvatar> avs;
             ElleDB::ListAvatars(userId, avs);
             json arr = json::array();
@@ -2814,7 +2977,9 @@ private:
             auto& r = rs.rows[0];
             json ctx = json::object();
             try { ctx = json::parse(r.values.size() > 2 ? r.values[2] : "{}"); }
-            catch (...) {}
+            catch (const std::exception& e) {
+                ELLE_DEBUG("continuity_greeting context JSON parse failed: %s", e.what());
+            }
             return HTTPResponse::OK({
                 {"id",         r.GetInt(0)},
                 {"greeting",   r.values.size() > 1 ? r.values[1] : ""},
@@ -3531,7 +3696,10 @@ private:
         /* ============== Server Management — real backing ============== */
         m_router.Register("GET", "/api/server/status", [](const HTTPRequest&) {
             std::vector<ELLE_SERVICE_STATUS> statuses;
-            try { ElleDB::GetWorkerStatuses(statuses); } catch (...) {}
+            try { ElleDB::GetWorkerStatuses(statuses); }
+            catch (const std::exception& e) {
+                ELLE_WARN("GetWorkerStatuses failed: %s", e.what());
+            }
             json svcArr = json::array();
             uint64_t now = ELLE_MS_NOW();
             for (auto& s : statuses) {
@@ -3726,16 +3894,116 @@ private:
                 { std::to_string(slot) });
             if (!rs.success || rs.rows.empty()) return HTTPResponse::Err(404, "slot not found");
             std::string endpoint = rs.rows[0].values.empty() ? "" : rs.rows[0].values[0];
-            /* Best-effort HTTP GET to endpoint root — proves connectivity */
-            bool alive = !endpoint.empty();
+            if (endpoint.empty())
+                return HTTPResponse::OK({{"slot_number", slot}, {"alive", false},
+                                         {"endpoint", ""}, {"error", "no endpoint configured"}});
+
+            /* REAL ping — previously this endpoint only updated last_ping_ms
+             * with no actual network I/O, so a dead model endpoint still
+             * reported "alive". Now we do a short TCP connect probe to the
+             * endpoint's host:port and only touch last_ping_ms on success.
+             *
+             * Scheme handling:
+             *   http://host:port/path   → TCP connect host:(port or 80)
+             *   https://host:port/path  → TCP connect host:(port or 443)
+             *   host:port               → TCP connect host:port
+             *
+             * 2-second connect timeout — anything slower than that is as
+             * good as dead for model-slot-dispatch purposes.             */
+            auto parseHostPort = [](const std::string& url,
+                                    std::string& host, uint16_t& port) -> bool {
+                std::string s = url;
+                uint16_t defaultPort = 80;
+                if (s.rfind("https://", 0) == 0) { s = s.substr(8); defaultPort = 443; }
+                else if (s.rfind("http://", 0) == 0) { s = s.substr(7); defaultPort = 80; }
+                /* Strip path */
+                auto slash = s.find('/');
+                if (slash != std::string::npos) s = s.substr(0, slash);
+                /* host:port split — IPv6 not supported here (endpoints
+                 * are operator-configured and always IPv4/hostname).   */
+                auto colon = s.rfind(':');
+                if (colon != std::string::npos) {
+                    host = s.substr(0, colon);
+                    long long p = 0;
+                    if (HTTPRequest::StrictParseLL(s.substr(colon + 1), p) &&
+                        p > 0 && p <= 65535) {
+                        port = (uint16_t)p;
+                    } else {
+                        return false;
+                    }
+                } else {
+                    host = s;
+                    port = defaultPort;
+                }
+                return !host.empty();
+            };
+
+            std::string host;
+            uint16_t port = 0;
+            if (!parseHostPort(endpoint, host, port)) {
+                return HTTPResponse::OK({{"slot_number", slot}, {"alive", false},
+                                         {"endpoint", endpoint},
+                                         {"error", "unparseable endpoint"}});
+            }
+
+            uint64_t t0 = ELLE_MS_NOW();
+            bool alive = false;
+            std::string probeErr;
+
+            addrinfo hints{}; hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
+            addrinfo* res = nullptr;
+            std::string portStr = std::to_string((int)port);
+            if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) == 0 && res) {
+                SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+                if (s != INVALID_SOCKET) {
+                    /* Non-blocking connect with 2s select timeout. */
+                    u_long nb = 1; ioctlsocket(s, FIONBIO, &nb);
+                    int rc = connect(s, res->ai_addr, (int)res->ai_addrlen);
+                    if (rc == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+                        fd_set wfds; FD_ZERO(&wfds); FD_SET(s, &wfds);
+                        timeval tv{}; tv.tv_sec = 2; tv.tv_usec = 0;
+                        int sel = select(0, nullptr, &wfds, nullptr, &tv);
+                        if (sel > 0) {
+                            int soErr = 0; int soLen = (int)sizeof(soErr);
+                            if (getsockopt(s, SOL_SOCKET, SO_ERROR,
+                                           (char*)&soErr, &soLen) == 0 && soErr == 0) {
+                                alive = true;
+                            } else {
+                                probeErr = "connect error " + std::to_string(soErr);
+                            }
+                        } else {
+                            probeErr = "connect timeout";
+                        }
+                    } else if (rc == 0) {
+                        alive = true; /* immediate connect — localhost etc. */
+                    } else {
+                        probeErr = "connect failed " + std::to_string(WSAGetLastError());
+                    }
+                    closesocket(s);
+                } else {
+                    probeErr = "socket() failed";
+                }
+                freeaddrinfo(res);
+            } else {
+                probeErr = "DNS resolve failed for " + host;
+            }
+            uint64_t t1 = ELLE_MS_NOW();
+
             if (alive) {
                 ElleSQLPool::Instance().QueryParams(
                     "UPDATE ElleCore.dbo.model_slots SET last_ping_ms = ? WHERE slot_number = ?;",
-                    { std::to_string(ELLE_MS_NOW()), std::to_string(slot) });
+                    { std::to_string(t1), std::to_string(slot) });
             }
-            return HTTPResponse::OK({
-                {"slot_number", slot}, {"alive", alive}, {"endpoint", endpoint}
-            });
+            json resp = {
+                {"slot_number", slot},
+                {"alive", alive},
+                {"endpoint", endpoint},
+                {"host", host},
+                {"port", (int)port},
+                {"latency_ms", (int64_t)(t1 - t0)}
+            };
+            if (!alive) resp["error"] = probeErr;
+            return HTTPResponse::OK(resp);
         });
         m_router.Register("GET", "/api/models/workers", [](const HTTPRequest&) {
             std::vector<ELLE_SERVICE_STATUS> statuses;
@@ -3885,7 +4153,10 @@ private:
         /* ============== Legacy goals/brain/hal/admin — keep for back-compat ============== */
         m_router.Register("GET", "/api/goals", [](const HTTPRequest&) {
             std::vector<ELLE_GOAL_RECORD> goals;
-            try { ElleDB::GetActiveGoals(goals); } catch (...) {}
+            try { ElleDB::GetActiveGoals(goals); }
+            catch (const std::exception& e) {
+                ELLE_WARN("GetActiveGoals failed: %s", e.what());
+            }
             json arr = json::array();
             for (auto& g : goals) {
                 arr.push_back({

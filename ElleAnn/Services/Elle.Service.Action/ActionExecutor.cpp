@@ -398,12 +398,24 @@ private:
         }
     }
 
-    bool StartWatch(const std::string& requested, std::string& errOut) {
+    /* Watch start result. The previous contract was a bool-plus-errOut
+     * string which was ambiguous in one specific case: "already watching"
+     * set errOut to a human message AND returned true (idempotent
+     * success). Callers had no way to tell "already" from "freshly started"
+     * and had to ignore errOut on success — which caused one site to log
+     * "watch start succeeded: already watching" as an error.              */
+    enum class StartWatchResult {
+        Started           = 0,  /* new watcher thread launched */
+        AlreadyWatching   = 1,  /* idempotent — no new thread, no error */
+        Failed            = 2   /* errOut populated with concrete reason */
+    };
+
+    StartWatchResult StartWatch(const std::string& requested, std::string& errOut) {
+        errOut.clear();
         std::lock_guard<std::mutex> lock(m_watchMutex);
         auto it = m_watches.find(requested);
         if (it != m_watches.end() && !it->second->cancel.load()) {
-            errOut = "already watching";
-            return true; /* idempotent */
+            return StartWatchResult::AlreadyWatching;
         }
 
         auto entry = std::make_shared<WatchEntry>();
@@ -421,7 +433,7 @@ private:
         if (entry->hDir == INVALID_HANDLE_VALUE) {
             errOut = "CreateFile dir=" + entry->dirPath +
                      " err=" + std::to_string(GetLastError());
-            return false;
+            return StartWatchResult::Failed;
         }
 
         std::weak_ptr<WatchEntry> weakEntry = entry;
@@ -433,7 +445,7 @@ private:
         m_watches[requested] = entry;
         ELLE_INFO("FileWatcher started: %s (dir=%s file=%s)",
                   requested.c_str(), entry->dirPath.c_str(), entry->fileName.c_str());
-        return true;
+        return StartWatchResult::Started;
     }
 
     void StopAllWatches() {
@@ -574,9 +586,14 @@ private:
                  * modification. Idempotent: same path returns "already
                  * watching". See FileWatchRegistry below.                 */
                 std::string err;
-                if (!StartWatch(path, err))
+                auto r = StartWatch(path, err);
+                if (r == StartWatchResult::Failed)
                     return Fail("WatchFile failed: " + err, 0x1208);
-                return {true, "Watching " + path, TRUST_SUCCESS_DELTA, 0};
+                return {true,
+                        r == StartWatchResult::AlreadyWatching
+                            ? "Already watching " + path
+                            : "Watching " + path,
+                        TRUST_SUCCESS_DELTA, 0};
             }
             default:
                 return Fail("Unknown file op type", 0x1209);
