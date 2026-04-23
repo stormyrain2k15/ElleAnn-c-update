@@ -119,20 +119,55 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
   non-authoritative peers, not a polling API. The idle polling it
   used to drive was already removed from every caller.
 
+### P2 — ElleDB Singleton Split (DONE this session)
+- `Shared/ElleSQLConn.cpp` was 2.6k LOC of one giant `namespace ElleDB {}`
+  containing 79 functions across queues, messages, memory, world, trust,
+  workers, logs, goals, emotion, metrics, voice, learning, video,
+  dictionary. Split by domain into 4 files, all under the same namespace
+  so no caller changes:
+  - `ElleSQLConn.cpp`   — connection / pool primitives only (≈580 LOC)
+  - `ElleDB_Queues.cpp`  — IntentQueue / ActionQueue / QueueSnapshot
+  - `ElleDB_Domain.cpp`  — Conversations / Memory / World / Trust /
+                           Workers / Logs / Goals
+  - `ElleDB_Content.cpp` — Emotion persistence / memory helpers / voice /
+                           metrics / learning subjects-skills-video /
+                           dictionary / drive state
+- `ElleCore.Shared.vcxproj` updated to build all 4 sources.
+- New CI sub-step "ElleDB symbol audit" — parses the header for every
+  `ElleDB::Foo(...)` declaration and requires EXACTLY one definition
+  among the 4 sources. No more declared-but-undefined silent link
+  breaks (this very audit caught two real pre-existing bugs on first
+  run — see next item).
+
+### P0 — Link-Break Gap Filled (found and fixed during the split)
+- `ElleDB::GetRecentLogs` and `ElleDB::GetWorkerStatuses` were declared
+  in `ElleSQLConn.h` and called from `HTTPServer.cpp`
+  (`/api/server/status`, `/api/diag/*`) but had **no definition anywhere**
+  in the codebase — this would have been a hard link error on the next
+  Level4+WAE build. Real SQL-backed implementations now live in
+  `ElleDB_Domain.cpp` next to `WriteLog` / `RegisterWorker`, mapped
+  against the actual Workers/Logs schema columns from
+  `ElleAnn_Schema.sql`. CI symbol audit now prevents the gap
+  re-emerging.
+
 ### Build/CI — Bar Enforcement (this session)
 - `.github/workflows/elleann-build.yml` hardened:
   - Removed the `/p:WarningLevel=3` override so CI honours
     `Directory.Build.props` (Level4 + TreatWarningAsError).
-  - New job `cpp-balance` — string/comment-aware brace & paren balance
-    across the whole C++ tree; vendored `json.hpp` explicitly skipped.
-  - New job `powershell-syntax` — parses every `Deploy/*.ps1` with the
+  - `cpp-balance` job — string/comment-aware brace & paren balance
+    across the whole C++ tree + an `ElleDB` symbol audit that rejects
+    any declared-but-undefined or duplicate-definition function.
+  - `powershell-syntax` job — parses every `Deploy/*.ps1` with the
     real PowerShell parser on `windows-latest`. Syntax regressions are
     caught before an operator runs the installer.
-  - New job `sql-delta-idempotency` — splits every non-initial SQL
+  - `sql-delta-idempotency` job — splits every non-initial SQL
     file on `GO` boundaries and requires each batch containing a
     CREATE/ALTER to include an `IF [NOT] EXISTS / COL_LENGTH /
     OBJECT_ID` guard. Re-runnability is now a contract the bot enforces.
-- All four hygiene jobs verified passing locally against current tree.
+  - `sln-integrity` job — sln ↔ disk vcxproj cross-ref + XML
+    well-formedness.
+- All five hygiene jobs verified passing locally against current tree.
+
 
 ### P1 — XEngine Historical Pregnancy Separation (this session)
 - `Deliver()` now snapshots the completed pregnancy into the new

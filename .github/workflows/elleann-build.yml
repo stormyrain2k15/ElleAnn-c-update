@@ -191,18 +191,21 @@ jobs:
           PY
 
   # ────────────────────────────────────────────────────────────────────────
-  # C++ brace / paren balance — string-and-comment-aware. Catches half-
-  # committed refactors that MSBuild would also catch but much later.
+  # C++ brace / paren balance + ElleDB symbol table audit — string-and-
+  # comment-aware. Catches half-committed refactors AND declared-but-
+  # -undefined ElleDB:: functions (e.g. `GetWorkerStatuses` declared in
+  # the header but missing a definition — previously a silent linker
+  # break that only fired when someone actually built the HTTP service).
   # ────────────────────────────────────────────────────────────────────────
   cpp-balance:
-    name: C++ Brace / Paren Balance
+    name: C++ Brace / Paren Balance + ElleDB Symbol Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Balance sweep
         run: |
           python3 - <<'PY'
-          import os, sys
+          import os, re, sys
           def strip(src):
               out = []; i = 0; n = len(src)
               while i < n:
@@ -231,9 +234,6 @@ jobs:
           bad = []
           exts = ('.cpp', '.h', '.hpp', '.cc', '.cxx')
           skip_dirs = {'Lua/lua54', 'Debug', 'Release', 'x64', '.vs'}
-          # Skip third-party vendored headers that intentionally have
-          # lopsided pre-processor gates (json.hpp with its NLOHMANN_*
-          # macro families). Those are known good.
           skip_files = {'ElleAnn/Shared/json.hpp'}
           for dirpath, dirnames, files in os.walk('ElleAnn'):
               dirnames[:] = [d for d in dirnames if d not in skip_dirs]
@@ -249,6 +249,42 @@ jobs:
                   print(f'::error file={p}::unbalanced: {{ {ob}/{cb} }} ( {op}/{cp} )')
               sys.exit(1)
           print(f'Balance OK')
+          PY
+      - name: ElleDB symbol audit
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          hdr = open('ElleAnn/Shared/ElleSQLConn.h').read()
+          m = re.search(r'namespace\s+ElleDB\s*\{(.+)', hdr, flags=re.S)
+          body = m.group(1)
+          decls = set()
+          for mm in re.finditer(
+              r'\n\s*(?:bool|uint32_t|uint64_t|int|int32_t|int64_t|void|std::string|[\w:<>]+)\s+(\w+)\s*\([^;{]*?\)\s*;',
+              body, flags=re.S):
+              name = mm.group(1)
+              if re.match(r'^[A-Z][A-Za-z0-9_]+$', name):
+                  decls.add(name)
+          defs = {}
+          for cpp in ('ElleSQLConn.cpp', 'ElleDB_Queues.cpp',
+                      'ElleDB_Domain.cpp', 'ElleDB_Content.cpp'):
+              src = open(f'ElleAnn/Shared/{cpp}').read()
+              for mm in re.finditer(
+                  r'\n(?:bool|uint32_t|uint64_t|int|int32_t|int64_t|void|std::string|[\w:<>]+)\s+(\w+)\s*\([^;{]*?\)\s*(?:const\s*)?\{',
+                  src, flags=re.S):
+                  name = mm.group(1)
+                  if name in decls:
+                      defs.setdefault(name, []).append(cpp)
+          missing = sorted(d for d in decls if d not in defs)
+          dups    = {n: f for n, f in defs.items() if len(f) > 1}
+          errs = 0
+          for m in missing:
+              print(f'::error::ElleDB::{m} declared in ElleSQLConn.h but NEVER defined')
+              errs += 1
+          for n, fs in dups.items():
+              print(f'::error::ElleDB::{n} defined in multiple files: {fs}')
+              errs += 1
+          print(f'Declared {len(decls)}, defined {len(defs)}, missing {len(missing)}, dup {len(dups)}')
+          sys.exit(1 if errs else 0)
           PY
 
   # ────────────────────────────────────────────────────────────────────────

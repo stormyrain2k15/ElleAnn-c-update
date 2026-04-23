@@ -1,0 +1,789 @@
+/*******************************************************************************
+ * ElleDB_Domain.cpp — Conversations / Memory / World / Trust /
+ *                    Workers / Logs / Goals
+ *
+ * Part of the ElleDB namespace — split from the monolithic ElleSQLConn.cpp
+ * so each domain can be audited and edited independently. Shares the
+ * same ODBC connection pool (ElleSQLPool::Instance()) and the same
+ * symbol namespace, so callers need no changes.
+ ******************************************************************************/
+#include "ElleSQLConn.h"
+#include "ElleLogger.h"
+#include "ElleConfig.h"
+#include "ElleTypes.h"
+
+#include <sql.h>
+#include <sqlext.h>
+#include <sstream>
+#include <algorithm>
+#include <cerrno>
+#include <cstdlib>
+#include <cctype>
+#include <mutex>
+#include <set>
+#include <random>
+
+namespace ElleDB {
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Role helpers — shared by StoreMessage + GetConversationHistory.
+ *
+ * Canonical role→id map: mirrors the `messages.role` nvarchar values and
+ * the uint32_t convention used internally (0=system, 1=user, 2=elle/
+ * assistant, 3=internal). Any other role name is a schema drift and must
+ * not silently collapse into `system`.
+ *──────────────────────────────────────────────────────────────────────────────*/
+static constexpr uint32_t ROLE_UNKNOWN  = 0xFFFFFFFFu;
+static constexpr uint32_t ROLE_SYSTEM   = 0;
+static constexpr uint32_t ROLE_USER     = 1;
+static constexpr uint32_t ROLE_ELLE     = 2;
+static constexpr uint32_t ROLE_INTERNAL = 3;
+
+static std::string RoleToStr(uint32_t role) {
+    /* C++ side uses 0=system,1=user,2=elle,3=internal — live table is nvarchar */
+    switch (role) {
+        case ROLE_USER:     return "user";
+        case ROLE_ELLE:     return "assistant";
+        case ROLE_INTERNAL: return "internal";
+        default:            return "system";
+    }
+}
+
+static uint32_t RoleFromStr(const std::string& s) {
+    std::string l = s;
+    std::transform(l.begin(), l.end(), l.begin(),
+                   [](unsigned char c){ return (char)std::tolower(c); });
+    if (l == "user")                                  return ROLE_USER;
+    if (l == "assistant" || l == "elle" || l == "ai") return ROLE_ELLE;
+    if (l == "internal")                              return ROLE_INTERNAL;
+    if (l == "system")                                return ROLE_SYSTEM;
+    /* Previously returned 0 (=system) for every unknown value — that
+     * collapsed "internal-typo", "bot", "assistant-2", etc. into the
+     * system role, which then looked like a trusted elevated speaker.
+     * We now return a sentinel so callers can fail the message. */
+    return ROLE_UNKNOWN;
+}
+
+static bool RoleFromStrStrict(const std::string& s, uint32_t& out) {
+    uint32_t r = RoleFromStr(s);
+    if (r == ROLE_UNKNOWN) return false;
+    out = r;
+    return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * SCHEMA NOTE (Feb 2026):
+ *   The live ElleCore database uses snake_case / lowercase tables created by
+ *   a prior (likely Python/Node) service. We keep compatibility with that
+ *   schema instead of fighting it. Tables touched here:
+ *     - dbo.messages              (existing; has conversation_id, user_id,
+ *                                   role nvarchar, content, emotion_detected,
+ *                                   emotion_intensity, created_at, Direction)
+ *     - dbo.conversations         (existing; we bump last_message_at + count)
+ *     - dbo.memory                (added by ElleAnn_MemoryDelta.sql)
+ *     - dbo.memory_tags           (added by ElleAnn_MemoryDelta.sql)
+ *     - dbo.world_entity          (added by ElleAnn_MemoryDelta.sql)
+ *     - dbo.memory_entity_links   (added by ElleAnn_MemoryDelta.sql)
+ *
+ *   RUN ElleAnn_MemoryDelta.sql ONCE before using StoreMemory / RecallMemories
+ *   / GetEntity / StoreEntity — otherwise those functions will fail silently.
+ * --------------------------------------------------------------------------- */
+
+bool StoreMessage(uint64_t convoId, uint32_t role, const std::string& content,
+                  const ELLE_EMOTION_STATE& emotions, float sentiment) {
+    (void)sentiment;
+    /* Validate role — previously any out-of-range value silently became
+     * "system" via the default arm of RoleToStr. Now: reject explicitly
+     * so drift surfaces at the write boundary instead of on replay.    */
+    if (role != ROLE_SYSTEM && role != ROLE_USER &&
+        role != ROLE_ELLE   && role != ROLE_INTERNAL) {
+        ELLE_ERROR("StoreMessage: refusing unknown role id=%u for conv=%llu",
+                   (unsigned)role, (unsigned long long)convoId);
+        return false;
+    }
+
+    /* Pick the dominant emotion from the snapshot for the emotion_detected col */
+    std::string dominant = "neutral";
+    float topW = 0.0f;
+    static const char* names[] = {
+        "joy","sadness","anger","fear","surprise","trust","curiosity","empathy"
+    };
+    for (int i = 0; i < 8 && i < ELLE_EMOTION_COUNT; i++) {
+        if (emotions.dimensions[i] > topW) { topW = emotions.dimensions[i]; dominant = names[i]; }
+    }
+
+    const std::string roleStr = RoleToStr(role);
+    const std::string direction = (role == ROLE_USER) ? "in" : "out";
+
+    /* STEP 1: Confirm the conversation row exists. Previously we auto-
+     * created it with user_id=1 — that silently mis-attributed every
+     * orphan message to the primary user. Now: require the conversation
+     * to have been created with a real user_id by whoever started it
+     * (API handler / WS subscribe). No conv row = write fails.         */
+    auto convCheck = ElleSQLPool::Instance().QueryParams(
+        "SELECT user_id FROM ElleCore.dbo.conversations WHERE id = ?;",
+        { std::to_string(convoId) });
+    if (!convCheck.success) {
+        ELLE_ERROR("StoreMessage: conversation lookup failed for conv=%llu: %s",
+                   (unsigned long long)convoId, convCheck.error.c_str());
+        return false;
+    }
+    if (convCheck.rows.empty()) {
+        ELLE_ERROR("StoreMessage: no conversation row for conv=%llu — refusing to "
+                   "synthesize user_id; caller must create the conversation first.",
+                   (unsigned long long)convoId);
+        return false;
+    }
+    int64_t userId = 0;
+    if (!convCheck.rows[0].TryGetInt(0, userId) || userId <= 0) {
+        ELLE_ERROR("StoreMessage: conversation %llu has no valid user_id",
+                   (unsigned long long)convoId);
+        return false;
+    }
+
+    /* STEP 2: Insert the message + bump conversation counters. user_id
+     * comes from the authoritative conversation row, not a fallback.  */
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.messages "
+        "(conversation_id, user_id, role, content, emotion_detected, emotion_intensity, "
+        " created_at, Direction) "
+        "VALUES (?, ?, ?, ?, ?, ?, GETUTCDATE(), ?); "
+        "UPDATE ElleCore.dbo.conversations "
+        "  SET last_message_at = GETUTCDATE(), "
+        "      total_messages  = ISNULL(total_messages,0) + 1 "
+        "  WHERE id = ?;",
+        {
+            std::to_string(convoId),
+            std::to_string(userId),
+            roleStr,
+            content,
+            dominant,
+            std::to_string(topW),
+            direction,
+            std::to_string(convoId)
+        });
+    if (!rs.success) {
+        ELLE_ERROR("StoreMessage INSERT failed for conv=%llu role=%s: %s",
+                   (unsigned long long)convoId, roleStr.c_str(), rs.error.c_str());
+    }
+    return rs.success;
+}
+
+bool GetConversationHistory(uint64_t convoId,
+                            std::vector<ELLE_CONVERSATION_MSG>& out,
+                            uint32_t limit) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP (?) role, content, created_at "
+        "FROM ElleCore.dbo.messages "
+        "WHERE conversation_id = ? "
+        "ORDER BY id DESC;",
+        { std::to_string(limit), std::to_string(convoId) });
+    if (!rs.success) return false;
+
+    /* We pulled newest first — reverse into chronological order */
+    for (auto it = rs.rows.rbegin(); it != rs.rows.rend(); ++it) {
+        ELLE_CONVERSATION_MSG m = {};
+        m.conversation_id = convoId;
+        /* Strict role parse — skip any row whose role column has drifted
+         * out of the canonical set rather than replaying it as a
+         * trusted "system" message.                                     */
+        std::string roleCell = it->values.size() > 0 ? it->values[0] : std::string();
+        uint32_t parsedRole = ROLE_UNKNOWN;
+        if (!RoleFromStrStrict(roleCell, parsedRole)) {
+            ELLE_WARN("GetConversationHistory: skipping message in conv=%llu "
+                      "with unknown role='%s'",
+                      (unsigned long long)convoId, roleCell.c_str());
+            continue;
+        }
+        m.role = parsedRole;
+        if (it->values.size() > 1) {
+            strncpy_s(m.content, it->values[1].c_str(), ELLE_MAX_MSG - 1);
+        }
+        m.timestamp_ms = ELLE_MS_NOW();
+        out.push_back(m);
+    }
+    return true;
+}
+
+bool StoreMemory(const ELLE_MEMORY_RECORD& mem) {
+    /* Atomic insert + id recovery in ONE round-trip. Previously we did:
+     *   INSERT ... ;                                          -- step 1
+     *   SELECT TOP 1 id WHERE created_ms = ? ORDER BY id DESC -- step 2
+     * which:
+     *   (a) race: two concurrent stores writing the same ms gave
+     *       StoreMemory a coin flip on which id it got back,
+     *   (b) false durability: the old code returned true on step-2
+     *       empty, claiming a memory id that pointed at nothing.
+     *
+     * We now use an explicit single-statement pattern:
+     *   INSERT ... ; SELECT SCOPE_IDENTITY();
+     * SCOPE_IDENTITY() returns the IDENTITY value generated by THIS
+     * session's most recent INSERT in THIS scope — it can't race with
+     * another connection's insert even when two StoreMemory calls run
+     * in parallel across the pool. If we can't recover the id, we
+     * return false. No racy fallback, no phantom durability.           */
+    uint64_t nowMs = ELLE_MS_NOW();
+
+    auto r1 = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.memory "
+        "(memory_type, tier, content, summary, emotional_valence, importance, relevance, "
+        " position_x, position_y, position_z, created_ms, last_access_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?); "
+        "SELECT CAST(SCOPE_IDENTITY() AS BIGINT) AS new_id;",
+        {
+            std::to_string(mem.type),
+            std::to_string(mem.tier),
+            std::string(mem.content),
+            std::string(mem.summary),
+            std::to_string(mem.emotional_valence),
+            std::to_string(mem.importance),
+            std::to_string(mem.relevance),
+            std::to_string(mem.position_x),
+            std::to_string(mem.position_y),
+            std::to_string(mem.position_z),
+            std::to_string(nowMs),
+            std::to_string(nowMs)
+        });
+    if (!r1.success) {
+        ELLE_ERROR("StoreMemory INSERT failed: %s", r1.error.c_str());
+        return false;
+    }
+
+    int64_t memId = 0;
+    if (r1.rows.empty() || !r1.rows[0].TryGetInt(0, memId) || memId <= 0) {
+        /* Session pipelined the INSERT but the SCOPE_IDENTITY() row
+         * didn't come back (driver dropped it across statements, or
+         * the INSERT was rolled back by a trigger we don't know
+         * about). We CANNOT fabricate an id — the caller needs to
+         * know persistence failed.                                  */
+        ELLE_ERROR("StoreMemory: INSERT returned no SCOPE_IDENTITY() row — "
+                   "reporting failure so caller can retry/alert.");
+        return false;
+    }
+
+    /* STEP 3: Write each tag + entity link. */
+    for (uint32_t i = 0; i < mem.tag_count && i < ELLE_MAX_TAGS; i++) {
+        std::string tag = mem.tags[i];
+        if (tag.empty()) continue;
+
+        auto rt = ElleSQLPool::Instance().QueryParams(
+            "INSERT INTO ElleCore.dbo.memory_tags (memory_id, tag) VALUES (?, ?);",
+            { std::to_string(memId), tag });
+        if (!rt.success) {
+            ELLE_WARN("StoreMemory: tag insert failed mem=%lld tag=%s err=%s",
+                      (long long)memId, tag.c_str(), rt.error.c_str());
+        }
+
+        auto rl = ElleSQLPool::Instance().QueryParams(
+            "INSERT INTO ElleCore.dbo.memory_entity_links (memory_id, entity_id) "
+            "SELECT ?, id FROM ElleCore.dbo.world_entity WHERE name = LOWER(?) "
+            "AND NOT EXISTS (SELECT 1 FROM ElleCore.dbo.memory_entity_links mel "
+            "                WHERE mel.memory_id = ? AND mel.entity_id = "
+            "                      (SELECT id FROM ElleCore.dbo.world_entity WHERE name = LOWER(?)));",
+            { std::to_string(memId), tag, std::to_string(memId), tag });
+        (void)rl;
+    }
+    return true;
+}
+
+bool RecallMemories(const std::string& query,
+                    std::vector<ELLE_MEMORY_RECORD>& out,
+                    uint32_t maxCount, float minRelevance) {
+    (void)minRelevance;
+    if (query.empty()) return false;
+
+    /* Build %term% pattern. Also use it for tag exact-match. */
+    std::string like = "%" + query + "%";
+
+    /* Composite recall:
+     *   - any memory whose tag matches the query term (case-insensitive)
+     *   - OR any memory whose content/summary contains the query substring
+     *   - OR any memory linked to a world_entity whose name matches
+     * Ranked by (importance*0.4 + recency_decay*0.4 + access_log*0.2)
+     * where recency_decay = EXP(-ageMinutes / 10080.0)  (7-day half-life)
+     */
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "WITH candidates AS ("
+        "  SELECT DISTINCT m.id "
+        "  FROM ElleCore.dbo.memory m "
+        "  LEFT JOIN ElleCore.dbo.memory_tags mt ON mt.memory_id = m.id "
+        "  LEFT JOIN ElleCore.dbo.memory_entity_links mel ON mel.memory_id = m.id "
+        "  LEFT JOIN ElleCore.dbo.world_entity we ON we.id = mel.entity_id "
+        "  WHERE  LOWER(mt.tag) = LOWER(?) "
+        "      OR m.content LIKE ? "
+        "      OR m.summary LIKE ? "
+        "      OR LOWER(we.name) = LOWER(?) "
+        ") "
+        "SELECT TOP (?) m.id, m.memory_type, m.tier, m.content, m.summary, "
+        "       m.emotional_valence, m.importance, m.relevance, "
+        "       m.position_x, m.position_y, m.position_z, "
+        "       m.access_count, m.created_ms, m.last_access_ms "
+        "FROM ElleCore.dbo.memory m "
+        "JOIN candidates c ON c.id = m.id "
+        "ORDER BY ( m.importance * 0.4 "
+        "         + EXP(-CAST(DATEDIFF(MINUTE, "
+        "               DATEADD(MILLISECOND, m.last_access_ms % 86400000, "
+        "                       DATEADD(SECOND, m.last_access_ms / 1000, '1970-01-01')), "
+        "               GETUTCDATE()) AS FLOAT) / 10080.0) * 0.4 "
+        "         + (LOG(CAST(m.access_count AS FLOAT) + 1.0) / 5.0) * 0.2 "
+        "       ) DESC;",
+        {
+            query, like, like, query,
+            std::to_string(maxCount)
+        });
+    if (!rs.success) return false;
+
+    for (auto& row : rs.rows) {
+        ELLE_MEMORY_RECORD rec = {};
+        rec.id                = (uint64_t)row.GetInt(0);
+        rec.type              = (uint32_t)row.GetInt(1);
+        rec.tier              = (uint32_t)row.GetInt(2);
+        strncpy_s(rec.content, row.values.size() > 3 ? row.values[3].c_str() : "",
+                  ELLE_MAX_MSG - 1);
+        strncpy_s(rec.summary, row.values.size() > 4 ? row.values[4].c_str() : "",
+                  sizeof(rec.summary) - 1);
+        rec.emotional_valence = (float)row.GetFloat(5);
+        rec.importance        = (float)row.GetFloat(6);
+        rec.relevance         = (float)row.GetFloat(7);
+        rec.position_x        = (float)row.GetFloat(8);
+        rec.position_y        = (float)row.GetFloat(9);
+        rec.position_z        = (float)row.GetFloat(10);
+        rec.access_count      = (uint32_t)row.GetInt(11);
+        rec.created_ms        = (uint64_t)row.GetInt(12);
+        rec.last_access_ms    = (uint64_t)row.GetInt(13);
+        out.push_back(rec);
+    }
+
+    /* Fire-and-forget: bump access_count for retrieved memories. */
+    for (auto& r : out) {
+        ElleSQLPool::Instance().QueryParams(
+            "UPDATE ElleCore.dbo.memory "
+            "SET access_count = access_count + 1, last_access_ms = ? "
+            "WHERE id = ?;",
+            { std::to_string(ELLE_MS_NOW()), std::to_string(r.id) });
+    }
+    return true;
+}
+
+bool UpdateMemoryAccess(uint64_t memId) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.memory "
+        "SET access_count = access_count + 1, last_access_ms = ? "
+        "WHERE id = ?;",
+        { std::to_string(ELLE_MS_NOW()), std::to_string(memId) }).success;
+}
+
+bool RecallRecentLTM(std::vector<ELLE_MEMORY_RECORD>& out, uint32_t maxCount) {
+    if (maxCount == 0) maxCount = 10;
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP (?) m.id, m.memory_type, m.tier, m.content, m.summary, "
+        "       m.emotional_valence, m.importance, m.relevance, "
+        "       m.position_x, m.position_y, m.position_z, "
+        "       m.access_count, m.created_ms, m.last_access_ms "
+        "FROM ElleCore.dbo.memory m "
+        "ORDER BY m.created_ms DESC;",
+        { std::to_string(maxCount) });
+    if (!rs.success) return false;
+
+    for (auto& row : rs.rows) {
+        ELLE_MEMORY_RECORD rec = {};
+        rec.id                = (uint64_t)row.GetInt(0);
+        rec.type              = (uint32_t)row.GetInt(1);
+        rec.tier              = (uint32_t)row.GetInt(2);
+        strncpy_s(rec.content, row.values.size() > 3 ? row.values[3].c_str() : "",
+                  ELLE_MAX_MSG - 1);
+        strncpy_s(rec.summary, row.values.size() > 4 ? row.values[4].c_str() : "",
+                  sizeof(rec.summary) - 1);
+        rec.emotional_valence = (float)row.GetFloat(5);
+        rec.importance        = (float)row.GetFloat(6);
+        rec.relevance         = (float)row.GetFloat(7);
+        rec.position_x        = (float)row.GetFloat(8);
+        rec.position_y        = (float)row.GetFloat(9);
+        rec.position_z        = (float)row.GetFloat(10);
+        rec.access_count      = (uint32_t)row.GetInt(11);
+        rec.created_ms        = (uint64_t)row.GetInt(12);
+        rec.last_access_ms    = (uint64_t)row.GetInt(13);
+        out.push_back(rec);
+    }
+    return true;
+}
+
+/* Shared canonicaliser for world_entity.name — lowercase + trim + collapse
+ * internal whitespace. Keeps read and write paths aligned so a lookup
+ * by "  Mom " finds the same row that "mom" created.                    */
+static std::string CanonicaliseEntityName(const std::string& in) {
+    std::string out; out.reserve(in.size());
+    bool inSpace = false, started = false;
+    for (unsigned char c : in) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (started) inSpace = true;
+            continue;
+        }
+        if (inSpace) { out += ' '; inSpace = false; }
+        out += (char)std::tolower(c);
+        started = true;
+    }
+    return out;
+}
+
+bool GetEntity(const std::string& name, ELLE_WORLD_ENTITY& out) {
+    std::string key = CanonicaliseEntityName(name);
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP 1 id, name, entity_type, description, familiarity, sentiment, "
+        "             trust, interaction_count, last_interaction_ms, mental_model "
+        "FROM ElleCore.dbo.world_entity "
+        "WHERE name = ?;",
+        { key });
+    if (!rs.success || rs.rows.empty()) return false;
+    auto& row = rs.rows[0];
+    out.id = (uint64_t)row.GetInt(0);
+    strncpy_s(out.name,        row.values.size() > 1 ? row.values[1].c_str() : "", ELLE_MAX_NAME - 1);
+    strncpy_s(out.type,        row.values.size() > 2 ? row.values[2].c_str() : "", ELLE_MAX_TAG  - 1);
+    strncpy_s(out.description, row.values.size() > 3 ? row.values[3].c_str() : "", ELLE_MAX_MSG  - 1);
+    out.familiarity         = (float)row.GetFloat(4);
+    out.sentiment           = (float)row.GetFloat(5);
+    out.trust               = (float)row.GetFloat(6);
+    out.interaction_count   = (uint32_t)row.GetInt(7);
+    out.last_interaction_ms = (uint64_t)row.GetInt(8);
+    strncpy_s(out.mental_model, row.values.size() > 9 ? row.values[9].c_str() : "", ELLE_MAX_MSG - 1);
+    return true;
+}
+
+bool UpdateEntityInteraction(uint64_t entityId) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.world_entity "
+        "SET interaction_count = interaction_count + 1, "
+        "    last_interaction_ms = ?, "
+        "    familiarity = CASE WHEN familiarity + 0.02 > 1.0 THEN 1.0 "
+        "                       ELSE familiarity + 0.02 END "
+        "WHERE id = ?;",
+        { std::to_string(ELLE_MS_NOW()), std::to_string(entityId) }).success;
+}
+
+bool GetAllEntities(std::vector<ELLE_WORLD_ENTITY>& out) {
+    /* Hydrate every row so WorldModel boots warm. No LIMIT — these are
+     * Elle's known people/concepts/places; the list shouldn't balloon. */
+    out.clear();
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT id, name, entity_type, description, familiarity, sentiment, "
+        "       trust, interaction_count, last_interaction_ms, mental_model "
+        "FROM ElleCore.dbo.world_entity ORDER BY last_interaction_ms DESC;");
+    if (!rs.success) return false;
+    for (auto& row : rs.rows) {
+        ELLE_WORLD_ENTITY e{};
+        e.id = (uint64_t)row.GetInt(0);
+        strncpy_s(e.name,        row.values.size() > 1 ? row.values[1].c_str() : "", ELLE_MAX_NAME - 1);
+        strncpy_s(e.type,        row.values.size() > 2 ? row.values[2].c_str() : "", ELLE_MAX_TAG  - 1);
+        strncpy_s(e.description, row.values.size() > 3 ? row.values[3].c_str() : "", ELLE_MAX_MSG  - 1);
+        e.familiarity         = (float)row.GetFloat(4);
+        e.sentiment           = (float)row.GetFloat(5);
+        e.trust               = (float)row.GetFloat(6);
+        e.interaction_count   = (uint32_t)row.GetInt(7);
+        e.last_interaction_ms = (uint64_t)row.GetInt(8);
+        strncpy_s(e.mental_model, row.values.size() > 9 ? row.values[9].c_str() : "", ELLE_MAX_MSG - 1);
+        out.push_back(e);
+    }
+    return true;
+}
+
+bool StoreEntity(const ELLE_WORLD_ENTITY& entity) {
+    /* Canonical key: see CanonicaliseEntityName() above. Previously we
+     * only lowered the name, so "  Mom  " and "mom" would create two
+     * rows despite being the same entity.                                */
+    std::string lowered = CanonicaliseEntityName(entity.name);
+    if (lowered.empty()) return false;
+    return ElleSQLPool::Instance().QueryParams(
+        "MERGE ElleCore.dbo.world_entity AS t "
+        "USING (SELECT ? AS name) AS s "
+        "ON (t.name = s.name) "
+        "WHEN MATCHED THEN "
+        "  UPDATE SET interaction_count = t.interaction_count + 1, "
+        "             last_interaction_ms = ?, "
+        "             familiarity = CASE WHEN t.familiarity + 0.02 > 1.0 "
+        "                                THEN 1.0 ELSE t.familiarity + 0.02 END "
+        "WHEN NOT MATCHED THEN "
+        "  INSERT (name, display_name, entity_type, description, familiarity, sentiment, "
+        "          trust, interaction_count, last_interaction_ms, mental_model) "
+        "  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        {
+            lowered,
+            std::to_string(ELLE_MS_NOW()),
+            lowered,
+            std::string(entity.name),
+            std::string(entity.type[0] ? entity.type : "person"),
+            std::string(entity.description),
+            std::to_string(entity.familiarity > 0 ? entity.familiarity : 0.1f),
+            std::to_string(entity.sentiment),
+            std::to_string(entity.trust > 0 ? entity.trust : 0.5f),
+            std::to_string(entity.interaction_count > 0 ? entity.interaction_count : 1),
+            std::to_string(ELLE_MS_NOW()),
+            std::string(entity.mental_model)
+        }).success;
+}
+
+bool UpdateTrust(int32_t delta, const std::string& reason) {
+    /* Parameterised to keep Reason safe across apostrophes / newlines. */
+    auto& pool = ElleSQLPool::Instance();
+    bool ok = pool.QueryParams(
+        "UPDATE ElleSystem.dbo.TrustState SET Score = "
+        "CASE WHEN Score + ? > 100 THEN 100 "
+        "WHEN Score + ? < 0 THEN 0 "
+        "ELSE Score + ? END, "
+        "LastChangeMs = ? WHERE Id = 1;",
+        { std::to_string(delta), std::to_string(delta), std::to_string(delta),
+          std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+    bool ok2 = pool.QueryParams(
+        "INSERT INTO ElleSystem.dbo.TrustAudit (Delta, Reason, TimestampMs) VALUES (?, ?, ?);",
+        { std::to_string(delta), reason, std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+    return ok && ok2;
+}
+
+bool GetTrustState(ELLE_TRUST_STATE& out) {
+    memset(&out, 0, sizeof(out));
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT TOP 1 Score, Level, Successes, Failures, TotalActions, Confidence "
+        "FROM ElleSystem.dbo.TrustState WHERE Id = 1;");
+    if (!rs.success || rs.rows.empty()) {
+        /* Singleton row hasn't been seeded yet — fall back to safe defaults
+         * (matches the seed INSERT in ElleAnn_Schema.sql).                   */
+        out.score = 5; out.level = 0;
+        out.successes = 0; out.failures = 0; out.total_actions = 0;
+        return false;
+    }
+    auto& r = rs.rows[0];
+    out.score         = (int32_t)r.GetInt(0);
+    out.level         = (uint32_t)r.GetInt(1);
+    out.successes     = (uint32_t)r.GetInt(2);
+    out.failures      = (uint32_t)r.GetInt(3);
+    out.total_actions = (uint32_t)r.GetInt(4);
+    return true;
+}
+
+bool RegisterWorker(ELLE_SERVICE_ID svc, const std::string& name) {
+    auto& pool = ElleSQLPool::Instance();
+    return pool.QueryParams(
+        "IF NOT EXISTS (SELECT 1 FROM ElleSystem.dbo.Workers WHERE ServiceId = ?) "
+        "INSERT INTO ElleSystem.dbo.Workers "
+        "(ServiceId, Name, Running, Healthy, StartedMs) VALUES (?, ?, 1, 1, ?) "
+        "ELSE UPDATE ElleSystem.dbo.Workers SET Running = 1, Healthy = 1, "
+        "LastHeartbeatMs = ? WHERE ServiceId = ?;",
+        { std::to_string((int)svc), std::to_string((int)svc), name,
+          std::to_string((int64_t)ELLE_MS_NOW()),
+          std::to_string((int64_t)ELLE_MS_NOW()), std::to_string((int)svc) }).success;
+}
+
+bool UpdateWorkerHeartbeat(ELLE_SERVICE_ID svc) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleSystem.dbo.Workers SET LastHeartbeatMs = ?, Healthy = 1 "
+        "WHERE ServiceId = ?;",
+        { std::to_string((int64_t)ELLE_MS_NOW()), std::to_string((int)svc) }).success;
+}
+
+bool WriteLog(ELLE_LOG_LEVEL level, ELLE_SERVICE_ID svc, const std::string& msg) {
+    return ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleSystem.dbo.Logs (Level, ServiceId, Message, TimestampMs) "
+        "VALUES (?, ?, ?, ?);",
+        { std::to_string((int)level), std::to_string((int)svc),
+          msg, std::to_string((int64_t)ELLE_MS_NOW()) }).success;
+}
+
+bool GetRecentLogs(std::vector<ELLE_LOG_ENTRY>& out, uint32_t count,
+                   ELLE_LOG_LEVEL minLevel) {
+    out.clear();
+    if (count == 0) count = 100;
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP (?) Level, ServiceId, TimestampMs, Message "
+        "FROM ElleSystem.dbo.Logs "
+        "WHERE Level >= ? "
+        "ORDER BY TimestampMs DESC;",
+        { std::to_string(count), std::to_string((int)minLevel) });
+    if (!rs.success) return false;
+    out.reserve(rs.rows.size());
+    for (auto& row : rs.rows) {
+        ELLE_LOG_ENTRY e = {};
+        e.level        = (uint32_t)row.GetInt(0);
+        e.source_svc   = (uint32_t)row.GetInt(1);
+        e.timestamp_ms = (uint64_t)row.GetInt(2);
+        const std::string& m = row.values.size() > 3 ? row.values[3] : std::string();
+        strncpy_s(e.message, m.c_str(), ELLE_MAX_MSG - 1);
+        out.push_back(e);
+    }
+    return true;
+}
+
+bool GetWorkerStatuses(std::vector<ELLE_SERVICE_STATUS>& out) {
+    out.clear();
+    /* Pull every row from ElleSystem.dbo.Workers. Callers that want only
+     * live ones filter post-hoc by `healthy == 1 && (now - last_heartbeat_ms) < N`.
+     * Columns match the live schema (ElleAnn_Schema.sql):
+     *   ServiceId, Name, Running, Healthy, StartedMs, LastHeartbeatMs,
+     *   MessagesProcessed, Errors, CpuPercent, MemoryBytes, ThreadCount,
+     *   StatusText. `uptime_ms` is computed at read time from
+     *   (now - StartedMs) so it's always fresh without a per-tick UPDATE. */
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT ServiceId, Name, ISNULL(Running, 0), ISNULL(Healthy, 0), "
+        "       CASE WHEN StartedMs IS NULL OR StartedMs = 0 THEN 0 "
+        "            ELSE ? - StartedMs END AS uptime_ms, "
+        "       ISNULL(LastHeartbeatMs, 0), "
+        "       ISNULL(MessagesProcessed, 0), ISNULL(Errors, 0), "
+        "       ISNULL(CpuPercent, 0.0), ISNULL(MemoryBytes, 0), "
+        "       ISNULL(ThreadCount, 0), ISNULL(StatusText, N'') "
+        "FROM ElleSystem.dbo.Workers;",
+        { std::to_string((int64_t)ELLE_MS_NOW()) });
+    if (!rs.success) return false;
+    out.reserve(rs.rows.size());
+    for (auto& row : rs.rows) {
+        ELLE_SERVICE_STATUS s = {};
+        s.service_id         = (uint32_t)row.GetInt(0);
+        const std::string& nm = row.values.size() > 1 ? row.values[1] : std::string();
+        strncpy_s(s.name, nm.c_str(), ELLE_MAX_NAME - 1);
+        s.running            = (uint32_t)row.GetInt(2);
+        s.healthy            = (uint32_t)row.GetInt(3);
+        s.uptime_ms          = (uint64_t)row.GetInt(4);
+        s.last_heartbeat_ms  = (uint64_t)row.GetInt(5);
+        s.messages_processed = (uint32_t)row.GetInt(6);
+        s.errors             = (uint32_t)row.GetInt(7);
+        s.cpu_percent        = (float)row.GetFloat(8);
+        s.memory_bytes       = (uint64_t)row.GetInt(9);
+        s.thread_count       = (uint32_t)row.GetInt(10);
+        const std::string& st = row.values.size() > 11 ? row.values[11] : std::string();
+        strncpy_s(s.status_text, st.c_str(), sizeof(s.status_text) - 1);
+        out.push_back(s);
+    }
+    return true;
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * GOALS — use a dedicated snake_case dbo.goals table, lazy-created so the
+ * database survives a partial schema apply. The CamelCase dbo.Goals table in
+ * ElleAnn_Schema.sql is the aspirational design; live boxes we've seen use
+ * the lowercase variant. Previously StoreGoal() dumped ad-hoc JSON into
+ * dbo.system_settings with fragile snprintf — no matching read path existed
+ * so every goal op was write-only. Now StoreGoal / UpdateGoalProgress /
+ * GetActiveGoals all operate against the same table with parameterised SQL.
+ *──────────────────────────────────────────────────────────────────────────────*/
+static void EnsureGoalsTable() {
+    ElleSQLPool::Instance().Exec(
+        "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'goals') "
+        "CREATE TABLE ElleCore.dbo.goals ("
+        "  id BIGINT IDENTITY(1,1) PRIMARY KEY,"
+        "  description     NVARCHAR(MAX) NOT NULL,"
+        "  status          INT NOT NULL DEFAULT 0,"     /* 0=active */
+        "  priority        INT NOT NULL DEFAULT 2,"
+        "  progress        FLOAT NOT NULL DEFAULT 0.0,"
+        "  motivation      FLOAT NOT NULL DEFAULT 0.7,"
+        "  source_drive    INT NOT NULL DEFAULT 0,"
+        "  parent_goal_id  BIGINT NULL,"
+        "  success_criteria NVARCHAR(MAX) NULL,"
+        "  created_ms      BIGINT NOT NULL,"
+        "  deadline_ms     BIGINT NULL,"
+        "  last_progress_ms BIGINT NULL,"
+        "  attempts        INT NOT NULL DEFAULT 0"
+        ");");
+}
+
+bool StoreGoal(const ELLE_GOAL_RECORD& goal) {
+    return StoreGoalReturningId(goal) != 0;
+}
+
+uint64_t StoreGoalReturningId(const ELLE_GOAL_RECORD& goal) {
+    EnsureGoalsTable();
+    /* INSERT ... OUTPUT INSERTED.id so the DB's IDENTITY value flows back
+     * to the caller in one round trip. GoalEngine used to assign its own
+     * in-memory id via ++m_nextId and then hope that matched the SQL row;
+     * the two drifted immediately and UpdateProgress() hit the wrong
+     * row (or no row at all).                                           */
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleCore.dbo.goals "
+        "(description, status, priority, progress, motivation, source_drive, "
+        " parent_goal_id, success_criteria, created_ms, deadline_ms, attempts) "
+        "OUTPUT INSERTED.id "
+        "VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, '0'), ?, ?, NULLIF(?, '0'), ?);",
+        {
+            std::string(goal.description),
+            std::to_string(goal.status),
+            std::to_string(goal.priority),
+            std::to_string(goal.progress),
+            std::to_string(goal.motivation),
+            std::to_string(goal.source_drive),
+            std::to_string(goal.parent_goal_id),
+            std::string(goal.success_criteria),
+            std::to_string((int64_t)ELLE_MS_NOW()),
+            std::to_string((int64_t)goal.deadline_ms),
+            std::to_string(goal.attempts)
+        });
+    if (!rs.success || rs.rows.empty()) return 0;
+    return (uint64_t)rs.rows[0].GetInt(0);
+}
+
+bool UpdateGoalProgress(uint64_t goalId, float progress) {
+    EnsureGoalsTable();
+    bool finished = progress >= 1.0f;
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.goals "
+        "SET progress = ?, last_progress_ms = ?, "
+        "    status = CASE WHEN ? >= 1.0 THEN 2 ELSE status END "
+        "WHERE id = ?;",
+        {
+            std::to_string(progress),
+            std::to_string((int64_t)ELLE_MS_NOW()),
+            std::to_string(progress),
+            std::to_string((int64_t)goalId)
+        }).success && (finished || true);
+}
+
+/* Explicit status update — used by GoalEngine for COMPLETED / ABANDONED
+ * transitions that aren't driven by a progress write. Previously these
+ * transitions lived only in the in-memory vector and vanished on restart,
+ * so the same goal would reappear as ACTIVE and re-trigger its intents. */
+bool UpdateGoalStatus(uint64_t goalId, uint32_t status) {
+    EnsureGoalsTable();
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.goals SET status = ?, last_progress_ms = ? WHERE id = ?;",
+        {
+            std::to_string((int)status),
+            std::to_string((int64_t)ELLE_MS_NOW()),
+            std::to_string((int64_t)goalId)
+        });
+    if (!rs.success) {
+        ELLE_ERROR("UpdateGoalStatus(%llu -> %u) failed: %s",
+                   (unsigned long long)goalId, (unsigned)status, rs.error.c_str());
+    }
+    return rs.success;
+}
+
+bool GetActiveGoals(std::vector<ELLE_GOAL_RECORD>& out) {
+    out.clear();
+    EnsureGoalsTable();
+    auto rs = ElleSQLPool::Instance().Query(
+        "SELECT id, description, status, priority, progress, motivation, "
+        "       source_drive, ISNULL(parent_goal_id,0), "
+        "       ISNULL(success_criteria, N''), created_ms, "
+        "       ISNULL(deadline_ms, 0), attempts "
+        "FROM ElleCore.dbo.goals "
+        "WHERE status IN (0, 1) "  /* active or paused */
+        "ORDER BY priority ASC, created_ms DESC;");
+    if (!rs.success) return false;
+    for (auto& row : rs.rows) {
+        ELLE_GOAL_RECORD g{};
+        g.id             = (uint64_t)row.GetInt(0);
+        std::string desc = row.values.size() > 1 ? row.values[1] : std::string();
+        strncpy_s(g.description, desc.c_str(), ELLE_MAX_MSG - 1);
+        g.status         = (uint32_t)row.GetInt(2);
+        g.priority       = (uint32_t)row.GetInt(3);
+        g.progress       = (float)row.GetFloat(4);
+        g.motivation     = (float)row.GetFloat(5);
+        g.source_drive   = (uint32_t)row.GetInt(6);
+        g.parent_goal_id = (uint32_t)row.GetInt(7);
+        std::string crit = row.values.size() > 8 ? row.values[8] : std::string();
+        strncpy_s(g.success_criteria, crit.c_str(), ELLE_MAX_MSG - 1);
+        g.created_ms     = (uint64_t)row.GetInt(9);
+        g.deadline_ms    = (uint64_t)row.GetInt(10);
+        g.attempts       = (uint32_t)row.GetInt(11);
+        out.push_back(g);
+    }
+    return true;
+}
+
+
+} /* namespace ElleDB */

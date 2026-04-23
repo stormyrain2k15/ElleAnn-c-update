@@ -51,6 +51,9 @@
     <ClCompile Include="ElleSelfSurprise.cpp" />
     <ClCompile Include="ElleServiceBase.cpp" />
     <ClCompile Include="ElleSQLConn.cpp" />
+    <ClCompile Include="ElleDB_Queues.cpp" />
+    <ClCompile Include="ElleDB_Domain.cpp" />
+    <ClCompile Include="ElleDB_Content.cpp" />
     <ClCompile Include="ElleTypes.cpp" />
   </ItemGroup>
 
