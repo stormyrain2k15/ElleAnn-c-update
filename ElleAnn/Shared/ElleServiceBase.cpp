@@ -312,36 +312,35 @@ bool ElleServiceBase::IsRunningFromSCM() {
     DWORD parentPid = 0;
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap != INVALID_HANDLE_VALUE) {
-        /* Use the ANSI-explicit PROCESSENTRY32A / Process32FirstA /
-         * Process32NextA forms rather than the UNICODE-aliased
-         * defaults. Under /D UNICODE MSBuild builds, `pe.szExeFile` is
-         * WCHAR[] and `std::string`'s ctor refuses to take it, which
-         * is the root cause of the Feb 2026 CI build break. We compare
-         * against the narrow literal "services.exe" anyway, so ANSI is
-         * the right variant here.                                    */
-        PROCESSENTRY32A pe;
+        /* Use the TCHAR-based default types plus _tcsicmp so this code
+         * compiles identically under /D UNICODE and /D _MBCS. Earlier
+         * attempts to force the A suffix variants (PROCESSENTRY32A etc.)
+         * were rejected by this SDK toolchain; the default variants are
+         * always available. Comparison is against _T("services.exe") --
+         * widened at compile time when UNICODE is defined.           */
+        PROCESSENTRY32 pe;
         pe.dwSize = sizeof(pe);
         DWORD myPid = GetCurrentProcessId();
-        if (Process32FirstA(hSnap, &pe)) {
+        if (Process32First(hSnap, &pe)) {
             do {
                 if (pe.th32ProcessID == myPid) {
                     parentPid = pe.th32ParentProcessID;
                     break;
                 }
-            } while (Process32NextA(hSnap, &pe));
+            } while (Process32Next(hSnap, &pe));
         }
 
         /* Check if parent is services.exe */
         if (parentPid) {
-            if (Process32FirstA(hSnap, &pe)) {
+            if (Process32First(hSnap, &pe)) {
                 do {
                     if (pe.th32ProcessID == parentPid) {
-                        std::string name(pe.szExeFile);
-                        for (auto& c : name) c = (char)tolower((unsigned char)c);
+                        bool isSvc = (_tcsicmp(pe.szExeFile,
+                                               _T("services.exe")) == 0);
                         CloseHandle(hSnap);
-                        return name == "services.exe";
+                        return isSvc;
                     }
-                } while (Process32NextA(hSnap, &pe));
+                } while (Process32Next(hSnap, &pe));
             }
         }
         CloseHandle(hSnap);
