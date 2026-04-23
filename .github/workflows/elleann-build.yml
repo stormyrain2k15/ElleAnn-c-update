@@ -288,7 +288,53 @@ jobs:
           PY
 
   # ────────────────────────────────────────────────────────────────────────
-  # PowerShell syntax — parse every Deploy/*.ps1 with the real PS parser.
+  # Service-name consistency — every `name` in elle_service_manifest.json
+  # MUST match the string passed to `ElleServiceBase(SVC_*, "<name>", …)`
+  # inside the corresponding service's .cpp. If they drift, `sc.exe start`
+  # succeeds but the service process's `StartServiceCtrlDispatcher` call
+  # hangs (the SCM waits for a service named whatever Install-Elle created,
+  # but the exe registers under a different name). Every `depends:` entry
+  # must also reference a declared service.
+  # ────────────────────────────────────────────────────────────────────────
+  service-name-consistency:
+    name: Service Name Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit manifest vs C++
+        run: |
+          python3 - <<'PY'
+          import json, re, os, sys, subprocess
+          m = json.load(open('ElleAnn/Deploy/elle_service_manifest.json'))
+          svcs = m['services']
+          names = {s['name'] for s in svcs}
+          out = subprocess.check_output(
+              ['grep', '-rn', ': ElleServiceBase(SVC_',
+               'ElleAnn/Services/', 'ElleAnn/Lua/'], text=True)
+          cpp = set()
+          for ln in out.splitlines():
+              mm = re.search(r':\s*ElleServiceBase\([^,]+,\s*"([^"]+)"', ln)
+              if mm: cpp.add(mm.group(1))
+          errs = 0
+          for n in sorted(names - cpp):
+              print(f'::error::Manifest declares service "{n}" but no C++ '
+                    f'ElleServiceBase(..., "{n}", …) exists')
+              errs += 1
+          for n in sorted(cpp - names):
+              print(f'::error::C++ ElleServiceBase(..., "{n}", …) has no '
+                    f'manifest entry — it will never be installed by '
+                    f'Install-ElleServices.ps1')
+              errs += 1
+          for s in svcs:
+              for d in s.get('depends', []):
+                  if d not in names:
+                      print(f'::error::Service "{s["name"]}" depends on '
+                            f'"{d}" which is not declared in the manifest')
+                      errs += 1
+          print(f'Manifest: {len(names)}, C++ registrations: {len(cpp)}')
+          sys.exit(1 if errs else 0)
+          PY
+
   # Catches typos, missing params, broken string interpolation before an
   # operator runs the installer.
   # ────────────────────────────────────────────────────────────────────────

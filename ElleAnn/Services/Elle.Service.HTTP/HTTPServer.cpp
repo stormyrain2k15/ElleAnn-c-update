@@ -180,18 +180,29 @@ struct HTTPRequest {
         return v;
     }
 
-    /* Attempt to parse body as JSON.
-     *   • Empty body → empty object (benign; many GETs/DELETEs work this way).
-     *   • Non-empty malformed body → throws std::invalid_argument.
+    /* Attempt to parse body as JSON. STRICT by OpSec convention:
+     *   - Empty body    -> empty object (benign; many GETs/DELETEs work this way).
+     *   - Malformed     -> throws std::invalid_argument.
+     *   - Trailing data -> parse failure (nlohmann raises on garbage-after-root).
+     *   - Comments      -> rejected (we pass ignore_comments=false).
+     *   - Non-UTF-8     -> parse failure (nlohmann enforces UTF-8 by default).
      *
      * Previous behaviour silently returned an empty object on parse
      * failure, so a handler doing body.value("user_id", 0) couldn't tell
      * "client posted garbage" from "client posted {}". The outer
      * HandleClient wrapper catches std::invalid_argument and returns 400.
-     * Use TryBodyJSON() if you need soft-fail behaviour.                */
+     * Use TryBodyJSON() if you need soft-fail behaviour.                  */
     json BodyJSON() const {
         if (body.empty()) return json::object();
-        try { return json::parse(body); }
+        try {
+            /* parser_callback = nullptr, allow_exceptions = true,
+             * ignore_comments = false. Pinned explicitly because future
+             * nlohmann releases might flip defaults.                    */
+            return json::parse(body.begin(), body.end(),
+                               /*cb=*/nullptr,
+                               /*allow_exceptions=*/true,
+                               /*ignore_comments=*/false);
+        }
         catch (const std::exception& e) {
             throw std::invalid_argument(
                 std::string("invalid JSON body: ") + e.what());
@@ -204,7 +215,13 @@ struct HTTPRequest {
      * the throwing BodyJSON() behaviour.                                 */
     bool TryBodyJSON(json& out, std::string& outErr) const {
         if (body.empty()) { out = json::object(); return true; }
-        try { out = json::parse(body); return true; }
+        try {
+            out = json::parse(body.begin(), body.end(),
+                              /*cb=*/nullptr,
+                              /*allow_exceptions=*/true,
+                              /*ignore_comments=*/false);
+            return true;
+        }
         catch (const std::exception& e) {
             outErr = e.what();
             return false;
@@ -679,57 +696,110 @@ static bool WsSendText(SOCKET s, std::mutex& mtx, const std::string& payload) {
  * Per RFC 6455 §5.1, client→server frames MUST be masked; the server MUST
  * close the connection on an unmasked frame. Payload is capped at
  * http.max_ws_frame_bytes to prevent unbounded allocation.              */
-static bool WsReadFrame(SOCKET s, std::string& outPayload, int& outOpcode) {
+/* Status-returning frame reader used by WebSocketReadLoop. Lets the caller
+ * distinguish "peer hung up" from "peer sent trash" from "network error". */
+enum class WsFrameStatus {
+    Ok,                  /* frame read successfully (outPayload / outOpcode set) */
+    CleanClose,          /* recv returned 0 OR we read opcode 0x8                */
+    NetworkError,        /* recv returned SOCKET_ERROR (peer gone, timeout, etc) */
+    ProtocolViolation    /* unmasked client frame, oversized payload, bad len    */
+};
+
+static WsFrameStatus WsReadFrameStatus(SOCKET s, std::string& outPayload, int& outOpcode) {
     unsigned char hdr[2];
     int r = recv(s, (char*)hdr, 2, MSG_WAITALL);
-    if (r != 2) return false;
+    if (r == 0)               return WsFrameStatus::CleanClose;
+    if (r == SOCKET_ERROR)    return WsFrameStatus::NetworkError;
+    if (r != 2)               return WsFrameStatus::NetworkError;
+
     bool fin = (hdr[0] & 0x80) != 0;
-    (void)fin; /* fragmentation reassembly TBD — reject control frames > 125 below */
+    (void)fin;
     outOpcode = hdr[0] & 0x0F;
     bool masked = (hdr[1] & 0x80) != 0;
-
-    /* RFC 6455: a client MUST mask every frame. Reject unmasked client
-     * frames so a malicious/broken peer can't send us partially-obscured
-     * payloads or bypass framing assumptions downstream.                 */
-    if (!masked) {
-        ELLE_WARN("Rejecting unmasked WebSocket frame from client");
-        return false;
-    }
+    if (!masked) return WsFrameStatus::ProtocolViolation;
 
     uint64_t payloadLen = hdr[1] & 0x7F;
-
     if (payloadLen == 126) {
         unsigned char ext[2];
-        if (recv(s, (char*)ext, 2, MSG_WAITALL) != 2) return false;
+        int er = recv(s, (char*)ext, 2, MSG_WAITALL);
+        if (er == 0)            return WsFrameStatus::CleanClose;
+        if (er != 2)            return WsFrameStatus::NetworkError;
         payloadLen = ((uint64_t)ext[0] << 8) | ext[1];
+        /* Per RFC 6455 §5.2, the minimal encoding MUST be used. 126 with a
+         * payload <= 125 is a protocol violation. */
+        if (payloadLen < 126)   return WsFrameStatus::ProtocolViolation;
     } else if (payloadLen == 127) {
         unsigned char ext[8];
-        if (recv(s, (char*)ext, 8, MSG_WAITALL) != 8) return false;
+        int er = recv(s, (char*)ext, 8, MSG_WAITALL);
+        if (er == 0)            return WsFrameStatus::CleanClose;
+        if (er != 8)            return WsFrameStatus::NetworkError;
         payloadLen = 0;
         for (int i = 0; i < 8; i++) payloadLen = (payloadLen << 8) | ext[i];
+        /* High bit of the 64-bit payload length MUST be zero (§5.2).       */
+        if (payloadLen & (1ULL << 63)) return WsFrameStatus::ProtocolViolation;
+        if (payloadLen <= 0xFFFF)      return WsFrameStatus::ProtocolViolation;
     }
 
-    /* Hard cap on payload — without this, a malicious client can claim
-     * payloadLen = 2^63-1 and we'd try to allocate and recv that much. */
     uint64_t maxFrame = (uint64_t)ElleConfig::Instance().GetHTTP().max_ws_frame_bytes;
-    if (maxFrame == 0) maxFrame = 1ULL * 1024 * 1024;  /* 1 MiB safety default */
-    if (payloadLen > maxFrame) {
-        ELLE_WARN("WebSocket payload %llu exceeds cap %llu — closing",
-                  (unsigned long long)payloadLen, (unsigned long long)maxFrame);
-        return false;
-    }
+    if (maxFrame == 0) maxFrame = 1ULL * 1024 * 1024;
+    if (payloadLen > maxFrame) return WsFrameStatus::ProtocolViolation;
+
+    /* Control frames (opcode bit 3 set) MUST have payload ≤ 125 and MUST
+     * be FIN=1 per §5.5. */
+    if ((outOpcode & 0x08) && (payloadLen > 125 || !fin))
+        return WsFrameStatus::ProtocolViolation;
 
     unsigned char mask[4] = {0};
-    if (recv(s, (char*)mask, 4, MSG_WAITALL) != 4) return false;
+    int mr = recv(s, (char*)mask, 4, MSG_WAITALL);
+    if (mr == 0)  return WsFrameStatus::CleanClose;
+    if (mr != 4)  return WsFrameStatus::NetworkError;
 
     outPayload.resize((size_t)payloadLen);
     if (payloadLen > 0) {
-        if (recv(s, &outPayload[0], (int)payloadLen, MSG_WAITALL) != (int)payloadLen) return false;
+        int pr = recv(s, &outPayload[0], (int)payloadLen, MSG_WAITALL);
+        if (pr == 0)               return WsFrameStatus::CleanClose;
+        if (pr != (int)payloadLen) return WsFrameStatus::NetworkError;
         for (size_t i = 0; i < payloadLen; i++) {
             outPayload[i] = outPayload[i] ^ mask[i % 4];
         }
     }
-    (void)fin;
+    return WsFrameStatus::Ok;
+}
+
+/* Legacy wrapper retained for any caller that only cares about success/fail. */
+static bool WsReadFrame(SOCKET s, std::string& outPayload, int& outOpcode) {
+    return WsReadFrameStatus(s, outPayload, outOpcode) == WsFrameStatus::Ok;
+}
+
+/* UTF-8 validator — rejects overlong encodings, surrogates, codepoints
+ * above U+10FFFF. Required by RFC 6455 §8.1 for text frames.           */
+static bool IsValidUtf8(const std::string& s) {
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80)      { i += 1; continue; }
+        int len;
+        uint32_t cp;
+        if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1F; }
+        else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
+        else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
+        else return false;
+        if (i + len > n) return false;
+        for (int k = 1; k < len; k++) {
+            unsigned char cc = (unsigned char)s[i + k];
+            if ((cc & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        /* Overlong encoding check. */
+        if (len == 2 && cp < 0x80)    return false;
+        if (len == 3 && cp < 0x800)   return false;
+        if (len == 4 && cp < 0x10000) return false;
+        /* Surrogate half is illegal in UTF-8. */
+        if (cp >= 0xD800 && cp <= 0xDFFF) return false;
+        /* Out of Unicode range. */
+        if (cp > 0x10FFFF) return false;
+        i += len;
+    }
     return true;
 }
 
@@ -1478,33 +1548,133 @@ private:
     }
 
     void WebSocketReadLoop(std::shared_ptr<WSClient> client) {
-        try {
-            while (client->alive && Running()) {
-                std::string payload;
-                int opcode = 0;
-                if (!WsReadFrame(client->socket, payload, opcode)) break;
+        /* Failure categories — tracked per-connection so a single misbehaving
+         * client can't drown the log and so we can classify teardown reason
+         * in one place instead of swallowing everything as DEBUG.
+         *
+         * Categories:
+         *   - CLEAN_CLOSE      : peer sent opcode 0x8 or TCP FIN
+         *   - PROTOCOL_VIOLATION: invalid opcode, oversized frame, bad UTF-8
+         *                         in a text frame. We reply with a 1002
+         *                         close frame and terminate.
+         *   - NETWORK_ERROR    : recv() returned SOCKET_ERROR not due to
+         *                         timeout. Peer is gone; no close reply.
+         *   - HANDLER_EXCEPTION: HandleWebSocketMessage threw. We keep the
+         *                         connection open if the exception is local
+         *                         (bad payload, not bad socket) and reply
+         *                         with a JSON error frame so the client knows.
+         *
+         * Rate-limiting: protocol-violation logs are debounced to once per
+         * 5s per client so a fuzzer can't inflate log storage. */
+        enum class Exit {
+            CLEAN_CLOSE, PROTOCOL_VIOLATION, NETWORK_ERROR, HANDLER_EXCEPTION
+        } exitReason = Exit::CLEAN_CLOSE;
+        std::string exitDetail;
+        uint64_t    lastViolationLogMs = 0;
+        uint32_t    suppressedViolations = 0;
 
-                if (opcode == 0x8) { /* close */
+        auto logViolation = [&](const std::string& reason) {
+            uint64_t now = ELLE_MS_NOW();
+            if (now - lastViolationLogMs < 5000) {
+                suppressedViolations++;
+                return;
+            }
+            if (suppressedViolations > 0) {
+                ELLE_WARN("WS %s: %u violations suppressed in last window",
+                          client->id.c_str(), suppressedViolations);
+                suppressedViolations = 0;
+            }
+            lastViolationLogMs = now;
+            ELLE_WARN("WS %s protocol violation: %s", client->id.c_str(),
+                      reason.c_str());
+        };
+
+        while (client->alive && Running()) {
+            std::string payload;
+            int opcode = 0;
+            WsFrameStatus st = WsReadFrameStatus(client->socket, payload, opcode);
+            if (st == WsFrameStatus::CleanClose) {
+                exitReason = Exit::CLEAN_CLOSE;
+                break;
+            }
+            if (st == WsFrameStatus::NetworkError) {
+                exitReason = Exit::NETWORK_ERROR;
+                exitDetail = "recv failed (" + std::to_string(WSAGetLastError()) + ")";
+                break;
+            }
+            if (st == WsFrameStatus::ProtocolViolation) {
+                logViolation("malformed frame");
+                exitReason = Exit::PROTOCOL_VIOLATION;
+                exitDetail = "malformed frame";
+                /* Reply with 1002 close per RFC 6455 §7.4.1. */
+                unsigned char close1002[4] = { 0x88, 0x02, 0x03, 0xEA };
+                std::lock_guard<std::mutex> lk(client->sendMutex);
+                send(client->socket, (const char*)close1002, 4, 0);
+                break;
+            }
+
+            if (opcode == 0x8) { /* close */
+                exitReason = Exit::CLEAN_CLOSE;
+                break;
+            }
+            if (opcode == 0x9) { /* ping */
+                std::lock_guard<std::mutex> lk(client->sendMutex);
+                unsigned char pong[2] = {0x8A, 0x00};
+                send(client->socket, (const char*)pong, 2, 0);
+                continue;
+            }
+            if (opcode == 0xA) { /* pong — ignore */
+                continue;
+            }
+            if (opcode == 0x1) { /* text */
+                /* Per RFC 6455 §8.1, a text frame MUST be UTF-8. */
+                if (!IsValidUtf8(payload)) {
+                    logViolation("non-UTF-8 text frame");
+                    exitReason = Exit::PROTOCOL_VIOLATION;
+                    exitDetail = "non-UTF-8 text frame";
+                    unsigned char close1007[4] = { 0x88, 0x02, 0x03, 0xEF };
+                    std::lock_guard<std::mutex> lk(client->sendMutex);
+                    send(client->socket, (const char*)close1007, 4, 0);
                     break;
                 }
-                if (opcode == 0x9) { /* ping */
-                    /* send pong */
-                    std::lock_guard<std::mutex> lk(client->sendMutex);
-                    unsigned char pong[2] = {0x8A, 0x00};
-                    send(client->socket, (const char*)pong, 2, 0);
-                    continue;
-                }
-                if (opcode == 0xA) { /* pong — ignore */
-                    continue;
-                }
-                if (opcode == 0x1) { /* text */
+                try {
                     HandleWebSocketMessage(client, payload);
+                } catch (const std::exception& e) {
+                    /* Local handler exception is NOT a protocol failure —
+                     * we keep the connection and tell the client. */
+                    ELLE_WARN("WS %s handler exception: %s",
+                              client->id.c_str(), e.what());
+                    json err = {
+                        {"type", "error"},
+                        {"message", std::string("handler exception: ") + e.what()}
+                    };
+                    WsSendText(client->socket, client->sendMutex, err.dump());
                 }
+                continue;
             }
-        } catch (const std::exception& e) {
-            ELLE_DEBUG("WS client loop exited with exception: %s", e.what());
-        } catch (...) {
-            ELLE_WARN("WS client loop exited with unknown exception");
+            /* Unknown opcode — RFC 6455 §5.2 says MUST fail the connection. */
+            logViolation("unknown opcode 0x" + std::to_string(opcode));
+            exitReason = Exit::PROTOCOL_VIOLATION;
+            exitDetail = "unknown opcode";
+            break;
+        }
+
+        switch (exitReason) {
+            case Exit::CLEAN_CLOSE:
+                ELLE_INFO("WS %s closed cleanly", client->id.c_str());
+                break;
+            case Exit::PROTOCOL_VIOLATION:
+                ELLE_WARN("WS %s closed due to protocol violation: %s",
+                          client->id.c_str(), exitDetail.c_str());
+                break;
+            case Exit::NETWORK_ERROR:
+                ELLE_INFO("WS %s network error: %s",
+                          client->id.c_str(), exitDetail.c_str());
+                break;
+            case Exit::HANDLER_EXCEPTION:
+                ELLE_ERROR("WS %s torn down by handler exception: %s",
+                           client->id.c_str(), exitDetail.c_str());
+                break;
         }
 
         client->alive = false;
@@ -3336,9 +3506,7 @@ private:
         });
 
         m_router.Register("POST", "/api/x/cycle/anchor", [this](const HTTPRequest& req) {
-            json body;
-            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
-            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json body = req.BodyJSON();
 
             json payload = {
                 {"day",      body.value("day",      0)},
@@ -3360,9 +3528,7 @@ private:
         });
 
         m_router.Register("POST", "/api/x/stimulus", [this](const HTTPRequest& req) {
-            json body;
-            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
-            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json body = req.BodyJSON();
 
             std::string kind = body.value("kind", std::string());
             if (kind.empty()) return HTTPResponse::Err(400, "missing 'kind'");
@@ -3383,9 +3549,7 @@ private:
         });
 
         m_router.Register("POST", "/api/x/conception/attempt", [this](const HTTPRequest& req) {
-            json body;
-            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
-            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json body = req.BodyJSON();
 
             json payload = {
                 {"require_readiness",  body.value("require_readiness",  true)},
@@ -3670,9 +3834,7 @@ private:
         });
 
         m_router.Register("POST", "/api/x/symptoms", [this](const HTTPRequest& req) {
-            json body;
-            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
-            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json body = req.BodyJSON();
             json payload = {
                 {"kind",      body.value("kind",      std::string())},
                 {"intensity", body.value("intensity", 0.5f)},
@@ -3730,9 +3892,7 @@ private:
         });
 
         m_router.Register("POST", "/api/x/contraception", [this](const HTTPRequest& req) {
-            json body;
-            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
-            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json body = req.BodyJSON();
             json payload = {
                 {"method",   body.value("method",   std::string("none"))},
                 {"efficacy", body.value("efficacy", 1.0f)},
@@ -3779,9 +3939,7 @@ private:
         });
 
         m_router.Register("POST", "/api/x/lifecycle", [this](const HTTPRequest& req) {
-            json body;
-            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
-            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json body = req.BodyJSON();
             if (!body.contains("birth_ms") && !body.contains("age_years"))
                 return HTTPResponse::Err(400, "provide 'birth_ms' or 'age_years'");
             auto msg = ElleIPCMessage::Create(
@@ -3799,9 +3957,7 @@ private:
         });
 
         m_router.Register("POST", "/api/x/pregnancy/accelerate", [this](const HTTPRequest& req) {
-            json body;
-            try { body = json::parse(req.body.empty() ? "{}" : req.body); }
-            catch (...) { return HTTPResponse::Err(400, "invalid JSON"); }
+            json body = req.BodyJSON();
             float factor = body.value("factor", 1.0f);
             json payload = {{"factor", factor}};
             auto msg = ElleIPCMessage::Create(

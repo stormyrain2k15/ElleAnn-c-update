@@ -56,7 +56,7 @@ want a full wipe.
 
 ## Verifying the install
 ```powershell
-sc.exe query ElleHTTP           # should report RUNNING
+sc.exe query ElleHTTPServer     # should report RUNNING
 curl http://localhost:8000/api/health
 ```
 

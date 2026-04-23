@@ -8,7 +8,7 @@
     { "name": "ElleEmotional",   "display": "Elle-Ann Emotional",    "exe": "Elle.Service.Emotional.exe",    "depends": ["ElleHeartbeat"],                                                   "start": "auto" },
     { "name": "ElleIdentity",    "display": "Elle-Ann Identity",     "exe": "Elle.Service.Identity.exe",     "depends": ["ElleHeartbeat", "ElleMemory"],                                     "start": "auto" },
     { "name": "ElleWorldModel",  "display": "Elle-Ann World Model",  "exe": "Elle.Service.WorldModel.exe",   "depends": ["ElleHeartbeat", "ElleMemory"],                                     "start": "auto" },
-    { "name": "ElleGoal",        "display": "Elle-Ann Goal Engine",  "exe": "Elle.Service.GoalEngine.exe",   "depends": ["ElleHeartbeat", "ElleMemory"],                                     "start": "auto" },
+    { "name": "ElleGoalEngine", "display": "Elle-Ann Goal Engine",  "exe": "Elle.Service.GoalEngine.exe",   "depends": ["ElleHeartbeat", "ElleMemory"],                                     "start": "auto" },
     { "name": "ElleAction",      "display": "Elle-Ann Action",       "exe": "Elle.Service.Action.exe",       "depends": ["ElleHeartbeat", "ElleQueueWorker"],                                "start": "auto" },
     { "name": "ElleConsent",     "display": "Elle-Ann Consent",      "exe": "Elle.Service.Consent.exe",      "depends": ["ElleHeartbeat", "ElleIdentity", "ElleEmotional"],                  "start": "auto" },
     { "name": "ElleSelfPrompt",  "display": "Elle-Ann Self Prompt",  "exe": "Elle.Service.SelfPrompt.exe",   "depends": ["ElleHeartbeat", "ElleEmotional"],                                  "start": "auto" },
@@ -19,8 +19,8 @@
     { "name": "ElleXChromosome", "display": "Elle-Ann X Chromosome", "exe": "Elle.Service.XChromosome.exe",  "depends": ["ElleHeartbeat"],                                                   "start": "auto" },
     { "name": "ElleFamily",      "display": "Elle-Ann Family",       "exe": "Elle.Service.Family.exe",       "depends": ["ElleHeartbeat", "ElleXChromosome"],                                "start": "auto" },
     { "name": "ElleContinuity",  "display": "Elle-Ann Continuity",   "exe": "Elle.Service.Continuity.exe",   "depends": ["ElleHeartbeat", "ElleMemory", "ElleIdentity"],                     "start": "auto" },
-    { "name": "ElleLuaBehav",    "display": "Elle-Ann Lua Behavioral","exe": "Elle.Lua.Behavioral.exe",      "depends": ["ElleHeartbeat", "ElleEmotional"],                                  "start": "auto" },
+    { "name": "ElleLuaBehavioral", "display": "Elle-Ann Lua Behavioral","exe": "Elle.Lua.Behavioral.exe",      "depends": ["ElleHeartbeat", "ElleEmotional"],                                  "start": "auto" },
     { "name": "ElleCognitive",   "display": "Elle-Ann Cognitive",    "exe": "Elle.Service.Cognitive.exe",    "depends": ["ElleHeartbeat", "ElleMemory", "ElleEmotional", "ElleIdentity"],    "start": "auto" },
-    { "name": "ElleHTTP",        "display": "Elle-Ann HTTP API",     "exe": "Elle.Service.HTTP.exe",         "depends": ["ElleHeartbeat", "ElleCognitive"],                                  "start": "auto" }
+    { "name": "ElleHTTPServer",  "display": "Elle-Ann HTTP API",     "exe": "Elle.Service.HTTP.exe",         "depends": ["ElleHeartbeat", "ElleCognitive"],                                  "start": "auto" }
   ]
 }

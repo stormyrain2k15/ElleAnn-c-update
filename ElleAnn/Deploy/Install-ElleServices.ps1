@@ -177,4 +177,4 @@ if (-not $NoStart) {
     }
 }
 
-Write-Host "`nDone. Run 'sc.exe query ElleHTTP' to check the API service." -ForegroundColor Cyan
+Write-Host "`nDone. Run 'sc.exe query ElleHTTPServer' to check the API service." -ForegroundColor Cyan
