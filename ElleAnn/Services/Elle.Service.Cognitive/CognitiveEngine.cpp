@@ -32,6 +32,9 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <regex>
 #include <algorithm>
 #include <unordered_map>
@@ -231,24 +234,45 @@ public:
 protected:
     bool OnStart() override {
         if (!m_engine.Initialize()) return false;
-        ELLE_INFO("Cognitive service started");
+
+        /* Chat worker pool — see ChatWorkerLoop. Replaces the old detach()
+         * approach: every chat handler thread is now OWNED by the service,
+         * joined cleanly on OnStop. Concurrency is capped by pool size,
+         * not a soft counter.                                              */
+        uint32_t poolSize = (uint32_t)ElleConfig::Instance().GetInt(
+            "cognitive.chat_workers", 4);
+        if (poolSize == 0) poolSize = 1;
+        m_shuttingDown.store(false);
+        for (uint32_t i = 0; i < poolSize; ++i) {
+            m_chatWorkers.emplace_back(&ElleCognitiveService::ChatWorkerLoop, this);
+        }
+        ELLE_INFO("Cognitive service started with %u chat worker(s)", poolSize);
         return true;
     }
 
     void OnStop() override {
-        /* Drain any in-flight chat orchestrations so their detached threads
-         * stop touching `this` before the service is torn down. Previously
-         * OnStop returned immediately and the still-running threads could
-         * crash on `GetIPCHub().Send` / `m_cachedEmotions` during shutdown. */
-        const uint32_t waitMsMax = 5000;
-        uint32_t waited = 0;
-        while (m_inflightChats.load() > 0 && waited < waitMsMax) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            waited += 50;
+        /* Clean shutdown: flag the pool, wake every worker, join them. No
+         * detached threads remain to race the destructor.                 */
+        {
+            std::lock_guard<std::mutex> lock(m_chatMx);
+            m_shuttingDown.store(true);
         }
-        if (m_inflightChats.load() > 0) {
-            ELLE_WARN("Cognitive OnStop: %u chat threads still inflight after %ums",
-                      m_inflightChats.load(), waitMsMax);
+        m_chatCv.notify_all();
+        for (auto& t : m_chatWorkers) {
+            if (t.joinable()) t.join();
+        }
+        m_chatWorkers.clear();
+
+        /* Reply 503-style to anything still queued so callers don't hang. */
+        std::lock_guard<std::mutex> lock(m_chatMx);
+        while (!m_chatQueue.empty()) {
+            auto& item = m_chatQueue.front();
+            auto rep = ElleIPCMessage::Create(IPC_CHAT_RESPONSE,
+                                              SVC_COGNITIVE, item.origin);
+            rep.SetStringPayload(
+                "{\"error\":\"cognitive_shutdown\",\"retry\":true}");
+            GetIPCHub().Send(item.origin, rep);
+            m_chatQueue.pop_front();
         }
         ELLE_INFO("Cognitive service stopped");
     }
@@ -306,15 +330,26 @@ protected:
                 break;
             }
             case IPC_CHAT_REQUEST: {
-                /* Spawn a dedicated thread — orchestration calls LLM (~2-5s),
-                 * we must never block the IPC dispatcher. Bounded by config
-                 * cognitive.max_concurrent_chats (default 16) so a storm of
-                 * chat requests can't turn into unbounded thread growth.   */
-                uint32_t cap = (uint32_t)ElleConfig::Instance().GetInt(
-                    "cognitive.max_concurrent_chats", 16);
-                if (cap > 0 && m_inflightChats.load() >= cap) {
-                    ELLE_WARN("Chat orchestration cap %u reached; rejecting request", cap);
-                    /* Reply 503-style to the origin so it can retry/backoff. */
+                /* Chat orchestration now goes through an owned worker pool
+                 * instead of std::thread(...).detach(). Concurrency is
+                 * bounded by pool size (config: cognitive.chat_workers);
+                 * queue depth is bounded by cognitive.max_chat_queue.     */
+                uint32_t maxQueue = (uint32_t)ElleConfig::Instance().GetInt(
+                    "cognitive.max_chat_queue", 64);
+
+                std::unique_lock<std::mutex> lock(m_chatMx);
+                if (m_shuttingDown.load()) {
+                    lock.unlock();
+                    auto rep = ElleIPCMessage::Create(IPC_CHAT_RESPONSE,
+                                                      SVC_COGNITIVE, sender);
+                    rep.SetStringPayload(
+                        "{\"error\":\"cognitive_shutdown\",\"retry\":true}");
+                    GetIPCHub().Send(sender, rep);
+                    break;
+                }
+                if (m_chatQueue.size() >= maxQueue) {
+                    lock.unlock();
+                    ELLE_WARN("Chat queue full (%u); rejecting request", maxQueue);
                     auto rep = ElleIPCMessage::Create(IPC_CHAT_RESPONSE,
                                                       SVC_COGNITIVE, sender);
                     rep.SetStringPayload(
@@ -322,19 +357,9 @@ protected:
                     GetIPCHub().Send(sender, rep);
                     break;
                 }
-                m_inflightChats++;
-                std::string payload = msg.GetStringPayload();
-                ELLE_SERVICE_ID origin = sender;
-                std::thread([this, payload, origin]() {
-                    try {
-                        this->HandleChatRequest(payload, origin);
-                    } catch (const std::exception& e) {
-                        ELLE_ERROR("Chat orchestration exception: %s", e.what());
-                    } catch (...) {
-                        ELLE_ERROR("Chat orchestration unknown exception");
-                    }
-                    m_inflightChats--;
-                }).detach();
+                m_chatQueue.push_back({ msg.GetStringPayload(), sender });
+                lock.unlock();
+                m_chatCv.notify_one();
                 break;
             }
             default:
@@ -348,11 +373,49 @@ protected:
 
 private:
     CognitiveEngine m_engine;
-    std::atomic<uint32_t> m_inflightChats{0};
     ELLE_EMOTION_STATE m_cachedEmotions = {};
 
     /*────────────────────────────────────────────────────────────────────────
-     * CHAT ORCHESTRATION — the full pipeline the user described.
+     * CHAT ORCHESTRATION — owned worker pool.
+     *
+     * Inbound IPC_CHAT_REQUEST gets pushed onto m_chatQueue; worker threads
+     * pop and run HandleChatRequest(). OnStop joins every worker cleanly,
+     * so no detached threads can ever touch `this` post-destruction.
+     *───────────────────────────────────────────────────────────────────────*/
+    struct ChatItem {
+        std::string      payload;
+        ELLE_SERVICE_ID  origin;
+    };
+    std::mutex                   m_chatMx;
+    std::condition_variable      m_chatCv;
+    std::deque<ChatItem>         m_chatQueue;
+    std::vector<std::thread>     m_chatWorkers;
+    std::atomic<bool>            m_shuttingDown{false};
+
+    void ChatWorkerLoop() {
+        for (;;) {
+            ChatItem item;
+            {
+                std::unique_lock<std::mutex> lock(m_chatMx);
+                m_chatCv.wait(lock, [this]{
+                    return m_shuttingDown.load() || !m_chatQueue.empty();
+                });
+                if (m_shuttingDown.load() && m_chatQueue.empty()) return;
+                item = std::move(m_chatQueue.front());
+                m_chatQueue.pop_front();
+            }
+            try {
+                HandleChatRequest(item.payload, item.origin);
+            } catch (const std::exception& e) {
+                ELLE_ERROR("Chat orchestration exception: %s", e.what());
+            } catch (...) {
+                ELLE_ERROR("Chat orchestration unknown exception");
+            }
+        }
+    }
+
+    /*────────────────────────────────────────────────────────────────────────
+     * CHAT PIPELINE (the user-facing orchestration).
      * Every input+output filters through Elle's services. LLM is ONLY
      * the language-surface at the end, never the source of memory or
      * emotion.
@@ -1044,12 +1107,65 @@ private:
                 break;
             }
             case INTENT_EMOTIONAL_EXPRESSION: {
-                /* Emotional expects IPC_EMOTION_UPDATE with a string JSON
-                 * payload describing the delta / trigger. */
+                /* Emotional's HandleEmotionUpdate reads a BINARY payload:
+                 *   [uint32 emotion_id][float delta]
+                 * (EmotionalEngine.cpp:621-627). The old code sent a JSON
+                 * string here which silently got dropped (the handler only
+                 * acts when payload.size() >= 8 of the right shape).
+                 *
+                 * Resolution order for which emotion to nudge:
+                 *   1) If intent.parameters is a JSON object with
+                 *      {"emotion":"<name>","delta":<float>} — use it verbatim.
+                 *   2) Else scan intent.description for any kEmotionMeta name
+                 *      token (case-insensitive substring match).
+                 *   3) Else fall back to EMOTION_JOY.
+                 * Delta defaults to intent.urgency * 0.5f so urgent intents
+                 * push harder than casual ones.                            */
+                uint32_t emoId = (uint32_t)EMOTION_JOY;
+                float    delta = intent.urgency * 0.5f;
+                if (delta <= 0.0f) delta = 0.25f;
+
+                bool resolved = false;
+                {
+                    nlohmann::json pj;
+                    if (intent.parameters[0] &&
+                        Elle::ExtractJsonObject(intent.parameters, pj) &&
+                        pj.contains("emotion")) {
+                        std::string nm = pj.value("emotion", std::string(""));
+                        if (pj.contains("delta")) {
+                            try { delta = pj["delta"].get<float>(); }
+                            catch (...) {}
+                        }
+                        std::string lo; lo.reserve(nm.size());
+                        for (char c : nm) lo.push_back((char)tolower((unsigned char)c));
+                        for (uint32_t i = 0; i < (uint32_t)ELLE_EMOTION_COUNT; ++i) {
+                            if (kEmotionMeta[i].name && lo == kEmotionMeta[i].name) {
+                                emoId = i; resolved = true; break;
+                            }
+                        }
+                    }
+                }
+                if (!resolved) {
+                    std::string desc = intent.description;
+                    std::string lo; lo.reserve(desc.size());
+                    for (char c : desc) lo.push_back((char)tolower((unsigned char)c));
+                    for (uint32_t i = 0; i < (uint32_t)ELLE_EMOTION_COUNT; ++i) {
+                        const char* nm = kEmotionMeta[i].name;
+                        if (!nm || !*nm) continue;
+                        if (lo.find(nm) != std::string::npos) {
+                            emoId = i; break;
+                        }
+                    }
+                }
+
+                /* Pack the binary payload in the exact layout Emotional
+                 * expects: [uint32][float] = 8 bytes. */
+                std::vector<uint8_t> buf(8);
+                memcpy(buf.data(),     &emoId, sizeof(uint32_t));
+                memcpy(buf.data() + 4, &delta, sizeof(float));
                 auto msg = ElleIPCMessage::Create(IPC_EMOTION_UPDATE, SVC_COGNITIVE, SVC_EMOTIONAL);
-                msg.SetStringPayload(
-                    std::string("{\"trigger\":\"cognitive_routed\",\"reason\":\"")
-                    + std::string(intent.description) + "\"}");
+                msg.payload = std::move(buf);
+                msg.header.payload_size = 8;
                 routed = hub.Send(SVC_EMOTIONAL, msg);
                 note = "emotion_update";
                 break;
@@ -1069,13 +1185,25 @@ private:
                 break;
             }
             case INTENT_WORLD_MODEL_UPDATE: {
+                /* WorldModel consumes name, type, description, and uses
+                 * last_interaction_ms (NOT last_seen_ms — that field does
+                 * not exist on ELLE_WORLD_ENTITY). The previous code set
+                 * a non-existent `relationship_note` which was a compile
+                 * error. We now populate the three fields WorldModel
+                 * actually reads (WorldModel.cpp:103-108) plus
+                 * mental_model for the cognitive note.                  */
                 ELLE_WORLD_ENTITY e{};
-                /* intent.parameters = entity name; description = new observation */
-                strncpy_s(e.name, intent.parameters[0] ? intent.parameters
-                                                       : intent.description,
-                          ELLE_MAX_NAME - 1);
-                strncpy_s(e.relationship_note, intent.description, ELLE_MAX_MSG - 1);
-                e.last_seen_ms = ELLE_MS_NOW();
+                const char* entityName = intent.parameters[0]
+                                           ? intent.parameters
+                                           : intent.description;
+                strncpy_s(e.name,        entityName,          ELLE_MAX_NAME - 1);
+                strncpy_s(e.type,        "person",            ELLE_MAX_TAG  - 1);
+                strncpy_s(e.description, intent.description,  ELLE_MAX_MSG  - 1);
+                strncpy_s(e.mental_model, intent.description, ELLE_MAX_MSG  - 1);
+                e.last_interaction_ms = ELLE_MS_NOW();
+                e.interaction_count   = 1;
+                e.familiarity         = 0.2f;
+                e.trust               = 0.5f;
                 auto msg = ElleIPCMessage::Create(IPC_WORLD_STATE, SVC_COGNITIVE, SVC_WORLD_MODEL);
                 msg.SetPayload(e);
                 routed = hub.Send(SVC_WORLD_MODEL, msg);
@@ -1099,17 +1227,61 @@ private:
             }
             default: {
                 /* Build a proper ELLE_ACTION_RECORD from the intent for the
-                 * Action service. Map intent.type → action.type. */
+                 * Action service. The mapping below inspects intent.parameters
+                 * / intent.description to pick the RIGHT concrete action —
+                 * previously every INTENT_HARDWARE_COMMAND collapsed to
+                 * ACTION_QUERY_HARDWARE, every INTENT_FILE_OPERATION to
+                 * ACTION_READ_FILE, etc., so vibrate/kill/write requests
+                 * were silently downgraded to their benign defaults.     */
                 ELLE_ACTION_RECORD a{};
                 a.intent_id = intent.id;
                 a.type = ACTION_SEND_MESSAGE; /* safe default */
+
+                /* Lowercase combined hint pulled from params first (the
+                 * LLM parser is asked to put verbs there), falling back
+                 * to description. */
+                std::string hint = intent.parameters[0] ? intent.parameters
+                                                        : intent.description;
+                for (auto& c : hint) c = (char)tolower((unsigned char)c);
+                auto has = [&](const char* s){ return hint.find(s) != std::string::npos; };
+
                 switch ((ELLE_INTENT_TYPE)intent.type) {
-                    case INTENT_HARDWARE_COMMAND: a.type = ACTION_QUERY_HARDWARE; break;
-                    case INTENT_FILE_OPERATION:   a.type = ACTION_READ_FILE;      break;
-                    case INTENT_PROCESS_CONTROL:  a.type = ACTION_LIST_PROCESSES; break;
-                    case INTENT_EXECUTE_ACTION:   a.type = ACTION_EXECUTE_CODE;   break;
-                    case INTENT_CHAT:             a.type = ACTION_SEND_MESSAGE;   break;
-                    default: break;
+                    case INTENT_HARDWARE_COMMAND:
+                        if      (has("vibrate") || has("buzz"))         a.type = ACTION_VIBRATE;
+                        else if (has("flash")   || has("blink"))        a.type = ACTION_FLASH;
+                        else if (has("notify")  || has("alert") || has("toast"))
+                                                                         a.type = ACTION_NOTIFY;
+                        else if (has("cpu") && has("affin"))             a.type = ACTION_SET_CPU_AFFINITY;
+                        else                                             a.type = ACTION_QUERY_HARDWARE;
+                        break;
+                    case INTENT_FILE_OPERATION:
+                        if      (has("write") || has("save")  || has("create"))  a.type = ACTION_WRITE_FILE;
+                        else if (has("delete")|| has("remove")|| has("rm"))      a.type = ACTION_DELETE_FILE;
+                        else if (has("watch") || has("monitor"))                 a.type = ACTION_WATCH_FILE;
+                        else                                                     a.type = ACTION_READ_FILE;
+                        break;
+                    case INTENT_PROCESS_CONTROL:
+                        if      (has("kill")   || has("terminate") || has("stop"))   a.type = ACTION_KILL_PROCESS;
+                        else if (has("launch") || has("start") || has("run") || has("spawn"))
+                                                                                       a.type = ACTION_LAUNCH_PROCESS;
+                        else                                                         a.type = ACTION_LIST_PROCESSES;
+                        break;
+                    case INTENT_EXECUTE_ACTION:
+                        /* Generic "do this" — Action dispatches to the
+                         * custom handler which logs and returns a clear
+                         * failure if no concrete backend is registered.
+                         * ACTION_EXECUTE_CODE would be dispatched too but
+                         * that's restricted by consent; use ACTION_CUSTOM
+                         * so the action pipeline can policy-check and
+                         * route to the correct backend (including code
+                         * execution when consent allows).                */
+                        a.type = ACTION_CUSTOM;
+                        break;
+                    case INTENT_CHAT:
+                        a.type = ACTION_SEND_MESSAGE;
+                        break;
+                    default:
+                        break;
                 }
                 strncpy_s(a.command,    intent.description, ELLE_MAX_MSG - 1);
                 strncpy_s(a.parameters, intent.parameters,  ELLE_MAX_MSG - 1);

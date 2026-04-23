@@ -43,6 +43,10 @@
 #include <regex>
 #include <atomic>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <set>
 #include <cstring>
 #include <chrono>
 #include <fstream>
@@ -627,21 +631,32 @@ protected:
             return false;
         }
 
+        m_shuttingDown.store(false);
         m_acceptThread = std::thread(&ElleHTTPService::AcceptLoop, this);
 
-        ELLE_INFO("HTTP server listening on %s:%d (%zu routes)",
-                  cfg.bind_address.c_str(), cfg.port, m_router.Count());
+        /* HTTP handler worker pool — owns its threads, no detach(). Accept
+         * loop produces sockets into m_socketQueue; workers drain it.     */
+        uint32_t workers = MaxConcurrent();
+        if (workers == 0) workers = 8;
+        for (uint32_t i = 0; i < workers; ++i) {
+            m_httpWorkers.emplace_back(&ElleHTTPService::HttpWorkerLoop, this);
+        }
+
+        ELLE_INFO("HTTP server listening on %s:%d (%zu routes, %u workers)",
+                  cfg.bind_address.c_str(), cfg.port, m_router.Count(), workers);
         return true;
     }
 
     void OnStop() override {
+        /* Phase 1: stop producers.                                         */
+        m_shuttingDown.store(true);
         if (m_listenSocket != INVALID_SOCKET) {
             closesocket(m_listenSocket);
             m_listenSocket = INVALID_SOCKET;
         }
         if (m_acceptThread.joinable()) m_acceptThread.join();
 
-        /* Close all WS clients so their read loops unblock. */
+        /* Phase 2: close all WS sockets so their read-loop threads unblock. */
         {
             std::lock_guard<std::mutex> lock(m_wsMutex);
             for (auto& c : m_wsClients) {
@@ -650,23 +665,28 @@ protected:
             }
         }
 
-        /* Drain-fence: wait for detached HTTP request handlers and detached
-         * WebSocket read loops to finish touching `this` before we return.
-         * Previously OnStop only joined the accept thread — detached
-         * handlers and WS readers kept running against member state during
-         * teardown, which manifested as shutdown crashes under traffic.
-         * 10s cap is generous; at that point we warn and proceed to avoid
-         * a frozen stop.                                                   */
-        const uint32_t waitMsMax = 10000;
-        uint32_t waited = 0;
-        while ((m_activeHttpHandlers.load() > 0 || m_activeWsClients.load() > 0)
-               && waited < waitMsMax) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            waited += 50;
+        /* Phase 3: drain HTTP worker pool (owned threads).                 */
+        m_socketCv.notify_all();
+        for (auto& t : m_httpWorkers) {
+            if (t.joinable()) t.join();
         }
-        if (m_activeHttpHandlers.load() > 0 || m_activeWsClients.load() > 0) {
-            ELLE_WARN("HTTP OnStop: %u handler(s) / %u ws reader(s) still live after %ums",
-                      m_activeHttpHandlers.load(), m_activeWsClients.load(), waitMsMax);
+        m_httpWorkers.clear();
+        {
+            std::lock_guard<std::mutex> lock(m_socketMx);
+            while (!m_socketQueue.empty()) {
+                SOCKET s = m_socketQueue.front();
+                m_socketQueue.pop_front();
+                if (s != INVALID_SOCKET) closesocket(s);
+            }
+        }
+
+        /* Phase 4: drain WS reader threads (one per connection, owned).    */
+        {
+            std::lock_guard<std::mutex> lock(m_wsThreadsMx);
+            for (auto& t : m_wsThreads) {
+                if (t.joinable()) t.join();
+            }
+            m_wsThreads.clear();
         }
 
         {
@@ -730,13 +750,26 @@ private:
     std::atomic<uint64_t> m_requestSeq{0};
     ChatCorrelator m_chatCorrelator;
 
-    /* Concurrent-connection governor. Bounds the number of in-flight
-     * HTTP handler threads AND active WebSocket client threads so a
-     * storm of requests can't turn into unbounded thread growth. Taken
-     * from http.max_concurrent_connections config (0 means unbounded,
-     * matching historic behaviour).                                    */
-    std::atomic<uint32_t> m_activeHttpHandlers{0};
-    std::atomic<uint32_t> m_activeWsClients{0};
+    /* Shutdown coordination.                                             */
+    std::atomic<bool> m_shuttingDown{false};
+
+    /* HTTP handler pool — owned threads (joined in OnStop), not detached.
+     * AcceptLoop pushes accepted sockets into m_socketQueue; HttpWorkerLoop
+     * threads pop and handle. Queue depth is capped by MaxConcurrent().
+     * Replaces the old "spawn-detach-and-count" model which could race
+     * service destruction.                                                */
+    std::mutex                  m_socketMx;
+    std::condition_variable     m_socketCv;
+    std::deque<SOCKET>          m_socketQueue;
+    std::vector<std::thread>    m_httpWorkers;
+
+    /* WS readers — one owned thread per connection. Finished threads add
+     * their id to m_reapableWsThreadIds; the next spawn opportunistically
+     * joins and removes them so the vector stays bounded even under
+     * thousands of lifetime connections.                                  */
+    std::mutex                         m_wsThreadsMx;
+    std::vector<std::thread>           m_wsThreads;
+    std::set<std::thread::id>          m_reapableWsThreadIds;
 
     uint32_t MaxConcurrent() const {
         return ElleConfig::Instance().GetHTTP().max_concurrent_connections;
@@ -760,23 +793,44 @@ private:
             SOCKET clientSocket = accept(m_listenSocket, nullptr, nullptr);
             if (clientSocket == INVALID_SOCKET) continue;
 
-            /* Bound concurrent handlers. If we're at the cap, serve a 503
-             * rather than spawning an unbounded thread. */
+            /* Bound concurrent handlers via QUEUE depth. If we're at the
+             * cap, serve 503 rather than queueing unboundedly.           */
             uint32_t cap = MaxConcurrent();
-            if (cap > 0 && m_activeHttpHandlers.load() >= cap) {
-                HTTPResponse r = HTTPResponse::Err(503, "server busy — try again");
-                std::string data = r.Serialize();
-                send(clientSocket, data.c_str(), (int)data.size(), 0);
-                shutdown(clientSocket, SD_SEND);
-                closesocket(clientSocket);
-                continue;
+            {
+                std::unique_lock<std::mutex> lock(m_socketMx);
+                if (cap > 0 && m_socketQueue.size() >= cap) {
+                    lock.unlock();
+                    HTTPResponse r = HTTPResponse::Err(503, "server busy — try again");
+                    std::string data = r.Serialize();
+                    send(clientSocket, data.c_str(), (int)data.size(), 0);
+                    shutdown(clientSocket, SD_SEND);
+                    closesocket(clientSocket);
+                    continue;
+                }
+                m_socketQueue.push_back(clientSocket);
             }
+            m_socketCv.notify_one();
+        }
+    }
 
-            m_activeHttpHandlers++;
-            std::thread([this, clientSocket]() {
-                HandleClient(clientSocket);
-                m_activeHttpHandlers--;
-            }).detach();
+    /* HTTP worker: owned by the service (joined in OnStop), never detached.
+     * Replaces the old `std::thread(...).detach()` per connection.       */
+    void HttpWorkerLoop() {
+        for (;;) {
+            SOCKET s = INVALID_SOCKET;
+            {
+                std::unique_lock<std::mutex> lock(m_socketMx);
+                m_socketCv.wait(lock, [this]{
+                    return m_shuttingDown.load() || !m_socketQueue.empty();
+                });
+                if (m_shuttingDown.load() && m_socketQueue.empty()) return;
+                s = m_socketQueue.front();
+                m_socketQueue.pop_front();
+            }
+            if (s == INVALID_SOCKET) continue;
+            try { HandleClient(s); }
+            catch (const std::exception& e) { ELLE_ERROR("HTTP worker: %s", e.what()); }
+            catch (...) { ELLE_ERROR("HTTP worker unknown exception"); }
         }
     }
 
@@ -1015,10 +1069,13 @@ private:
         /* Cap concurrent WS clients — reject new connections with 1013
          * ("try again later") if we're at the HTTPConfig cap. */
         uint32_t cap = MaxConcurrent();
-        if (cap > 0 && m_activeWsClients.load() >= cap) {
-            ELLE_WARN("WS cap %u reached — refusing new client", cap);
-            closesocket(clientSocket);
-            return;
+        {
+            std::lock_guard<std::mutex> lock(m_wsMutex);
+            if (cap > 0 && m_wsClients.size() >= cap) {
+                ELLE_WARN("WS cap %u reached — refusing new client", cap);
+                closesocket(clientSocket);
+                return;
+            }
         }
 
         {
@@ -1037,12 +1094,28 @@ private:
         };
         WsSendText(client->socket, client->sendMutex, welcome.dump());
 
-        /* Read loop */
-        m_activeWsClients++;
-        std::thread([this, client]() {
-            this->WebSocketReadLoop(client);
-            m_activeWsClients--;
-        }).detach();
+        /* Read loop — owned by the service (joined in OnStop), not detached.
+         * Previously detached std::thread + counter gave us no way to
+         * guarantee teardown ordering; now the service joins every reader. */
+        {
+            std::lock_guard<std::mutex> lock(m_wsThreadsMx);
+            /* Reap any finished threads opportunistically so the vector
+             * doesn't grow unbounded across thousands of connections.    */
+            for (auto it = m_wsThreads.begin(); it != m_wsThreads.end(); ) {
+                if (it->joinable() && m_reapableWsThreadIds.count(it->get_id())) {
+                    it->join();
+                    m_reapableWsThreadIds.erase(it->get_id());
+                    it = m_wsThreads.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            m_wsThreads.emplace_back([this, client]() {
+                this->WebSocketReadLoop(client);
+                std::lock_guard<std::mutex> lk(m_wsThreadsMx);
+                m_reapableWsThreadIds.insert(std::this_thread::get_id());
+            });
+        }
     }
 
     void WebSocketReadLoop(std::shared_ptr<WSClient> client) {

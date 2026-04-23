@@ -170,6 +170,50 @@ public:
                 if (!ok) result.error_code = 0x1002;
                 break;
             }
+            case ACTION_EXECUTE_CODE:
+            case ACTION_CUSTOM: {
+                /* Generic "do this" path. No arbitrary code execution is
+                 * permitted without a registered backend handler — that
+                 * would be a gaping security hole. Instead we:
+                 *   1) Persist the custom-action request to
+                 *      ElleCore.dbo.custom_action_requests so a future
+                 *      pluggable backend (or the user) can review it.
+                 *   2) Return a clear, honest failure with a reason so
+                 *      the caller knows it wasn't silently swallowed.
+                 * NO-STUB policy: we don't fake success. Previously
+                 * Cognitive mapped INTENT_EXECUTE_ACTION to an
+                 * ACTION_EXECUTE_CODE case that didn't exist at all —
+                 * now the route terminates in an honest logged failure.  */
+                ElleSQLPool::Instance().Exec(
+                    "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+                    "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                    "  WHERE t.name = 'custom_action_requests' AND s.name = 'dbo') "
+                    "CREATE TABLE ElleCore.dbo.custom_action_requests ("
+                    "  id BIGINT IDENTITY(1,1) PRIMARY KEY,"
+                    "  action_type INT NOT NULL,"
+                    "  command NVARCHAR(MAX) NOT NULL,"
+                    "  parameters NVARCHAR(MAX) NOT NULL,"
+                    "  intent_id BIGINT NULL,"
+                    "  status NVARCHAR(32) NOT NULL DEFAULT 'pending',"
+                    "  recorded_ms BIGINT NOT NULL"
+                    ");");
+                ElleSQLPool::Instance().QueryParams(
+                    "INSERT INTO ElleCore.dbo.custom_action_requests "
+                    "(action_type, command, parameters, intent_id, recorded_ms) "
+                    "VALUES (?, ?, ?, ?, ?);",
+                    { std::to_string((int)action.type),
+                      std::string(action.command),
+                      std::string(action.parameters),
+                      std::to_string((int64_t)action.intent_id),
+                      std::to_string((int64_t)ELLE_MS_NOW()) });
+                result.success    = false;
+                result.result     = std::string("No backend registered for ")
+                                  + (action.type == ACTION_EXECUTE_CODE
+                                       ? "ACTION_EXECUTE_CODE" : "ACTION_CUSTOM")
+                                  + " — request persisted to custom_action_requests";
+                result.error_code = 0x1003;
+                break;
+            }
             default:
                 result.result     = "Unknown action type: " + std::to_string(action.type);
                 result.error_code = 0x1FFF;
