@@ -849,6 +849,57 @@ bool ElleLLMEngine::Initialize() {
     }
 
     m_initialized = !m_providers.empty();
+
+    /* Validate primary/fallback provider references now (audit #85,
+     * Feb 2026). Previously an operator who typoed
+     * `fallback_provider: "antropic"` in elle_master_config.json would
+     * see no error -- SelectProvider() would silently fall through to
+     * "first available". Startup validation surfaces the mistake at
+     * the moment the mistake is made, which is the only moment the
+     * operator is actually looking at the config. Hard-fail only on
+     * real breakage: a non-empty name that doesn't resolve to a known
+     * provider id, OR resolves to one that failed to initialise.     */
+    auto nameKnown = [&](const std::string& n) -> bool {
+        if (n == "groq" || n == "openai" || n == "anthropic" ||
+            n == "lm_studio" || n == "local_llama" || n == "custom_api")
+            return true;
+        return false;
+    };
+    auto nameInitialised = [&](const std::string& n) -> bool {
+        if (n.empty()) return true; /* empty is legal -- "no primary set" */
+        ELLE_LLM_PROVIDER id =
+            n == "groq"        ? LLM_PROVIDER_GROQ :
+            n == "openai"      ? LLM_PROVIDER_OPENAI :
+            n == "anthropic"   ? LLM_PROVIDER_ANTHROPIC :
+            n == "lm_studio"   ? LLM_PROVIDER_LOCAL_LMSTUDIO :
+            n == "local_llama" ? LLM_PROVIDER_LOCAL_LLAMA :
+            n == "custom_api"  ? LLM_PROVIDER_CUSTOM_API :
+                                 (ELLE_LLM_PROVIDER)-1;
+        if (id == (ELLE_LLM_PROVIDER)-1) return false;
+        for (auto& p : m_providers) if (p->GetProviderId() == id) return true;
+        return false;
+    };
+    for (const char* role : { "primary_provider", "fallback_provider" }) {
+        const std::string& n =
+            std::string(role) == "primary_provider" ? cfg.primary_provider
+                                                     : cfg.fallback_provider;
+        if (n.empty()) continue;
+        if (!nameKnown(n)) {
+            ELLE_ERROR("Config llm.%s = '%s' is not a recognised provider "
+                       "name. Expected one of: groq, openai, anthropic, "
+                       "lm_studio, local_llama, custom_api.",
+                       role, n.c_str());
+            m_initialized = false;
+        } else if (!nameInitialised(n)) {
+            ELLE_ERROR("Config llm.%s = '%s' refers to a provider that "
+                       "has not been initialised (is it listed under "
+                       "llm.providers with enabled=true and a valid "
+                       "api_key / model_path?).",
+                       role, n.c_str());
+            m_initialized = false;
+        }
+    }
+
     return m_initialized;
 }
 

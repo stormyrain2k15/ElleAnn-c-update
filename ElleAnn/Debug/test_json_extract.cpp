@@ -172,6 +172,32 @@ int main() {
                "unbalanced prefix does not mask a later valid object");
     }
 
+    /* 17-22. Rich classification via ExtractJsonObjectEx.              */
+    {
+        using Elle::ExtractJsonObjectEx;
+        using Elle::JsonExtractResult;
+        json out;
+        EXPECT(ExtractJsonObjectEx("no braces here at all", out)
+               == JsonExtractResult::NoBraceFound,
+               "Ex: no-brace classification");
+        EXPECT(ExtractJsonObjectEx("{\"k\":1}", out) == JsonExtractResult::Ok
+               && out["k"] == 1,
+               "Ex: ok classification");
+        EXPECT(ExtractJsonObjectEx("{\"k\":", out)
+               == JsonExtractResult::Unbalanced,
+               "Ex: unbalanced classification");
+        EXPECT(ExtractJsonObjectEx("{definitely not json}", out)
+               == JsonExtractResult::ParseFailed,
+               "Ex: parse-failed classification");
+        std::string nulStr;
+        nulStr.push_back('{'); nulStr.push_back(0); nulStr.push_back('}');
+        EXPECT(ExtractJsonObjectEx(nulStr, out) == JsonExtractResult::FailClosed,
+               "Ex: fail-closed on embedded NUL");
+        EXPECT(ExtractJsonObjectEx(std::string(2048, '{'), out)
+               == JsonExtractResult::FailClosed,
+               "Ex: fail-closed on runaway depth");
+    }
+
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -84,31 +84,72 @@ namespace {
                              * this, any valid JSON that contains Unicode
                              * escapes (emoji, non-ASCII identifiers, escaped
                              * quotes encoded as \u0022, etc.) was silently
-                             * mis-decoded into literal "u", 4 hex chars.    */
-                            if (pos + 4 >= src.size()) break;
+                             * mis-decoded into literal "u", 4 hex chars.
+                             *
+                             * Surrogate-pair handling (audit #75, Feb 2026):
+                             * codepoints above U+FFFF are encoded in JSON as
+                             * a pair of \uXXXX escapes (high-surrogate
+                             * D800–DBFF followed by low-surrogate DC00–DFFF),
+                             * e.g. \uD83D\uDE00 → U+1F600 (😀). Previously we
+                             * UTF-8-encoded each half independently, which
+                             * is invalid UTF-8 (the 0xD800–0xDFFF range is
+                             * reserved for UTF-16 and has no UTF-8 mapping).
+                             * Downstream code that wrote those bytes to SQL
+                             * or compared them with valid emoji strings
+                             * silently diverged.                              */
+                            auto readHex4 = [&](size_t at, unsigned& out) -> bool {
+                                if (at + 3 >= src.size()) return false;
+                                out = 0;
+                                for (int k = 0; k < 4; k++) {
+                                    char c = src[at + k];
+                                    unsigned d;
+                                    if      (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+                                    else if (c >= 'a' && c <= 'f') d = 10u + (unsigned)(c - 'a');
+                                    else if (c >= 'A' && c <= 'F') d = 10u + (unsigned)(c - 'A');
+                                    else return false;
+                                    out = (out << 4) | d;
+                                }
+                                return true;
+                            };
                             unsigned cp = 0;
-                            bool ok = true;
-                            for (int k = 1; k <= 4; k++) {
-                                char c = src[pos + k];
-                                unsigned d;
-                                if      (c >= '0' && c <= '9') d = c - '0';
-                                else if (c >= 'a' && c <= 'f') d = 10 + c - 'a';
-                                else if (c >= 'A' && c <= 'F') d = 10 + c - 'A';
-                                else { ok = false; break; }
-                                cp = (cp << 4) | d;
-                            }
-                            if (!ok) break;
+                            if (!readHex4(pos + 1, cp)) break;
                             pos += 4;
-                            /* UTF-8 encode the codepoint. */
+                            /* High-surrogate? Look for the paired low-surrogate
+                             * as the very next `\uXXXX`.                       */
+                            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                                unsigned lo = 0;
+                                if (pos + 6 < src.size() &&
+                                    src[pos + 1] == '\\' && src[pos + 2] == 'u' &&
+                                    readHex4(pos + 3, lo) &&
+                                    lo >= 0xDC00 && lo <= 0xDFFF) {
+                                    cp = 0x10000u
+                                       + (((cp - 0xD800u) << 10) | (lo - 0xDC00u));
+                                    pos += 6;  /* consume the \uXXXX low half */
+                                } else {
+                                    /* Unpaired high-surrogate -- JSON is
+                                     * malformed. Emit U+FFFD (replacement).  */
+                                    cp = 0xFFFD;
+                                }
+                            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                                /* Unpaired low-surrogate.                    */
+                                cp = 0xFFFD;
+                            }
+                            /* UTF-8 encode the codepoint, now including the
+                             * 4-byte form for cp >= 0x10000.                  */
                             if (cp < 0x80) {
                                 result += (char)cp;
                             } else if (cp < 0x800) {
                                 result += (char)(0xC0 | (cp >> 6));
                                 result += (char)(0x80 | (cp & 0x3F));
-                            } else {
+                            } else if (cp < 0x10000) {
                                 result += (char)(0xE0 | (cp >> 12));
                                 result += (char)(0x80 | ((cp >> 6) & 0x3F));
                                 result += (char)(0x80 | (cp & 0x3F));
+                            } else {
+                                result += (char)(0xF0 |  (cp >> 18));
+                                result += (char)(0x80 | ((cp >> 12) & 0x3F));
+                                result += (char)(0x80 | ((cp >>  6) & 0x3F));
+                                result += (char)(0x80 |  (cp        & 0x3F));
                             }
                             break;
                         }

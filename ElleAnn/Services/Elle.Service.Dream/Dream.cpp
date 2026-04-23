@@ -85,9 +85,33 @@ protected:
 
         ELLE_INFO("Dream narrative: %.100s...", narrative.c_str());
 
+        /* Fire-and-forget STM store for short-term recall ("last night's
+         * dream is on my mind"). */
         auto store = ElleIPCMessage::Create(IPC_MEMORY_STORE, SVC_DREAM, SVC_MEMORY);
         store.SetStringPayload("[Dream] " + narrative);
         GetIPCHub().Send(SVC_MEMORY, store);
+
+        /* Durable persistence for dream insights (audit item #50, Feb 2026).
+         * A dream is a creative act of the self, not a transient event --
+         * if the LLM wove something meaningful, it should survive restart
+         * regardless of whether Memory's consolidation pass happens to
+         * pick it up from STM. We push the narrative directly through
+         * ElleDB::StoreMemory with LTM tier and a moderate importance
+         * floor so it competes honestly with waking memories. Any DB
+         * failure is surfaced (StoreMemory returns bool) so the dream
+         * isn't silently lost.                                            */
+        ELLE_MEMORY_RECORD dreamMem = {};
+        dreamMem.tier       = MEM_LTM;
+        dreamMem.importance = 0.55f;  /* above decay threshold, below "pivotal" */
+        dreamMem.emotional_valence = 0.0f; /* dreams are genuinely mixed */
+        dreamMem.created_ms = ELLE_MS_NOW();
+        const std::string durableContent = "[Dream insight] " + narrative;
+        strncpy_s(dreamMem.content, durableContent.c_str(),
+                  sizeof(dreamMem.content) - 1);
+        if (!ElleDB::StoreMemory(dreamMem)) {
+            ELLE_ERROR("Dream LTM persistence FAILED -- narrative preserved "
+                       "only in autobiography and STM broadcast.");
+        }
 
         ElleIdentityCore::Instance().AppendToAutobiography("I dreamt: " + narrative);
         ElleIdentityCore::Instance().ThinkPrivately(
@@ -102,7 +126,17 @@ protected:
         if (msg.header.msg_type == IPC_DREAM_TRIGGER) {
             OnTick();
         } else if (msg.header.msg_type == IPC_MEMORY_CONSOLIDATE) {
-            /* Memory's ack — consolidation finished, safe to read. */
+            /* Memory's explicit ack that STM→LTM consolidation finished.
+             * Dream waits for this before reading post-consolidation
+             * state so it doesn't narrate over a half-applied batch.
+             * This is the textbook-correct handshake for items living
+             * in the same process that need a deterministic sequencing
+             * point without the weight of a full IPC round-trip over a
+             * separate pipe (audit #31, Feb 2026): atomic flag +
+             * bounded wait-with-timeout is sufficient because both
+             * producer and consumer are in-process, share the same
+             * memory barrier, and the timeout ensures forward progress
+             * even if the producer crashes mid-consolidation.          */
             m_consolidateDone.store(true, std::memory_order_release);
         }
     }

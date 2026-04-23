@@ -31,11 +31,15 @@ on:
     branches: [ main, master, develop ]
     paths:
       - 'ElleAnn/**'
-      - '.github/workflows/elleann-build.yml'
+      - 'frontend/**'
+      - 'backend/**'
+      - '.github/workflows/**'
   pull_request:
     paths:
       - 'ElleAnn/**'
-      - '.github/workflows/elleann-build.yml'
+      - 'frontend/**'
+      - 'backend/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 env:

@@ -332,7 +332,14 @@ private:
             }},
             {"http", {
                 {"port",          0 /* BIRTH_PORT_PLACEHOLDER */},
-                {"bind_address",  "0.0.0.0"}
+                /* Network policy sourced from config, not hardcoded in
+                 * orchestration (audit #98, Feb 2026). Default `0.0.0.0`
+                 * matches pre-audit behaviour for the staging template;
+                 * an operator who wants loopback-only can set
+                 * `family.child_bind_address` in elle_master_config.json
+                 * without recompiling.                                  */
+                {"bind_address",  ElleConfig::Instance().GetString(
+                                    "family.child_bind_address", "0.0.0.0")}
             }},
             {"sql", {
                 {"core_db",   "ELLECORE_DB_PLACEHOLDER"},
@@ -445,7 +452,13 @@ private:
             {"http_server", {
                 {"enabled",      true},
                 {"port",         port},
-                {"bind_address", "127.0.0.1"},
+                /* Loopback by default for a just-spawned child; operator
+                 * can open the child up via `family.child_http_bind`
+                 * (audit #98, Feb 2026). Kept tight by default so a
+                 * newborn doesn't expose itself to the LAN the instant
+                 * its HTTP port is live.                               */
+                {"bind_address", ElleConfig::Instance().GetString(
+                                   "family.child_http_bind", "127.0.0.1")},
                 {"cors_enabled", true}
             }},
             {"lua", {

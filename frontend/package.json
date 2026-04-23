@@ -58,7 +58,14 @@
   "scripts": {
     "start": "craco start",
     "build": "craco build",
-    "test": "craco test"
+    "test": "craco test",
+    "lint": "eslint src --max-warnings 0 --ext .js,.jsx,.ts,.tsx",
+    "lint:fix": "eslint src --fix --ext .js,.jsx,.ts,.tsx"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app"
+    ]
   },
   "browserslist": {
     "production": [
