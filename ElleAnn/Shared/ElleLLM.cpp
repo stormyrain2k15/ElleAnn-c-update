@@ -841,11 +841,33 @@ ELLE_LLM_RESPONSE ElleLLMEngine::Chat(const std::vector<LLMMessage>& messages,
                           || s.find("step-by-step") != std::string::npos
                           || s.find("analy")     != std::string::npos
                           || s.find("logic")     != std::string::npos;
-            float baseline = -1.0f; /* provider default */
+            /* Real baseline from the selected provider's config. If the
+             * provider returns a non-positive value (misconfigured), fall
+             * back to 0.7 — a sane mid-range default. Anything >= 0 is
+             * intentionally preserved so callers/config can pin 0.0 for
+             * deterministic output when they really want it.              */
+            float baseline = provider->GetBaselineTemperature();
+            if (baseline < 0.0f) baseline = 0.7f;
+
+            float adjusted = 0.0f;
+            bool  apply    = false;
             if (creative  && llm.creative_temp_boost != 0.0f) {
-                temperature = baseline + llm.creative_temp_boost;
+                adjusted = baseline + llm.creative_temp_boost;
+                apply = true;
             } else if (reasoning && llm.reasoning_temp_drop != 0.0f) {
-                temperature = baseline - llm.reasoning_temp_drop;
+                /* reasoning_temp_drop is stored as a negative delta in
+                 * config (e.g. -0.2 means "drop by 0.2"), so add — not
+                 * subtract — to produce a *lower* final temperature.     */
+                adjusted = baseline + llm.reasoning_temp_drop;
+                apply = true;
+            }
+            if (apply) {
+                /* Clamp to a provider-safe sampling range. Most chat APIs
+                 * reject > 2.0 and treat < 0 as "use default" — which
+                 * would silently undo the drop, so we floor at 0 instead.*/
+                if (adjusted < 0.0f) adjusted = 0.0f;
+                if (adjusted > 2.0f) adjusted = 2.0f;
+                temperature = adjusted;
             }
         }
     }

@@ -60,6 +60,15 @@ public:
     virtual ELLE_LLM_PROVIDER GetProviderId() const = 0;
     virtual std::string GetModelName() const = 0;
     virtual uint32_t EstimateTokens(const std::string& text) const = 0;
+
+    /* Baseline temperature from provider config — used by ElleLLMEngine::Chat
+     * when a caller leaves temperature unset (-1) and the config's creative/
+     * reasoning boosts need a real starting point. Without this, the boost
+     * math runs on top of a sentinel (-1.0f) and the provider silently
+     * ignores the resulting negative value and falls back to its own
+     * default, rendering the config knobs dead. Defaults to 0.7 when the
+     * provider cannot expose a configured baseline.                       */
+    virtual float GetBaselineTemperature() const = 0;
 };
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -83,6 +92,7 @@ public:
     ELLE_LLM_PROVIDER GetProviderId() const override { return m_providerId; }
     std::string GetModelName() const override { return m_config.model; }
     uint32_t EstimateTokens(const std::string& text) const override;
+    float GetBaselineTemperature() const override { return m_config.temperature; }
 
 private:
     ELLE_LLM_PROVIDER m_providerId;
@@ -150,6 +160,7 @@ public:
     ELLE_LLM_PROVIDER GetProviderId() const override { return LLM_PROVIDER_LOCAL_LLAMA; }
     std::string GetModelName() const override { return m_modelPath; }
     uint32_t EstimateTokens(const std::string& text) const override;
+    float GetBaselineTemperature() const override { return m_config.temperature; }
 
     /* Local-specific */
     bool IsModelLoaded() const { return m_model != nullptr; }

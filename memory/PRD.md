@@ -37,6 +37,28 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
   Continuity JSON context escapes `awayDesc`; cross-process
   `ElleIdentityCore::RefreshFromDatabase()` wired into every reader
   service's tick.
+- **Wave 3/4 audits**: Cognitive intent routing overhaul; owned worker
+  thread pools in HTTP/Cognitive (no more detached threads);
+  Visual Studio project tree (26 `.vcxproj` + `ElleAnn.sln`) + GitHub
+  Actions CI; `Consent` service + `Deploy.ps1`; `Family` service that
+  snapshots the core, strips personality, gestates, and spawns child
+  ESI processes via `CreateProcessW` into their own DBs; push-based
+  `ElleIdentityCore` (IPC delta fabric replacing DB polling); LLM
+  HTTPS/LM-Studio TLS toggle, strict-typed config, emotion-trigger
+  idempotent reload, child Lua path fix, `primary_provider` as
+  `std::string`, `creative_temp_boost` / `reasoning_temp_drop` wired
+  through `Chat()`.
+- **Wave 4 closure (Feb 2026)**:
+  1. `self_reflection_enabled` field mismatch fixed — SelfPrompt.cpp and
+     Solitude.cpp now read the real header field `self_reflection`.
+  2. LLM temperature knobs made mathematically live — added
+     `ILLMProvider::GetBaselineTemperature()`, Chat() now starts from a
+     real provider-configured baseline (falls back to 0.7), applies the
+     creative/reasoning delta, and clamps into [0, 2].
+  3. `.env.example` templates unblocked — root `.gitignore` was
+     swallowing them via `.env.*`; added `!.env.example` /
+     `!**/.env.example` override so the frontend and backend templates
+     are actually committed.
 
 ## P0 / P1 / P2 Backlog
 ### P0 — Blocked on User

@@ -466,3 +466,10 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+# Whitelist env templates so `frontend/.env.example` and `backend/.env.example`
+# are tracked. The `.env.*` glob above would otherwise swallow them, which
+# broke onboarding (App.js / server.py reference these files in error paths).
+!.env.example
+!**/.env.example
+
