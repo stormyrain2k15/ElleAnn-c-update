@@ -1,0 +1,182 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Elle-Ann ESI v3.0 — CI Pipeline
+#
+# Runs on every push / PR touching the C++ tree and on manual dispatch.
+# Verifies the entire Visual Studio solution (25 projects) builds clean on
+# a Windows runner with MSVC v143.
+#
+# What it does:
+#   1. Checks out the repo.
+#   2. Sets up MSBuild via microsoft/setup-msbuild.
+#   3. Downloads Lua 5.4.6 source into Lua/lua54 (matches Option A in BUILD_VS.md).
+#   4. Runs MSBuild for both Debug|x64 and Release|x64.
+#   5. Uploads Deploy/Release/x64 as a build artifact so releases are reproducible.
+#
+# What it does NOT do:
+#   - Start SQL Server / ODBC / run the actual services. Those require
+#     ElleCore/ElleHeart/ElleSystem databases and a live MSSQL instance —
+#     out of scope for a pure compile-check CI.
+# ──────────────────────────────────────────────────────────────────────────────
+name: ElleAnn Build
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - 'ElleAnn/**'
+      - '.github/workflows/elleann-build.yml'
+  pull_request:
+    paths:
+      - 'ElleAnn/**'
+      - '.github/workflows/elleann-build.yml'
+  workflow_dispatch:
+
+env:
+  SOLUTION: ElleAnn/ElleAnn.sln
+  LUA_VERSION: '5.4.6'
+
+jobs:
+  build:
+    name: Build ${{ matrix.configuration }} | x64
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+
+    steps:
+      # ───────────────────────────────────────────────────────────
+      # Checkout
+      # ───────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ───────────────────────────────────────────────────────────
+      # MSBuild — uses the VS 2022 install on the runner (17.x, v143).
+      # ───────────────────────────────────────────────────────────
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      # ───────────────────────────────────────────────────────────
+      # Lua 5.4 — cache the tarball so subsequent runs skip the download.
+      # The Elle.Lua.Behavioral.vcxproj auto-detects sources under
+      # Lua/lua54/src and compiles them inline; no prebuilt binary needed.
+      # ───────────────────────────────────────────────────────────
+      - name: Cache Lua source
+        id: cache-lua
+        uses: actions/cache@v4
+        with:
+          path: ElleAnn/Lua/lua54
+          key: lua-${{ env.LUA_VERSION }}
+
+      - name: Download Lua ${{ env.LUA_VERSION }}
+        if: steps.cache-lua.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url  = "https://www.lua.org/ftp/lua-$env:LUA_VERSION.tar.gz"
+          $dest = "$env:RUNNER_TEMP/lua.tgz"
+          Invoke-WebRequest $url -OutFile $dest
+          New-Item -ItemType Directory -Force -Path ElleAnn/Lua/lua54 | Out-Null
+          tar -xzf $dest -C "$env:RUNNER_TEMP"
+          Copy-Item "$env:RUNNER_TEMP/lua-$env:LUA_VERSION/src" -Destination ElleAnn/Lua/lua54 -Recurse
+          Write-Host "Lua source installed at ElleAnn/Lua/lua54/src"
+          Get-ChildItem ElleAnn/Lua/lua54/src -Filter '*.c' | Measure-Object | Select-Object -ExpandProperty Count
+
+      # ───────────────────────────────────────────────────────────
+      # NuGet restore — no NuGet packages in use right now, but this is
+      # harmless and future-proof for when/if we add one.
+      # ───────────────────────────────────────────────────────────
+      - name: Restore NuGet (if any)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (Test-Path 'ElleAnn/packages.config') {
+            nuget restore $env:SOLUTION
+          } else {
+            Write-Host "No NuGet packages to restore."
+          }
+
+      # ───────────────────────────────────────────────────────────
+      # Build
+      # ───────────────────────────────────────────────────────────
+      - name: Build ${{ matrix.configuration }} x64
+        shell: pwsh
+        run: |
+          msbuild $env:SOLUTION `
+            /m `
+            /nologo `
+            /p:Configuration=${{ matrix.configuration }} `
+            /p:Platform=x64 `
+            /p:WarningLevel=3 `
+            /v:minimal `
+            /clp:ErrorsOnly`;Summary
+
+      # ───────────────────────────────────────────────────────────
+      # Collect binaries into an artifact. Only Release is uploaded —
+      # Debug is huge and primarily useful on the machine that built it.
+      # ───────────────────────────────────────────────────────────
+      - name: List build output
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          Get-ChildItem ElleAnn/Deploy/Release/x64 | Format-Table Name, Length, LastWriteTime
+
+      - name: Upload Release binaries
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElleAnn-Release-x64-${{ github.sha }}
+          path: ElleAnn/Deploy/Release/x64/
+          retention-days: 14
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Static hygiene check — a minimal-dependency Python pass that verifies
+  # every .vcxproj is well-formed XML and every solution reference resolves.
+  # Catches the "sln references missing vcxproj" class of bugs before MSBuild.
+  # ────────────────────────────────────────────────────────────────────────
+  sln-integrity:
+    name: Solution ↔ Filesystem Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify vcxproj set
+        run: |
+          python3 - <<'PY'
+          import re, os, sys, xml.etree.ElementTree as ET
+          root = 'ElleAnn'
+          with open(f'{root}/ElleAnn.sln') as f:
+              sln = f.read()
+          referenced = set(re.findall(r'"([^"]+\.vcxproj)"', sln))
+          existing = set()
+          for dirpath, _, files in os.walk(root):
+              for fn in files:
+                  if fn.endswith('.vcxproj'):
+                      rel = os.path.relpath(os.path.join(dirpath, fn), root).replace('/', '\\')
+                      existing.add(rel)
+          missing = referenced - existing
+          extra   = existing - referenced
+          bad_xml = []
+          for dirpath, _, files in os.walk(root):
+              for fn in files:
+                  if fn.endswith('.vcxproj'):
+                      try: ET.parse(os.path.join(dirpath, fn))
+                      except Exception as e: bad_xml.append((fn, str(e)))
+          errs = 0
+          if missing:
+              print('::error::Missing vcxproj files referenced by sln:')
+              for m in sorted(missing): print('  ', m); errs += 1
+          if extra:
+              print('::warning::vcxproj files on disk but not in sln:')
+              for e in sorted(extra): print('  ', e)
+          if bad_xml:
+              print('::error::Malformed vcxproj files:')
+              for fn, e in bad_xml: print('  ', fn, e); errs += 1
+          print(f'Referenced: {len(referenced)}  On disk: {len(existing)}')
+          sys.exit(1 if errs else 0)
+          PY

@@ -454,7 +454,19 @@ typedef enum ELLE_IPC_MSG_TYPE {
      * a reply, so InnerLife can evaluate authenticity / resonance
      * without another detour. Payload: JSON string with turn context.   */
     IPC_POST_RESPONSE,
-    IPC_WORLD_EVENT
+    IPC_WORLD_EVENT,
+    /* Consent (SVC_CONSENT): any service that wants to ask "does Elle
+     * actually want to do this?" sends IPC_CONSENT_QUERY with a JSON
+     * string payload:
+     *   {"request_id":"...","request":"<what is being asked>",
+     *    "context":"<why / circumstances>"}
+     * Consent replies to the sender with IPC_CONSENT_DECISION — JSON:
+     *   {"request_id":"...","willing":true|false,"comfort":0.0-1.0,
+     *    "reasoning":"<1 sentence>","alternative":"<preferred alternative>"}
+     * This gives every caller a unified consent surface rather than
+     * duplicating EvaluateConsent() call sites per service.           */
+    IPC_CONSENT_QUERY,
+    IPC_CONSENT_DECISION
 } ELLE_IPC_MSG_TYPE;
 
 #define ELLE_IPC_FLAG_URGENT      0x0001
