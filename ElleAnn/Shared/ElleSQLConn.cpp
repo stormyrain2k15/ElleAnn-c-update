@@ -590,6 +590,23 @@ bool SubmitIntent(const ELLE_INTENT_RECORD& intent) {
 
 bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) {
     out.clear();
+    /* Self-healing schema: add the ProcessingMs column on first use if it
+     * isn't already there. Keeps fresh databases working without asking
+     * the operator to manually run ElleAnn_QueueReaperDelta.sql. The
+     * guard is IF NOT EXISTS so subsequent startups are a cheap metadata
+     * query, not a real ALTER. */
+    ElleSQLPool::Instance().Exec(
+        "IF NOT EXISTS (SELECT 1 FROM sys.columns "
+        "  WHERE object_id = OBJECT_ID(N'ElleCore.dbo.IntentQueue') "
+        "    AND name = N'ProcessingMs') "
+        "ALTER TABLE ElleCore.dbo.IntentQueue ADD ProcessingMs BIGINT NULL;");
+    ElleSQLPool::Instance().Exec(
+        "IF NOT EXISTS (SELECT 1 FROM sys.indexes "
+        "  WHERE name = N'IX_IntentQueue_Processing' "
+        "    AND object_id = OBJECT_ID(N'ElleCore.dbo.IntentQueue')) "
+        "CREATE INDEX IX_IntentQueue_Processing "
+        "  ON ElleCore.dbo.IntentQueue (Status, ProcessingMs);");
+
     /* ATOMIC CLAIM-ON-SELECT.
      *
      * Previously this called sp_GetPendingIntents which is a plain
@@ -605,9 +622,9 @@ bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) 
      * without blocking each other, and the UPDATE...OUTPUT guarantees
      * each row is observed by exactly one caller.
      *
-     * We also stop calling the stored proc for this path — matching
-     * the same atomic pattern HTTPServer already uses on
-     * hardware_actions in /api/ai/hardware/actions/pending.            */
+     * ProcessingMs is stamped in the same UPDATE so the reaper can
+     * measure consumer-deadline drift from claim time, not row
+     * creation time.                                                   */
     auto rs = ElleSQLPool::Instance().QueryParams(
         "UPDATE TOP (?) q WITH (ROWLOCK, READPAST) "
         "SET Status = ?, ProcessingMs = ? "

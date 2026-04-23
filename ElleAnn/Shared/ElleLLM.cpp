@@ -6,6 +6,7 @@
  ******************************************************************************/
 #include "ElleLLM.h"
 #include "ElleLogger.h"
+#include "json.hpp"
 
 #include <windows.h>
 #include <winhttp.h>
@@ -165,7 +166,9 @@ std::string LLMAPIProvider::BuildAnthropicBody(const std::vector<LLMMessage>& me
  * HTTP EXECUTION
  *──────────────────────────────────────────────────────────────────────────────*/
 std::string LLMAPIProvider::HTTPPost(const std::string& path, const std::string& body,
-                                      const std::vector<std::pair<std::string, std::string>>& headers) {
+                                     const std::vector<std::pair<std::string, std::string>>& headers,
+                                     int* outStatus) {
+    if (outStatus) *outStatus = 0;
     if (!m_hConnect) return "";
 
     std::wstring wPath(path.begin(), path.end());
@@ -192,6 +195,22 @@ std::string LLMAPIProvider::HTTPPost(const std::string& path, const std::string&
     }
 
     WinHttpReceiveResponse(hRequest, nullptr);
+
+    /* Capture HTTP status code so the caller can distinguish 200 from
+     * 429/500/502. Previously the body alone was returned, so an error
+     * JSON body from the provider was parsed as a failed completion
+     * without any signal that the HTTP layer already told us it
+     * wasn't going to work.                                            */
+    if (outStatus) {
+        DWORD status = 0;
+        DWORD statusLen = sizeof(status);
+        if (WinHttpQueryHeaders(hRequest,
+                                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX,
+                                &status, &statusLen, WINHTTP_NO_HEADER_INDEX)) {
+            *outStatus = (int)status;
+        }
+    }
 
     /* Read response */
     std::string response;
@@ -243,12 +262,33 @@ ELLE_LLM_RESPONSE LLMAPIProvider::Complete(const std::vector<LLMMessage>& messag
     }
 
     uint64_t startMs = ELLE_MS_NOW();
-    std::string response = HTTPPost(path, body, headers);
+    int httpStatus = 0;
+    std::string response = HTTPPost(path, body, headers, &httpStatus);
     resp.latency_ms = (float)(ELLE_MS_NOW() - startMs);
 
     if (response.empty()) {
         resp.success = 0;
-        strncpy_s(resp.error, "Empty response from API", sizeof(resp.error));
+        strncpy_s(resp.error,
+                  httpStatus == 0 ? "Empty response from API"
+                                  : ("HTTP " + std::to_string(httpStatus) +
+                                     " with empty body").c_str(),
+                  sizeof(resp.error));
+        return resp;
+    }
+
+    /* Fail-closed on non-2xx — the body is the provider's error text
+     * (rate-limit message / auth failure / etc.). Previously we fed
+     * this into the OpenAI/Anthropic parser and produced a "success"
+     * record with whatever garbage happened to coerce into the right
+     * shape.                                                           */
+    if (httpStatus < 200 || httpStatus >= 300) {
+        resp.success = 0;
+        std::string err = "HTTP " + std::to_string(httpStatus) + ": ";
+        /* Trim the body so it fits in the fixed error buffer. */
+        err.append(response, 0,
+                   sizeof(resp.error) - err.size() - 1);
+        strncpy_s(resp.error, err.c_str(), sizeof(resp.error));
+        resp.provider_used = m_providerId;
         return resp;
     }
 
@@ -342,94 +382,129 @@ bool LLMAPIProvider::HTTPPostStream(const std::string& path, const std::string& 
 /*──────────────────────────────────────────────────────────────────────────────
  * RESPONSE PARSING (minimal JSON extraction)
  *──────────────────────────────────────────────────────────────────────────────*/
-ELLE_LLM_RESPONSE LLMAPIProvider::ParseOpenAIResponse(const std::string& json) {
+ELLE_LLM_RESPONSE LLMAPIProvider::ParseOpenAIResponse(const std::string& body) {
     ELLE_LLM_RESPONSE resp = {};
 
-    /* Extract content from choices[0].message.content */
-    size_t contentStart = json.find("\"content\":");
-    if (contentStart == std::string::npos) {
-        /* Check for error */
-        size_t errStart = json.find("\"error\":");
-        if (errStart != std::string::npos) {
-            size_t msgStart = json.find("\"message\":", errStart);
-            if (msgStart != std::string::npos) {
-                size_t qStart = json.find('"', msgStart + 10) + 1;
-                size_t qEnd = json.find('"', qStart);
-                strncpy_s(resp.error, json.substr(qStart, qEnd - qStart).c_str(), sizeof(resp.error));
-            }
-        }
+    /* Schema-validated parse via nlohmann::json. Previously we used
+     * fragile substring matches on "\"content\":"; a provider that
+     * shipped a new sibling key with that exact token in its value
+     * (or a prompt that echoed the substring back inside a non-chat
+     * field) would flip the parser into picking up the wrong span.
+     * With a real parser we can be strict: choices[0].message.content
+     * must be a string, usage.* must be numbers or absent.              */
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(body);
+    } catch (const std::exception& e) {
+        resp.success = 0;
+        strncpy_s(resp.error,
+                  (std::string("json parse failed: ") + e.what()).c_str(),
+                  sizeof(resp.error));
         return resp;
     }
 
-    /* Find the content string value */
-    size_t qStart = json.find('"', contentStart + 10);
-    if (qStart == std::string::npos) return resp;
-    qStart++;
-
-    /* Handle escaped quotes in content */
-    std::string content;
-    for (size_t i = qStart; i < json.size(); i++) {
-        if (json[i] == '\\' && i + 1 < json.size()) {
-            switch (json[i + 1]) {
-                case '"':  content += '"'; i++; break;
-                case '\\': content += '\\'; i++; break;
-                case 'n':  content += '\n'; i++; break;
-                case 't':  content += '\t'; i++; break;
-                default:   content += json[i]; break;
-            }
-        } else if (json[i] == '"') {
-            break;
-        } else {
-            content += json[i];
-        }
-    }
-
-    strncpy_s(resp.content, content.c_str(), ELLE_MAX_RESPONSE - 1);
-    resp.success = 1;
-
-    /* Extract token usage */
-    auto extractInt = [&](const std::string& key) -> uint32_t {
-        size_t pos = json.find("\"" + key + "\":");
-        if (pos == std::string::npos) return 0;
-        pos += key.size() + 3;
-        return (uint32_t)std::strtol(json.c_str() + pos, nullptr, 10);
-    };
-
-    resp.tokens_prompt = extractInt("prompt_tokens");
-    resp.tokens_completion = extractInt("completion_tokens");
-    resp.tokens_total = extractInt("total_tokens");
-
-    return resp;
-}
-
-ELLE_LLM_RESPONSE LLMAPIProvider::ParseAnthropicResponse(const std::string& json) {
-    ELLE_LLM_RESPONSE resp = {};
-
-    size_t textStart = json.find("\"text\":");
-    if (textStart == std::string::npos) {
+    /* Provider-reported error object wins over content extraction. */
+    if (j.contains("error") && j["error"].is_object()) {
+        std::string msg = j["error"].value("message", std::string("provider error"));
+        strncpy_s(resp.error, msg.c_str(), sizeof(resp.error));
         resp.success = 0;
         return resp;
     }
 
-    size_t qStart = json.find('"', textStart + 7) + 1;
-    std::string content;
-    for (size_t i = qStart; i < json.size(); i++) {
-        if (json[i] == '\\' && i + 1 < json.size()) {
-            switch (json[i + 1]) {
-                case '"':  content += '"'; i++; break;
-                case '\\': content += '\\'; i++; break;
-                case 'n':  content += '\n'; i++; break;
-                default:   content += json[i]; break;
-            }
-        } else if (json[i] == '"') {
-            break;
-        } else {
-            content += json[i];
-        }
+    if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty()) {
+        strncpy_s(resp.error,
+                  "schema violation: missing or empty choices[]",
+                  sizeof(resp.error));
+        resp.success = 0;
+        return resp;
+    }
+    const auto& c0 = j["choices"][0];
+    if (!c0.is_object() || !c0.contains("message") || !c0["message"].is_object()) {
+        strncpy_s(resp.error,
+                  "schema violation: choices[0].message missing",
+                  sizeof(resp.error));
+        resp.success = 0;
+        return resp;
+    }
+    const auto& msg = c0["message"];
+    if (!msg.contains("content") || !msg["content"].is_string()) {
+        strncpy_s(resp.error,
+                  "schema violation: choices[0].message.content not a string",
+                  sizeof(resp.error));
+        resp.success = 0;
+        return resp;
     }
 
+    std::string content = msg["content"].get<std::string>();
     strncpy_s(resp.content, content.c_str(), ELLE_MAX_RESPONSE - 1);
     resp.success = 1;
+
+    if (j.contains("usage") && j["usage"].is_object()) {
+        const auto& u = j["usage"];
+        resp.tokens_prompt     = u.value("prompt_tokens",     (uint32_t)0);
+        resp.tokens_completion = u.value("completion_tokens", (uint32_t)0);
+        resp.tokens_total      = u.value("total_tokens",      (uint32_t)0);
+    }
+
+    return resp;
+}
+
+ELLE_LLM_RESPONSE LLMAPIProvider::ParseAnthropicResponse(const std::string& body) {
+    ELLE_LLM_RESPONSE resp = {};
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(body);
+    } catch (const std::exception& e) {
+        resp.success = 0;
+        strncpy_s(resp.error,
+                  (std::string("json parse failed: ") + e.what()).c_str(),
+                  sizeof(resp.error));
+        return resp;
+    }
+
+    /* Anthropic's error envelope: { "type":"error", "error": {...} } */
+    if (j.value("type", std::string("")) == "error" &&
+        j.contains("error") && j["error"].is_object()) {
+        std::string msg = j["error"].value("message", std::string("provider error"));
+        strncpy_s(resp.error, msg.c_str(), sizeof(resp.error));
+        resp.success = 0;
+        return resp;
+    }
+
+    if (!j.contains("content") || !j["content"].is_array() || j["content"].empty()) {
+        strncpy_s(resp.error,
+                  "schema violation: content[] missing or empty",
+                  sizeof(resp.error));
+        resp.success = 0;
+        return resp;
+    }
+
+    std::string assembled;
+    for (const auto& block : j["content"]) {
+        if (!block.is_object()) continue;
+        if (block.value("type", std::string("")) != "text") continue;
+        if (block.contains("text") && block["text"].is_string()) {
+            assembled += block["text"].get<std::string>();
+        }
+    }
+    if (assembled.empty()) {
+        strncpy_s(resp.error,
+                  "schema violation: no text blocks in content[]",
+                  sizeof(resp.error));
+        resp.success = 0;
+        return resp;
+    }
+
+    strncpy_s(resp.content, assembled.c_str(), ELLE_MAX_RESPONSE - 1);
+    resp.success = 1;
+
+    if (j.contains("usage") && j["usage"].is_object()) {
+        const auto& u = j["usage"];
+        resp.tokens_prompt     = u.value("input_tokens",  (uint32_t)0);
+        resp.tokens_completion = u.value("output_tokens", (uint32_t)0);
+        resp.tokens_total      = resp.tokens_prompt + resp.tokens_completion;
+    }
     return resp;
 }
 
@@ -630,21 +705,52 @@ std::string LLMLocalProvider::Generate(const std::string& prompt, uint32_t maxTo
     std::vector<char> tempCmd(cmdStr.begin(), cmdStr.end());
     tempCmd.push_back('\0');
 
-    /* Spawn with a pipe on stdout. */
+    /* Spawn with a pipe on stdout. To avoid leaking unrelated parent
+     * handles into the child — logger file handles, SQL ODBC sockets,
+     * other services' named pipes — we use STARTUPINFOEX with a
+     * PROC_THREAD_ATTRIBUTE_HANDLE_LIST restricted to just the write
+     * pipe. Without this, passing `bInheritHandles=TRUE` (which we MUST
+     * do to give the child our write pipe) would also hand it every
+     * other inheritable handle the service happened to be holding.
+     * stdin is explicitly NULL — the service process has no real stdin
+     * and we don't want the child blocking on one.                      */
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
     HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
     if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) return "";
     SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOA si = {}; si.cb = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdOutput = hWritePipe;
-    si.hStdError  = hWritePipe;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    SIZE_T attrSize = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    std::vector<char> attrBuf(attrSize);
+    LPPROC_THREAD_ATTRIBUTE_LIST attrList =
+        reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrBuf.data());
+    if (!InitializeProcThreadAttributeList(attrList, 1, 0, &attrSize)) {
+        CloseHandle(hReadPipe); CloseHandle(hWritePipe);
+        return "";
+    }
+    HANDLE inheritOnly[1] = { hWritePipe };
+    if (!UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                    inheritOnly, sizeof(inheritOnly),
+                                    nullptr, nullptr)) {
+        DeleteProcThreadAttributeList(attrList);
+        CloseHandle(hReadPipe); CloseHandle(hWritePipe);
+        return "";
+    }
+
+    STARTUPINFOEXA siex = {};
+    siex.StartupInfo.cb         = sizeof(siex);
+    siex.StartupInfo.dwFlags    = STARTF_USESTDHANDLES;
+    siex.StartupInfo.hStdOutput = hWritePipe;
+    siex.StartupInfo.hStdError  = hWritePipe;
+    siex.StartupInfo.hStdInput  = nullptr;
+    siex.lpAttributeList        = attrList;
 
     PROCESS_INFORMATION pi = {};
     BOOL ok = CreateProcessA(nullptr, tempCmd.data(), nullptr, nullptr, TRUE,
-                              CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+                              CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                              nullptr, nullptr,
+                              reinterpret_cast<LPSTARTUPINFOA>(&siex), &pi);
+    DeleteProcThreadAttributeList(attrList);
     CloseHandle(hWritePipe);
     if (!ok) { CloseHandle(hReadPipe); return ""; }
 

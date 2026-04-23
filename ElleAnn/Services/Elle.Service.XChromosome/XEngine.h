@@ -404,6 +404,10 @@ private:
     void     WriteSnapshotRow();
     void     PersistCycleRow();
     void     PersistPregnancyRow();
+    void     ArchivePregnancyRow(const std::string& outcome,
+                                 uint64_t ended_ms,
+                                 uint64_t gestational_days,
+                                 int multiplicity);
     void     PersistContraceptionRow();
     void     PersistLifecycleRow();
     void     LogPregnancyEvent(const std::string& kind,

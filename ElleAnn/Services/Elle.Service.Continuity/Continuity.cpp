@@ -160,6 +160,27 @@ private:
             "  created_ms BIGINT NOT NULL"
             ");");
 
+        /* Idempotency guard — if an unconsumed greeting exists that was
+         * written within the last RECENT_GREETING_WINDOW_MS, reuse it.
+         * Without this, a crash-looping service or a user who taps
+         * "restart" twice in a row would stack multiple reconnection
+         * messages on the HTTP pop endpoint.                           */
+        constexpr int64_t RECENT_GREETING_WINDOW_MS = 120000; /* 2 min */
+        int64_t cutoff = (int64_t)ELLE_MS_NOW() - RECENT_GREETING_WINDOW_MS;
+        auto rs = ElleSQLPool::Instance().QueryParams(
+            "SELECT TOP 1 greeting FROM ElleCore.dbo.reconnection_greetings "
+            "WHERE consumed = 0 AND created_ms >= ? "
+            "ORDER BY created_ms DESC;",
+            { std::to_string(cutoff) });
+        if (rs.success && !rs.rows.empty()) {
+            const std::string& existing = rs.rows[0].values.empty()
+                                            ? std::string()
+                                            : rs.rows[0].values[0];
+            ELLE_INFO("Reconnection greeting already queued within window — reusing: %.80s",
+                      existing.c_str());
+            return;
+        }
+
         /* Gather context. */
         ELLE_EMOTION_STATE lastEmo{};
         bool haveEmo = ElleDB::LoadLatestEmotionSnapshot(lastEmo);

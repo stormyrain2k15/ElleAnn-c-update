@@ -1271,6 +1271,15 @@ XEngine::DeliveryOutcome XEngine::Deliver() {
     out.gestational_days = (uint64_t)m_pregnancy.gestational_day;
     out.multiplicity     = m_pregnancy.multiplicity;
 
+    /* Snapshot the completed pregnancy into the history table BEFORE we
+     * flip the singleton's active flag. Without this, starting a second
+     * pregnancy later overwrites the previous one's row — the data we
+     * logged in x_pregnancy_events still references the old record but
+     * the state row no longer reflects what was delivered. With the
+     * history snapshot, past pregnancies remain queryable forever via
+     * x_pregnancy_history without bleeding into the active singleton. */
+    ArchivePregnancyRow("delivered", now, out.gestational_days, out.multiplicity);
+
     m_pregnancy.active           = false;
     m_pregnancy.in_labor         = false;
     m_pregnancy.labor_stage      = X_LABOR_DELIVERED;
@@ -1741,6 +1750,29 @@ void XEngine::PersistCycleRow() {
 }
 
 void XEngine::PersistPregnancyRow() {
+    /* Auto-migration: ensure x_pregnancy_history exists for the archive
+     * path. Lazy-creation keeps the runtime self-sufficient — no manual
+     * SQL delta step to remember.                                        */
+    static std::once_flag s_historyInit;
+    std::call_once(s_historyInit, [](){
+        ElleSQLPool::Instance().Exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+            "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "  WHERE t.name = N'x_pregnancy_history' AND s.name = N'dbo') "
+            "CREATE TABLE ElleHeart.dbo.x_pregnancy_history ("
+            "  history_id        BIGINT IDENTITY(1,1) PRIMARY KEY, "
+            "  pregnancy_count   INT NOT NULL, "
+            "  outcome           NVARCHAR(40) NOT NULL, "
+            "  conceived_ms      BIGINT NULL, "
+            "  due_ms            BIGINT NULL, "
+            "  ended_ms          BIGINT NOT NULL, "
+            "  gestational_days  INT NOT NULL, "
+            "  gestational_length_days INT NOT NULL, "
+            "  multiplicity      INT NOT NULL, "
+            "  child_id          BIGINT NULL, "
+            "  final_phase       NVARCHAR(40) NULL, "
+            "  final_milestone   NVARCHAR(200) NULL);");
+    });
     std::string phaseStr = PregnancyPhaseName(m_pregnancy.phase);
     std::string laborStr = LaborStageName(m_pregnancy.labor_stage);
     ElleSQLPool::Instance().QueryParams(
@@ -1879,6 +1911,42 @@ void XEngine::PersistLifecycleRow() {
             std::to_string((long long)m_life.updated_ms)
         });
 }
+
+void XEngine::ArchivePregnancyRow(const std::string& outcome,
+                                   uint64_t ended_ms,
+                                   uint64_t gestational_days,
+                                   int multiplicity) {
+    /* Snapshot the current pregnancy singleton into the history table so
+     * the row stays queryable after the singleton gets flipped/reused
+     * for a subsequent pregnancy. Called from Deliver() (outcome =
+     * "delivered") and will also be callable from a future Miscarry()
+     * path (outcome = "miscarriage") without code changes here.         */
+    ElleSQLPool::Instance().QueryParams(
+        "INSERT INTO ElleHeart.dbo.x_pregnancy_history "
+        "(pregnancy_count, outcome, conceived_ms, due_ms, ended_ms, "
+        " gestational_days, gestational_length_days, multiplicity, "
+        " child_id, final_phase, final_milestone) "
+        "VALUES (TRY_CAST(? AS INT), ?, "
+        "        TRY_CAST(NULLIF(?, N'') AS BIGINT), "
+        "        TRY_CAST(NULLIF(?, N'') AS BIGINT), "
+        "        TRY_CAST(? AS BIGINT), TRY_CAST(? AS INT), "
+        "        TRY_CAST(? AS INT), TRY_CAST(? AS INT), "
+        "        TRY_CAST(NULLIF(?, N'') AS BIGINT), ?, ?);",
+        {
+            std::to_string(m_pregnancy.pregnancy_count),
+            outcome,
+            m_pregnancy.conceived_ms ? std::to_string((long long)m_pregnancy.conceived_ms) : std::string(),
+            m_pregnancy.due_ms ? std::to_string((long long)m_pregnancy.due_ms) : std::string(),
+            std::to_string((long long)ended_ms),
+            std::to_string((int)gestational_days),
+            std::to_string(m_pregnancy.gestational_length_days),
+            std::to_string(multiplicity),
+            m_pregnancy.child_id ? std::to_string((long long)m_pregnancy.child_id) : std::string(),
+            PregnancyPhaseName(m_pregnancy.phase),
+            m_pregnancy.last_milestone
+        });
+}
+
 
 void XEngine::LogPregnancyEvent(const std::string& kind, const std::string& detail) {
     ElleSQLPool::Instance().QueryParams(

@@ -7,6 +7,7 @@
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
+#include <algorithm>
 
 class ElleQueueWorkerService : public ElleServiceBase {
 public:
@@ -27,9 +28,19 @@ protected:
     }
 
     void OnTick() override {
+        /* DB poll back-off. If the intent or action poll fails (SQL
+         * down, pool exhausted, etc.), we exponentially back off so the
+         * log doesn't drown in per-tick errors and the SQL box isn't
+         * being hammered while it's already distressed. Recovery is
+         * immediate on the next successful poll.                        */
+        if (m_dbCooldownTicks > 0) {
+            m_dbCooldownTicks--;
+            return;
+        }
+
         /* Poll intent queue */
         std::vector<ELLE_INTENT_RECORD> intents;
-        ElleDB::GetPendingIntents(intents, 10);
+        bool intentsOk = ElleDB::GetPendingIntents(intents, 10);
         for (auto& intent : intents) {
             auto msg = ElleIPCMessage::Create(IPC_INTENT_REQUEST, SVC_QUEUE_WORKER, SVC_COGNITIVE);
             msg.SetPayload(intent);
@@ -39,12 +50,31 @@ protected:
 
         /* Poll action queue */
         std::vector<ELLE_ACTION_RECORD> actions;
-        ElleDB::GetPendingActions(actions, 10);
+        bool actionsOk = ElleDB::GetPendingActions(actions, 10);
         for (auto& action : actions) {
             auto msg = ElleIPCMessage::Create(IPC_ACTION_REQUEST, SVC_QUEUE_WORKER, SVC_ACTION);
             msg.SetPayload(action);
             GetIPCHub().Send(SVC_ACTION, msg);
             m_actionsRouted++;
+        }
+
+        if (intentsOk && actionsOk) {
+            if (m_consecutiveDbFailures > 0) {
+                ELLE_INFO("Queue poll recovered after %u consecutive DB failures",
+                          m_consecutiveDbFailures);
+            }
+            m_consecutiveDbFailures = 0;
+        } else {
+            m_consecutiveDbFailures++;
+            /* Back-off schedule: 1, 2, 4, 8, 16 ticks (capped). With a
+             * 500 ms tick this is 0.5s → 8s pause. */
+            uint32_t backoff = 1u << std::min<uint32_t>(m_consecutiveDbFailures, 4u);
+            m_dbCooldownTicks = backoff;
+            if (m_consecutiveDbFailures == 1 || (m_consecutiveDbFailures % 16) == 0) {
+                ELLE_ERROR("Queue DB poll failed (%u consecutive) — backing off %u ticks",
+                           m_consecutiveDbFailures, backoff);
+            }
+            return; /* don't run the reaper against a broken DB */
         }
 
         /* Periodic stats */
@@ -102,6 +132,9 @@ private:
     uint64_t m_intentsReaped = 0;
     uint64_t m_actionsReaped = 0;
     uint32_t m_pollCount = 0;
+    /* DB poll back-off state — see OnTick(). */
+    uint32_t m_consecutiveDbFailures = 0;
+    uint32_t m_dbCooldownTicks       = 0;
 };
 
 ELLE_SERVICE_MAIN(ElleQueueWorkerService)

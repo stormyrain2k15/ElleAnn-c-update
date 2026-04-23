@@ -41,11 +41,46 @@ static bool NearlyEqual(float a, float b, float tol = 0.05f) {
 int main() {
     std::cout << "=== Elle-Ann Identity Persistence Round-Trip Harness ===\n\n";
 
+    /* SAFETY GATE — this harness WIPES identity tables on whatever DB it
+     * can reach. Refuse to run unless the operator has deliberately set
+     * ELLE_TEST_DESTRUCTIVE=1 (shell env). That way nobody can
+     * accidentally detonate a real user's autobiography by launching
+     * this exe in the wrong working directory.
+     *
+     * Additionally, if the resolved connection string does not contain
+     * a "Test" or "ElleTest" database-name fragment we abort — the
+     * test writes to ElleCore.dbo.identity_*, so we require the caller
+     * to be pointing at a sandboxed DB instance.                        */
+    {
+        char* flag = nullptr;
+        size_t flagLen = 0;
+        _dupenv_s(&flag, &flagLen, "ELLE_TEST_DESTRUCTIVE");
+        bool allow = (flag && flagLen > 0 && flag[0] == '1');
+        if (flag) free(flag);
+        if (!allow) {
+            std::cerr << "REFUSED: ELLE_TEST_DESTRUCTIVE=1 not set. This harness "
+                      << "wipes identity tables; set the env var to confirm.\n";
+            return 2;
+        }
+    }
+
     if (!ElleConfig::Instance().Load("elle_master_config.json")) {
         std::cerr << "Failed to load elle_master_config.json\n";
         return 2;
     }
     auto& svc = ElleConfig::Instance().GetService();
+    {
+        std::string cs = svc.sql_connection_string;
+        std::string csLower;
+        csLower.reserve(cs.size());
+        for (char c : cs) csLower += (char)tolower((unsigned char)c);
+        if (csLower.find("test") == std::string::npos) {
+            std::cerr << "REFUSED: sql_connection_string does not contain 'test'. "
+                      << "Point elle_master_config.json at a sandbox DB (e.g. "
+                      << "Database=ElleCoreTest) before running this harness.\n";
+            return 2;
+        }
+    }
     if (!ElleSQLPool::Instance().Initialize(svc.sql_connection_string, 2)) {
         std::cerr << "SQL pool init failed — check the connection string.\n";
         return 2;

@@ -15,7 +15,8 @@ named pipes and persist to SQL Server.
 
 ```
 ElleAnn.sln                          ← 26 C++ projects + solution folders
-├── Directory.Build.props            ← Shared MSBuild props (C++17, x64, /W4)
+├── Directory.Build.props            ← Shared MSBuild props (C++20, x64,
+│                                      Level4 + warnings-as-errors)
 ├── elle_master_config.json          ← Single runtime config document
 │
 ├── Shared/                          ← ElleCore.Shared (static library)
@@ -119,6 +120,8 @@ ElleAnn.sln                          ← 26 C++ projects + solution folders
 │   │                                  Bonds, LoveScore, ChildProcesses
 │   ├── ElleAnn_Identity_Schema.sql  ← Identity fabric + delta journal
 │   ├── ElleAnn_MemoryDelta.sql      ← Memory subsystem deltas
+│   ├── ElleAnn_QueueReaperDelta.sql ← IntentQueue.ProcessingMs column
+│   │                                  (also auto-applied on first poll)
 │   ├── ElleAnn_XChromosome_Schema.sql  ← x_hormone_snapshots,
 │   │                                     x_pregnancy_state, x_symptoms,
 │   │                                     x_conception_attempts

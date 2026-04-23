@@ -116,9 +116,13 @@ private:
     std::string BuildAnthropicBody(const std::vector<LLMMessage>& messages,
                                     float temperature, uint32_t maxTokens, bool stream);
 
-    /* HTTP execution */
+    /* HTTP execution. `HTTPPost` returns the body as a string and writes
+     * the HTTP status code to `outStatus`. Non-2xx responses still fill
+     * the body (so we can surface the provider's error text) but let
+     * the caller refuse to parse garbage as a chat completion.          */
     std::string HTTPPost(const std::string& path, const std::string& body,
-                         const std::vector<std::pair<std::string, std::string>>& headers);
+                         const std::vector<std::pair<std::string, std::string>>& headers,
+                         int* outStatus = nullptr);
     bool HTTPPostStream(const std::string& path, const std::string& body,
                         const std::vector<std::pair<std::string, std::string>>& headers,
                         std::function<void(const std::string& chunk)> onChunk);

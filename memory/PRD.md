@@ -64,13 +64,60 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
   `first_repair_ms` (added as idempotent `ALTER TABLE`), so restarting
   mid-conflict no longer erases the tension.
 
-### P1 — Parsers / Config / LLM / JSON (partial this session)
+### P1 — Parsers / Config / LLM / JSON (mostly done this session)
 - `ElleConfig::Load` validates that `llm`, `emotion`, `memory`, `http`,
   `services` are all present as Object, `llm.mode ∈ {api,local,hybrid}`,
   and `llm.providers` is a non-empty object — otherwise fail-closed.
 - `ElleSelfSurprise` score parsing replaced the "any digit 6-9 in the
   prose" heuristic with strict JSON extraction (`ExtractJsonObject`) plus
   a narrowed digit-scan fallback that requires score context.
+- `LLMAPIProvider::HTTPPost` now returns the HTTP status code; `Complete()`
+  fails closed on non-2xx instead of feeding the provider's error body
+  to the parsers.
+- `ParseOpenAIResponse` and `ParseAnthropicResponse` rewritten on
+  nlohmann::json with strict schema checks — no more fragile substring
+  matching against `"content":`.
+- `HTTPRequest::BodyJSON()` was already strict (throws on trailing
+  garbage, non-JSON) and raises 400 via the HandleClient wrapper. No
+  change needed.
+
+### P1 — DB Poll Failure Handling (this session)
+- `QueueWorker::OnTick` now detects consecutive SQL failures and
+  exponentially backs off (1→2→4→8→16 ticks) instead of hammering a
+  stressed DB at 500 ms. Recovery is immediate on the first successful
+  poll, with a one-liner log.
+- `GetPendingIntents` auto-applies the `ProcessingMs` column + index on
+  first use (`IF NOT EXISTS`) so nobody has to remember to hand-run the
+  delta SQL — the code is self-healing.
+- `XEngine::PersistPregnancyRow` auto-creates `x_pregnancy_history` on
+  first call (`std::once_flag` + `IF NOT EXISTS`).
+
+### P1 — Reconnection Idempotency (this session)
+- `Continuity::GenerateReconnectionGreeting` refuses to queue a new
+  greeting if an unconsumed one less than 2 minutes old already exists —
+  a crash-looping service can no longer stack welcome-back messages.
+
+### P1 — XEngine Historical Pregnancy Separation (this session)
+- `Deliver()` now snapshots the completed pregnancy into the new
+  `x_pregnancy_history` table BEFORE flipping the singleton's `active`
+  flag. Past pregnancies stay queryable forever; future `Miscarry()`
+  or spontaneous-abortion paths can reuse `ArchivePregnancyRow()` with
+  `outcome="miscarriage"` for free.
+
+### P1 — Handle Inheritance Leakage (this session)
+- `ElleLLMEngine::RunLocalProvider` (llama-cli spawn) moved from raw
+  `CreateProcessA` with `bInheritHandles=TRUE` to `STARTUPINFOEXA` +
+  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` restricting inheritance to the
+  single write-pipe. Previously all inheritable handles — logger
+  files, ODBC sockets, other services' named pipes — leaked into the
+  child. `stdin` is now nullptr (a service has no real stdin).
+
+### P2 — Destructive Test Isolation (this session)
+- `Debug/test_identity_persistence.cpp` now refuses to run unless
+  `ELLE_TEST_DESTRUCTIVE=1` is set AND the resolved
+  `sql_connection_string` contains `"test"` (case-insensitive).
+  Previously running the exe in the production working directory
+  would wipe the user's real autobiography.
 
 ### P1 — Deploy / Install / Ops (DONE this session)
 - `Install-ElleServices.ps1` is now STRICT: missing .exe fails the whole
@@ -100,32 +147,30 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
       expect a batch of genuine warnings (truncation, signed/unsigned,
       deprecated API) to surface; those were the loudest category of
       real bugs masked by the previous suppression list.
-- [ ] User applies `SQL/ElleAnn_QueueReaperDelta.sql` to the ElleCore DB
-      before running the new `GetPendingIntents` / `ReapStaleIntents`.
+- NOTE: `SQL/ElleAnn_QueueReaperDelta.sql` is now **auto-applied** on
+        first pending-intent poll and on first pregnancy persist — no
+        manual DB step required. Delta file retained for reference /
+        fresh-install DBA audits.
 
 ### P1 — Next Iteration
-- [ ] Continuity reconnection idempotency (duplicate "welcome back" on
-      rapid reconnect).
-- [ ] XEngine historical-pregnancy separation — keep past pregnancies
-      queryable without bleeding into the active row.
-- [ ] DB poll failure handling in service loops — some services ignore
-      transient SQL errors instead of backing off.
-- [ ] LLM provider schemas — validate provider-response shape before
-      consuming `choices[0].message.content`.
-- [ ] LLM HTTP status codes — treat non-2xx as a real failure (currently
-      swallows 5xx bodies).
+- [ ] LLM provider-response schemas — DONE via `ParseOpenAI/Anthropic`
+      rewrite on nlohmann::json. Verify under load against live keys.
+- [ ] LLM HTTP status codes — DONE; non-2xx is now surfaced as failure.
 - [ ] Trailing-garbage rejection in nlohmann::json reads of untrusted
-      payloads (strict `accept_discarded=false`).
-- [ ] `ElleJsonExtract` already handles surrogate pairs? verify.
+      payloads — already strict by default in HTTP BodyJSON path.
+- [ ] Surrogate-pair round-trip in `ElleJsonExtract` — current extractor
+      is byte-oriented brace/string counter; surrogates don't break it,
+      but formally verify under a malformed emoji.
 
 ### P2 — Future
 - [ ] Split `ElleDB` (the giant `ElleSQLConn.cpp` namespace) by domain —
-      memory/, queues/, world/, identity/, etc. 2600 LOC monolith.
+      memory/, queues/, world/, identity/, etc. 2.6k LOC monolith.
+      Risky without a local build-test loop; park for next session with
+      user's Windows build feedback.
 - [ ] Stronger identity fabric: single-writer Identity service + event
       stream replacing the DB-polling `RefreshFromDatabase` model.
 - [ ] Embedding-based novelty detector in `EvaluateNovelty` (currently
       substring match).
-- [ ] Isolate destructive tests — they currently share the live DB.
 - [ ] Frontend accessibility alt-texts.
 
 ### P3 — Future Polish
