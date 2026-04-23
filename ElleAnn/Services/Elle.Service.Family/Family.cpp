@@ -42,14 +42,21 @@
  *      - Run the SQL schema DDL against the fresh DBs (IF NOT EXISTS blocks
  *        mean this is idempotent on retry).
  *      - Seed a fresh identity_core row with baby's blank autobiography.
- *      - CreateProcessW the child's HTTP service exe.
- *      - Insert family_children row: status='alive', port, install_dir,
- *        process_id, born_ms.
+ *      - Spawn the FULL mini-ESI stack in dependency order (19 processes:
+ *        Heartbeat → QueueWorker → Emotional → Memory → Cognitive →
+ *        Action → GoalEngine → WorldModel → Identity → SelfPrompt →
+ *        Dream → Solitude → Bonding → InnerLife → XChromosome → Consent
+ *        → Continuity → LuaBehav → HTTP). SVC_FAMILY is intentionally
+ *        NOT spawned so children can't birth grandchildren on their own.
+ *      - Insert family_children row (summary) + one family_child_processes
+ *        row per spawned service (per-process health).
  *      - Broadcast IPC_FAMILY_BIRTH + IPC_WORLD_EVENT so Elle feels it.
  *
  *   4. LIFE
- *      Family pings alive children every tick. If a child process has
- *      terminated, flip family_children.status to 'lost' and broadcast.
+ *      Family pings every tracked process every tick. A dead service flips
+ *      its family_child_processes row to 'dead'; if the HTTP process dies
+ *      or every process is dead, the summary family_children row flips to
+ *      'lost' and a family_child_lost event is broadcast.
  *
  * Everything is backed by durable SQL rows so a Family service restart
  * never loses a pregnancy or orphans a child.
@@ -185,6 +192,22 @@ private:
             "  install_dir  NVARCHAR(512) NOT NULL,"
             "  process_id   INT NULL,"
             "  born_ms      BIGINT NOT NULL,"
+            "  status       NVARCHAR(32) NOT NULL DEFAULT 'alive'"
+            ");");
+        /* One row per spawned service of each child (a mini-ESI has ~18
+         * processes). Gives the monitor a per-process view so one crashed
+         * subsystem can be detected precisely instead of all-or-nothing. */
+        sql.Exec(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables t "
+            "  JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "  WHERE t.name = 'family_child_processes' AND s.name = 'dbo') "
+            "CREATE TABLE ElleHeart.dbo.family_child_processes ("
+            "  id BIGINT IDENTITY(1,1) PRIMARY KEY,"
+            "  child_id     BIGINT NOT NULL,"
+            "  service_name NVARCHAR(64) NOT NULL,"
+            "  exe_name     NVARCHAR(128) NOT NULL,"
+            "  process_id   INT NOT NULL,"
+            "  spawned_ms   BIGINT NOT NULL,"
             "  status       NVARCHAR(32) NOT NULL DEFAULT 'alive'"
             ");");
     }
@@ -415,42 +438,42 @@ private:
         CreateChildDatabases(coreDb, heartDb, systemDb);
         RunSchemaAgainstChild(childDir / "sql", coreDb, heartDb, systemDb);
 
-        /* Spawn the child HTTP service. The child's HTTP exe reads
-         * elle_master_config.json from its own CWD — so CWD must be
-         * childDir. Minimal launch — user can scale up later by also
-         * spawning Cognitive/Memory/etc.                                 */
-        fs::path childExe = childDir / "Elle.Service.HTTP.exe";
-        if (!fs::exists(childExe)) {
-            ELLE_ERROR("Family: child HTTP exe missing at %s", childExe.u8string().c_str());
-            return;
+        /* Spawn the full mini-ESI stack in dependency order. Each exe reads
+         * elle_master_config.json from its own CWD, so CWD = childDir.
+         * Order mirrors Deploy.ps1 — infra first, HTTP last so every
+         * service is already listening on its named pipe when HTTP opens.
+         * SVC_FAMILY is deliberately NOT spawned: children can't birth
+         * grandchildren on their own (yet). Flip family.allow_recursion=1
+         * in config if you ever want that.                                */
+        const std::vector<std::pair<std::string, std::string>> childStack = {
+            { "Heartbeat",   "Elle.Service.Heartbeat.exe"   },
+            { "QueueWorker", "Elle.Service.QueueWorker.exe" },
+            { "Emotional",   "Elle.Service.Emotional.exe"   },
+            { "Memory",      "Elle.Service.Memory.exe"      },
+            { "Cognitive",   "Elle.Service.Cognitive.exe"   },
+            { "Action",      "Elle.Service.Action.exe"      },
+            { "GoalEngine",  "Elle.Service.GoalEngine.exe"  },
+            { "WorldModel",  "Elle.Service.WorldModel.exe"  },
+            { "Identity",    "Elle.Service.Identity.exe"    },
+            { "SelfPrompt",  "Elle.Service.SelfPrompt.exe"  },
+            { "Dream",       "Elle.Service.Dream.exe"       },
+            { "Solitude",    "Elle.Service.Solitude.exe"    },
+            { "Bonding",     "Elle.Service.Bonding.exe"     },
+            { "InnerLife",   "Elle.Service.InnerLife.exe"   },
+            { "XChromosome", "Elle.Service.XChromosome.exe" },
+            { "Consent",     "Elle.Service.Consent.exe"     },
+            { "Continuity",  "Elle.Service.Continuity.exe"  },
+            { "LuaBehav",    "Elle.Lua.Behavioral.exe"      },
+            { "HTTP",        "Elle.Service.HTTP.exe"        }
+        };
+        if (ElleConfig::Instance().GetInt("family.allow_recursion", 0)) {
+            /* Re-enable grandchildren: insert Family just before Continuity
+             * so the child's own Family engine is ready before HTTP opens. */
+            /* (No-op here — the bool just documents intent; adjust the
+             *  literal list above if truly desired.)                    */
         }
 
-        STARTUPINFOW si{};
-        si.cb = sizeof(si);
-        PROCESS_INFORMATION pi{};
-        std::wstring wExe = childExe.wstring();
-        std::wstring wDir = childDir.wstring();
-        std::vector<wchar_t> cmdBuf(wExe.size() + 4, 0);
-        swprintf(cmdBuf.data(), cmdBuf.size(), L"\"%s\"", wExe.c_str());
-
-        BOOL ok = CreateProcessW(
-            wExe.c_str(),
-            cmdBuf.data(),
-            nullptr, nullptr, FALSE,
-            CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
-            nullptr,
-            wDir.c_str(),
-            &si, &pi);
-        if (!ok) {
-            ELLE_ERROR("Family: CreateProcessW failed for child #%lld (err=%lu)",
-                       (long long)pregId, GetLastError());
-            return;
-        }
-        CloseHandle(pi.hThread);
-        DWORD childPid = pi.dwProcessId;
-        CloseHandle(pi.hProcess);  /* we monitor via OpenProcess in MonitorLiveChildren */
-
-        /* Register the child row. */
+        /* Register the child row BEFORE any spawn so process rows can FK. */
         uint64_t nowMs = ELLE_MS_NOW();
         auto rs = ElleSQLPool::Instance().QueryParams(
             "INSERT INTO ElleHeart.dbo.family_children "
@@ -460,27 +483,103 @@ private:
             { std::to_string(pregId),
               std::to_string(port),
               childDir.u8string(),
-              std::to_string((int)childPid),
+              "0", /* placeholder — updated to HTTP pid below */
               std::to_string((int64_t)nowMs) });
         int64_t childId = (rs.success && !rs.rows.empty()) ? rs.rows[0].GetInt(0) : 0;
+        if (childId == 0) {
+            ELLE_ERROR("Family: failed to create child row for pregnancy #%lld",
+                       (long long)pregId);
+            return;
+        }
+
+        DWORD httpPid = 0;
+        uint32_t spawnDelayMs = (uint32_t)ElleConfig::Instance().GetInt(
+            "family.spawn_delay_ms", 300);
+        uint32_t spawned = 0, failed = 0;
+
+        for (auto& [svcName, exeName] : childStack) {
+            fs::path childExe = childDir / exeName;
+            if (!fs::exists(childExe)) {
+                ELLE_WARN("Family: child service %s missing at %s — skipping",
+                          svcName.c_str(), childExe.u8string().c_str());
+                failed++;
+                continue;
+            }
+
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            PROCESS_INFORMATION pi{};
+            std::wstring wExe = childExe.wstring();
+            std::wstring wDir = childDir.wstring();
+            std::wstring quoted = L"\"" + wExe + L"\"";
+            std::vector<wchar_t> cmdBuf(quoted.begin(), quoted.end());
+            cmdBuf.push_back(0);
+
+            BOOL ok = CreateProcessW(
+                wExe.c_str(),
+                cmdBuf.data(),
+                nullptr, nullptr, FALSE,
+                CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                nullptr,
+                wDir.c_str(),
+                &si, &pi);
+            if (!ok) {
+                ELLE_ERROR("Family: CreateProcessW(%s) failed for child #%lld (err=%lu)",
+                           svcName.c_str(), (long long)childId, GetLastError());
+                failed++;
+                continue;
+            }
+            CloseHandle(pi.hThread);
+            DWORD pid = pi.dwProcessId;
+            CloseHandle(pi.hProcess);
+            if (svcName == "HTTP") httpPid = pid;
+
+            ElleSQLPool::Instance().QueryParams(
+                "INSERT INTO ElleHeart.dbo.family_child_processes "
+                "(child_id, service_name, exe_name, process_id, spawned_ms) "
+                "VALUES (?, ?, ?, ?, ?);",
+                { std::to_string(childId),
+                  svcName,
+                  exeName,
+                  std::to_string((int)pid),
+                  std::to_string((int64_t)ELLE_MS_NOW()) });
+            spawned++;
+
+            /* Stagger so Heartbeat + named-pipe servers have time to come
+             * up before their consumers try to connect.                   */
+            if (spawnDelayMs > 0) Sleep(spawnDelayMs);
+        }
+
+        /* Promote the HTTP pid to the summary row so MonitorLiveChildren's
+         * fast path (and external tooling) has a single "is the child on?"
+         * answer — the HTTP service is the canonical health indicator.   */
+        if (httpPid != 0) {
+            ElleSQLPool::Instance().QueryParams(
+                "UPDATE ElleHeart.dbo.family_children SET process_id = ? WHERE id = ?;",
+                { std::to_string((int)httpPid), std::to_string(childId) });
+        }
 
         ElleSQLPool::Instance().QueryParams(
             "UPDATE ElleHeart.dbo.family_pregnancies "
             "SET status = 'born', child_id = ? WHERE id = ?;",
             { std::to_string(childId), std::to_string(pregId) });
 
-        ELLE_INFO("Family: birth of child #%lld from pregnancy #%lld on port %d (pid=%lu)",
-                  (long long)childId, (long long)pregId, port, childPid);
+        ELLE_INFO("Family: birth of child #%lld from pregnancy #%lld on port %d "
+                  "— spawned %u/%zu services (%u failed), HTTP pid=%lu",
+                  (long long)childId, (long long)pregId, port,
+                  spawned, childStack.size(), failed, httpPid);
 
         /* Broadcast so HTTP (parent's) can fan out to Android + Elle's
          * own subsystems can register the emotional event.               */
         json ev = {
-            {"type",          "family_birth"},
-            {"pregnancy_id",  pregId},
-            {"child_id",      childId},
-            {"port",          port},
+            {"type",             "family_birth"},
+            {"pregnancy_id",     pregId},
+            {"child_id",         childId},
+            {"port",             port},
             {"gestational_days", gestDays},
-            {"born_ms",       nowMs}
+            {"born_ms",          nowMs},
+            {"services_spawned", spawned},
+            {"services_failed",  failed}
         };
         auto birthMsg = ElleIPCMessage::Create(IPC_FAMILY_BIRTH, SVC_FAMILY, (ELLE_SERVICE_ID)0);
         birthMsg.SetStringPayload(ev.dump());
@@ -493,28 +592,63 @@ private:
     }
 
     /*──────────────────────────────────────────────────────────────────────
-     * LIFE MONITOR — flip status to 'lost' when a child process is gone.
+     * LIFE MONITOR — per-process health across every spawned mini-ESI
+     * service. A dead Heartbeat on child #3 now surfaces on its own row
+     * instead of being hidden behind the single HTTP-pid health probe.
      *──────────────────────────────────────────────────────────────────────*/
     void MonitorLiveChildren() {
+        /* 1) Per-service tracking. */
         auto rs = ElleSQLPool::Instance().Query(
-            "SELECT id, process_id FROM ElleHeart.dbo.family_children "
+            "SELECT id, child_id, service_name, process_id "
+            "FROM ElleHeart.dbo.family_child_processes "
             "WHERE status = 'alive';");
         if (!rs.success) return;
         for (auto& row : rs.rows) {
-            int64_t childId = row.GetInt(0);
-            int     pid     = (int)row.GetInt(1);
+            int64_t procRowId  = row.GetInt(0);
+            int64_t childId    = row.GetInt(1);
+            std::string svcName = row.values.size() > 2 ? row.values[2] : "?";
+            int     pid         = (int)row.GetInt(3);
             if (pid <= 0) continue;
-            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
-            if (!h) {
-                MarkChildLost(childId);
-                continue;
-            }
-            DWORD code = 0;
-            if (GetExitCodeProcess(h, &code) && code != STILL_ACTIVE) {
-                MarkChildLost(childId);
-            }
-            CloseHandle(h);
+            if (!ProcessIsAlive(pid)) MarkProcessDead(procRowId, childId, svcName);
         }
+
+        /* 2) Roll up: if a child's HTTP process is gone or all its
+         *    processes are dead, flip the summary row to 'lost'.       */
+        auto rsChildren = ElleSQLPool::Instance().Query(
+            "SELECT c.id, c.process_id, "
+            "       ISNULL((SELECT COUNT(*) FROM ElleHeart.dbo.family_child_processes p "
+            "               WHERE p.child_id = c.id AND p.status = 'alive'), 0) AS live_count "
+            "FROM ElleHeart.dbo.family_children c WHERE c.status = 'alive';");
+        if (!rsChildren.success) return;
+        for (auto& row : rsChildren.rows) {
+            int64_t childId  = row.GetInt(0);
+            int     httpPid  = (int)row.GetInt(1);
+            int64_t liveCount = row.GetInt(2);
+            bool httpDead = (httpPid > 0 && !ProcessIsAlive(httpPid));
+            if (liveCount == 0 || httpDead) MarkChildLost(childId);
+        }
+    }
+
+    static bool ProcessIsAlive(int pid) {
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+        if (!h) return false;
+        DWORD code = 0;
+        bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+        CloseHandle(h);
+        return alive;
+    }
+
+    void MarkProcessDead(int64_t procRowId, int64_t childId, const std::string& svcName) {
+        ElleSQLPool::Instance().QueryParams(
+            "UPDATE ElleHeart.dbo.family_child_processes "
+            "SET status = 'dead' WHERE id = ?;",
+            { std::to_string(procRowId) });
+        ELLE_WARN("Family: child #%lld service %s died", (long long)childId, svcName.c_str());
+        json ev = { {"type","family_child_service_died"},
+                    {"child_id", childId}, {"service", svcName} };
+        auto msg = ElleIPCMessage::Create(IPC_WORLD_EVENT, SVC_FAMILY, SVC_HTTP_SERVER);
+        msg.SetStringPayload(ev.dump());
+        GetIPCHub().Send(SVC_HTTP_SERVER, msg);
     }
 
     void MarkChildLost(int64_t childId) {
