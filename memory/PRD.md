@@ -345,6 +345,19 @@ build failure). All fixed in 11 files:
 Next: user re-runs MSBuild — expect a clean 0 / 0 or a much smaller
 third wave of latent bugs. No more mass patterns remain in my review.
 
+### MSBuild /WX dynamic-pass — round 3: vendored Lua (Feb 2026)
+Round 2 cleared all Services-tier errors; round 3 light up purely in
+`Lua/lua54/src/*.c` — vendored Lua 5.4.6 upstream source. Upstream Lua
+is ANSI C with known implicit-conversion warnings that fire under
+MSVC /W4 + /WX. **Not ours to audit**, so relaxed those specific files
+only — the rest of the tree stays strict.
+
+Fix: added `<TreatWarningAsError>false</TreatWarningAsError>` +
+`<WarningLevel>Level3</WarningLevel>` to each of the 32 vendored
+`$(LuaDir)src\*.c` `<ClCompile>` items in
+`Elle.Lua.Behavioral.vcxproj`. A single comment above the ItemGroup
+explains the scope. Our own C++ surface keeps /W4 /WX.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

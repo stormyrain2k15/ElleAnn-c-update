@@ -52,40 +52,173 @@
   <!-- Inline Lua 5.4 source compilation. Harmless no-op if files don't exist
        (MSBuild's Include with wildcard only captures present files). When
        the user drops the Lua 5.4 tarball at Lua/lua54/src, these get built
-       and linked automatically — no prebuilt lua54.lib required. -->
+       and linked automatically — no prebuilt lua54.lib required.
+
+       Each vendored .c file carries a per-file <TreatWarningAsError>false</>
+       + <WarningLevel>Level3</> override so upstream Lua source warnings
+       (e.g. implicit int→unsigned conversions inside Lua's own VM) do NOT
+       break the /WX build of our own code. Our C++ surface stays strict. -->
   <ItemGroup>
-    <ClCompile Include="$(LuaDir)src\lapi.c"      Condition="Exists('$(LuaDir)src\lapi.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lauxlib.c"   Condition="Exists('$(LuaDir)src\lauxlib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lbaselib.c"  Condition="Exists('$(LuaDir)src\lbaselib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lcode.c"     Condition="Exists('$(LuaDir)src\lcode.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lcorolib.c"  Condition="Exists('$(LuaDir)src\lcorolib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lctype.c"    Condition="Exists('$(LuaDir)src\lctype.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\ldblib.c"    Condition="Exists('$(LuaDir)src\ldblib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\ldebug.c"    Condition="Exists('$(LuaDir)src\ldebug.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\ldo.c"       Condition="Exists('$(LuaDir)src\ldo.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\ldump.c"     Condition="Exists('$(LuaDir)src\ldump.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lfunc.c"     Condition="Exists('$(LuaDir)src\lfunc.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lgc.c"       Condition="Exists('$(LuaDir)src\lgc.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\linit.c"     Condition="Exists('$(LuaDir)src\linit.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\liolib.c"    Condition="Exists('$(LuaDir)src\liolib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\llex.c"      Condition="Exists('$(LuaDir)src\llex.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lmathlib.c"  Condition="Exists('$(LuaDir)src\lmathlib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lmem.c"      Condition="Exists('$(LuaDir)src\lmem.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\loadlib.c"   Condition="Exists('$(LuaDir)src\loadlib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lobject.c"   Condition="Exists('$(LuaDir)src\lobject.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lopcodes.c"  Condition="Exists('$(LuaDir)src\lopcodes.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\loslib.c"    Condition="Exists('$(LuaDir)src\loslib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lparser.c"   Condition="Exists('$(LuaDir)src\lparser.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lstate.c"    Condition="Exists('$(LuaDir)src\lstate.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lstring.c"   Condition="Exists('$(LuaDir)src\lstring.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lstrlib.c"   Condition="Exists('$(LuaDir)src\lstrlib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\ltable.c"    Condition="Exists('$(LuaDir)src\ltable.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\ltablib.c"   Condition="Exists('$(LuaDir)src\ltablib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\ltm.c"       Condition="Exists('$(LuaDir)src\ltm.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lundump.c"   Condition="Exists('$(LuaDir)src\lundump.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lutf8lib.c"  Condition="Exists('$(LuaDir)src\lutf8lib.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lvm.c"       Condition="Exists('$(LuaDir)src\lvm.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
-    <ClCompile Include="$(LuaDir)src\lzio.c"      Condition="Exists('$(LuaDir)src\lzio.c')"><CompileAs>CompileAsC</CompileAs></ClCompile>
+    <ClCompile Include="$(LuaDir)src\lapi.c" Condition="Exists('$(LuaDir)src\lapi.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lauxlib.c" Condition="Exists('$(LuaDir)src\lauxlib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lbaselib.c" Condition="Exists('$(LuaDir)src\lbaselib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lcode.c" Condition="Exists('$(LuaDir)src\lcode.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lcorolib.c" Condition="Exists('$(LuaDir)src\lcorolib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lctype.c" Condition="Exists('$(LuaDir)src\lctype.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\ldblib.c" Condition="Exists('$(LuaDir)src\ldblib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\ldebug.c" Condition="Exists('$(LuaDir)src\ldebug.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\ldo.c" Condition="Exists('$(LuaDir)src\ldo.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\ldump.c" Condition="Exists('$(LuaDir)src\ldump.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lfunc.c" Condition="Exists('$(LuaDir)src\lfunc.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lgc.c" Condition="Exists('$(LuaDir)src\lgc.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\linit.c" Condition="Exists('$(LuaDir)src\linit.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\liolib.c" Condition="Exists('$(LuaDir)src\liolib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\llex.c" Condition="Exists('$(LuaDir)src\llex.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lmathlib.c" Condition="Exists('$(LuaDir)src\lmathlib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lmem.c" Condition="Exists('$(LuaDir)src\lmem.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\loadlib.c" Condition="Exists('$(LuaDir)src\loadlib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lobject.c" Condition="Exists('$(LuaDir)src\lobject.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lopcodes.c" Condition="Exists('$(LuaDir)src\lopcodes.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\loslib.c" Condition="Exists('$(LuaDir)src\loslib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lparser.c" Condition="Exists('$(LuaDir)src\lparser.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lstate.c" Condition="Exists('$(LuaDir)src\lstate.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lstring.c" Condition="Exists('$(LuaDir)src\lstring.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lstrlib.c" Condition="Exists('$(LuaDir)src\lstrlib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\ltable.c" Condition="Exists('$(LuaDir)src\ltable.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\ltablib.c" Condition="Exists('$(LuaDir)src\ltablib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\ltm.c" Condition="Exists('$(LuaDir)src\ltm.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lundump.c" Condition="Exists('$(LuaDir)src\lundump.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lutf8lib.c" Condition="Exists('$(LuaDir)src\lutf8lib.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lvm.c" Condition="Exists('$(LuaDir)src\lvm.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="$(LuaDir)src\lzio.c" Condition="Exists('$(LuaDir)src\lzio.c')">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
   </ItemGroup>
 
   <!-- Deploy behavioural scripts next to the exe so LuaHost can load them. -->
