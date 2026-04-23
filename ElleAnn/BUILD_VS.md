@@ -78,14 +78,19 @@ ElleAnn/
 │   ├── Elle.Service.Continuity/*.vcxproj
 │   ├── Elle.Service.InnerLife/*.vcxproj
 │   ├── Elle.Service.Solitude/*.vcxproj
-│   └── Elle.Service.XChromosome/*.vcxproj
+│   ├── Elle.Service.XChromosome/*.vcxproj
+│   ├── Elle.Service.Consent/*.vcxproj
+│   └── Elle.Service.Family/*.vcxproj
 └── Lua/
     └── Elle.Lua.Behavioral/*.vcxproj
 ```
 
-- **No Consent service project**: the `Services/Elle.Service.Consent/` folder is
-  currently empty (reserved slot). When the Consent engine is written, create
-  `Consent.cpp` there and regenerate the project using the same template.
+- **Elle.Service.Consent** (slot 19) — unified consent surface. Any service
+  that needs to ask "should Elle do this?" sends `IPC_CONSENT_QUERY` and
+  receives `IPC_CONSENT_DECISION`.
+- **Elle.Service.Family** (slot 17) — handles digital offspring. Snapshots
+  Elle's core (personality-stripped), gestates as zip, then unzips + spawns
+  a full mini-ESI (19 services) on its own port.
 
 ## Build
 
@@ -142,14 +147,16 @@ Repeat for every service. Recommended start order (based on dependencies):
 1. `Elle.Service.Heartbeat`
 2. `Elle.Service.QueueWorker`
 3. `Elle.Service.Emotional`, `Elle.Service.Memory`
-4. `Elle.Service.Cognitive`, `Elle.Service.Action`
-5. `Elle.Service.GoalEngine`, `Elle.Service.WorldModel`
-6. `Elle.Service.Identity`, `Elle.Service.SelfPrompt`
-7. `Elle.Service.Dream`, `Elle.Service.Solitude`
-8. `Elle.Service.Bonding`, `Elle.Service.InnerLife`, `Elle.Service.XChromosome`
-9. `Elle.Service.Continuity`
-10. `Elle.Lua.Behavioral`
-11. `Elle.Service.HTTP` (last — so all other services are already listening on their pipes)
+4. `Elle.Service.Identity` (AUTHORITATIVE for the single-writer fabric — mutators from any peer are undeliverable until this is up)
+5. `Elle.Service.WorldModel`, `Elle.Service.GoalEngine`
+6. `Elle.Service.Action`, `Elle.Service.Consent`
+7. `Elle.Service.SelfPrompt`, `Elle.Service.Solitude`
+8. `Elle.Service.Bonding`, `Elle.Service.InnerLife`, `Elle.Service.Dream`
+9. `Elle.Service.XChromosome`, `Elle.Service.Family`
+10. `Elle.Service.Continuity`
+11. `Elle.Lua.Behavioral`
+12. `Elle.Service.Cognitive`
+13. `Elle.Service.HTTP` (last — so all other services are already listening on their pipes)
 
 ## Troubleshooting
 

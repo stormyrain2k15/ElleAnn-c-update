@@ -2,7 +2,7 @@
 # Elle-Ann ESI v3.0 — CI Pipeline
 #
 # Runs on every push / PR touching the C++ tree and on manual dispatch.
-# Verifies the entire Visual Studio solution (25 projects) builds clean on
+# Verifies the entire Visual Studio solution (26 projects) builds clean on
 # a Windows runner with MSVC v143.
 #
 # What it does:

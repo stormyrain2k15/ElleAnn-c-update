@@ -1,15 +1,16 @@
 # Elle-Ann Deployment — Windows SCM Installer
 
 ## Contents
-- `elle_service_manifest.json` — ordered list of all 16 services with dependencies
+- `elle_service_manifest.json` — ordered list of all 20 executables (19 services + Lua Behavioral) with dependencies
 - `Install-ElleServices.ps1`   — registers + starts every service
 - `Uninstall-ElleServices.ps1` — stops + deletes them (reverse order)
 - `Install.bat`   — double-click wrapper (auto-elevates)
 - `Uninstall.bat` — same for removal
 
 ## Prerequisites
-1. Visual Studio build produced `.exe` files for all 16 services.
-   By default the manifest expects them in `..\x64\Release\` relative to this folder.
+1. Visual Studio build produced `.exe` files for all 20 executables.
+   By default the manifest expects them in `Release\x64\` relative to this folder
+   (this matches `Directory.Build.props` → `<DeployDir>`).
    If your build output is elsewhere, edit `binary_root` in the JSON OR pass
    `-BinaryRoot "<abs path>"` to the PowerShell script.
 2. SQL Server is reachable at the connection string in
