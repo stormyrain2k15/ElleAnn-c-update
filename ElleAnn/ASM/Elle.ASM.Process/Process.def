@@ -1,4 +1,4 @@
-LIBRARY Elle.ASM.Process
+LIBRARY Elle.ASM.Process.dll
 EXPORTS
     ASM_LaunchProcess
     ASM_KillProcess

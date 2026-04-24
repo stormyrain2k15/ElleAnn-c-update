@@ -1,4 +1,4 @@
-LIBRARY Elle.ASM.Memory
+LIBRARY Elle.ASM.Memory.dll
 EXPORTS
     ASM_PoolAlloc
     ASM_PoolFree

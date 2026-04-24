@@ -1,4 +1,4 @@
-LIBRARY Elle.ASM.FileIO
+LIBRARY Elle.ASM.FileIO.dll
 EXPORTS
     ASM_ReadFile
     ASM_WriteFile

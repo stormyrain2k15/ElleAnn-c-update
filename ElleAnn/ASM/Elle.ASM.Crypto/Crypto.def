@@ -1,4 +1,4 @@
-LIBRARY Elle.ASM.Crypto
+LIBRARY Elle.ASM.Crypto.dll
 EXPORTS
     ASM_SHA256
     ASM_AES256Encrypt

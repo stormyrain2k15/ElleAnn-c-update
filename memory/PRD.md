@@ -456,6 +456,30 @@ Next step for Android (when work resumes):
 - Copy spec/*.kt into `app/data/spec/`, uncomment Retrofit annotations
 - Build UI layer separately (not in scope for this spec pass)
 
+### LNK4070 residual warnings — CLEARED (Feb 2026)
+The `Surface residual warnings` CI step (added previous iteration)
+immediately paid off: the 10 residual warnings from the first-ever
+green build were all the same issue in the 5 MASM DLL projects:
+
+```
+LNK4070: /OUT:Elle.ASM.X directive in .EXP differs from output
+         filename 'Elle.ASM.X.dll'
+```
+
+Root cause: each `.def` file declared `LIBRARY Elle.ASM.X` without
+the `.dll` suffix; MSVC's linker bakes that into the export file
+and then warns about the mismatch against the real output name.
+
+Fix: appended `.dll` to the LIBRARY directive in all 5 module-def
+files:
+- `ASM/Elle.ASM.Crypto/Crypto.def`
+- `ASM/Elle.ASM.FileIO/FileIO.def`
+- `ASM/Elle.ASM.Hardware/Hardware.def`
+- `ASM/Elle.ASM.Memory/Memory.def`
+- `ASM/Elle.ASM.Process/Process.def`
+
+Next build expected: **0 errors, 0 warnings**.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

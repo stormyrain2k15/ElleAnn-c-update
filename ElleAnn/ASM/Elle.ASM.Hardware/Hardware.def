@@ -1,4 +1,4 @@
-LIBRARY Elle.ASM.Hardware
+LIBRARY Elle.ASM.Hardware.dll
 EXPORTS
     ASM_SetCPUAffinity
     ASM_GetCPUUsage
