@@ -660,6 +660,27 @@ WorldModel::Query is a vector scan + stable sort of ≤ a few hundred
 entities — microseconds. IPC round-trip is sub-millisecond on loopback
 named pipes. 200ms ceiling is ~200× safety margin.
 
+### .env.example tracking bug fixed + .gitignore deduplicated (Feb 2026)
+User reported "the .env and .env example are missing" after cloning.
+
+**Root cause** (two bugs):
+1. `.gitignore` pattern `.env.*` was matching `.env.example`, so every
+   template file was being silently ignored — GitHub never got them.
+2. The "Environment and credential files" block had been accidentally
+   appended **68 times** (some automation running `echo >> .gitignore`
+   in a loop), bloating `.gitignore` to 704 lines.
+
+**Fix** (3 files):
+- `/app/.gitignore` — collapsed 68-duplicate block to 1, added explicit
+  `!.env.example` / `!*.env.example` negations. File went 704 → 94 lines.
+- `/app/backend/.env.example` — enriched template: MONGO_URL, DB_NAME,
+  CORS_ORIGINS with comments + dev defaults.
+- `/app/frontend/.env.example` — enriched template: REACT_APP_BACKEND_URL,
+  WDS_SOCKET_PORT, ENABLE_HEALTH_CHECK with CRA-specific notes.
+
+`.env` files remain git-ignored (correct — secrets don't go to GitHub).
+`.env.example` files are now tracked; next push carries them.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).
