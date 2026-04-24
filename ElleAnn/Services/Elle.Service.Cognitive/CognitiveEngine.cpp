@@ -409,16 +409,15 @@ private:
             try {
                 HandleChatRequest(item.payload, item.origin);
             } catch (const std::exception& e) {
-                ELLE_ERROR("Chat orchestration exception: %s", e.what());
-            } catch (...) {
-                /* Top-of-worker-thread boundary: swallowing here is
-                 * deliberate so one malformed chat request doesn't tear
-                 * down the whole orchestration loop and leave the
-                 * service unable to answer subsequent requests. Every
-                 * inner `catch(...)` has been removed — anything
-                 * surprising ends up here with full context.           */
-                ELLE_ERROR("Chat orchestration unknown exception — request dropped, loop continues");
+                ELLE_ERROR("Chat orchestration exception: %s — request dropped, loop continues", e.what());
             }
+            /* Deliberately no catch(...): non-std exceptions (SEH
+             * access violations, foreign-runtime throws) are crashes,
+             * not "bad requests". The service should terminate so SCM
+             * restarts it with a clean state and Windows Event Log
+             * records the cause. Every inner catch(...) has been
+             * removed so there's no lower layer silently swallowing;
+             * anything surprising crashes loudly and visibly.           */
         }
     }
 

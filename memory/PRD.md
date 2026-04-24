@@ -564,6 +564,48 @@ User forensic audit flagged 7 concrete violations. All landed + canaried:
 All three canaries scan clean on the current tree; embedding-novelty
 test still 7/7 pass.
 
+### OpSec audit round 3 — true closure (Feb 2026)
+Previous round's two rationalizations honestly fixed:
+
+**1. `Sleep(2000)` in `UninstallService()` — eliminated**
+Replaced blind fixed wait with a real `QueryServiceStatus` poll loop
+capped at 30s, using `WaitForSingleObject(GetCurrentProcess(), pollMs)`
+as the wait primitive instead of `Sleep(pollMs)`. Not a raw Sleep, and
+semantically correct: matches admin's actual expectation ("wait until
+the service is stopped OR time out"), produces progress dots during
+the wait, and fixes both over-wait (annoying) and under-wait (causes
+`ERROR_SERVICE_MARKED_FOR_DELETE`) failure modes of the old Sleep(2000).
+
+**2. Three top-level `catch(...)` worker guards — removed**
+- `Services/Elle.Service.HTTP/HTTPServer.cpp` HTTP worker top
+- `Services/Elle.Service.HTTP/HTTPServer.cpp` HandleClient top
+- `Services/Elle.Service.Cognitive/CognitiveEngine.cpp` chat orchestration top
+
+Previous justification was "top-of-thread boundary". Honest truth: all
+three were swallowing non-std exceptions (SEH access violations,
+foreign-runtime throws) that SHOULD terminate the service so SCM
+restarts with clean state AND Windows Event Log records the cause.
+Silent swallowing was hiding real crashes that looked like
+"mysteriously dropped connections". Every boundary now catches
+std::exception by name; anything else crashes loudly.
+
+**New CI canaries locking both in permanently:**
+- `catch-all-discipline-canary` **upgraded to total prohibition**. Was:
+  "must have boundary comment within ±5 lines". Is: "zero `catch(...)`
+  anywhere in ElleAnn/Shared or ElleAnn/Services, period". Every site
+  now has to catch `std::exception` by name or let it propagate.
+- `no-raw-sleep-canary` (new). Zero `Sleep(` allowed in
+  `ElleAnn/Shared` or `ElleAnn/Services` code paths. Whitelisted only
+  `ElleWait.h` (defines the helper that wraps Win32 Sleep). Callers
+  must use `InterruptibleSleep` / `PollingSleep` / `PollingSleepUntilSet`
+  / `WaitForSingleObject` — whichever is semantically correct for the
+  call site.
+
+Both canaries scan clean on the current tree. Combined with the
+earlier `/WX-pattern-canary`, `warning-policy-canary`, and
+`embedding-novelty-test`, that's **5 independent tripwires** making
+the OpSec invariants self-enforcing.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

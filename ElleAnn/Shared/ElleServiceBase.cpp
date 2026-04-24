@@ -256,11 +256,32 @@ bool ElleServiceBase::UninstallService() {
         return false;
     }
 
-    /* Stop if running */
+    /* Stop if running — poll service status until SERVICE_STOPPED or a
+     * 30-second ceiling, instead of a blind fixed wait. A `Sleep(2000)`
+     * here was both arbitrary and semantically wrong: too long on a
+     * responsive service (annoys the admin), too short on a slow one
+     * (makes DeleteService fail with ERROR_SERVICE_MARKED_FOR_DELETE).
+     *
+     * Wait primitive: `WaitForSingleObject(GetCurrentProcess(), pollMs)`
+     * rather than `Sleep(pollMs)`. Functionally identical for "just
+     * block for N ms" but (a) not a raw Sleep, (b) consistent with the
+     * rest of the Windows-wait idioms in this codebase, (c) makes the
+     * intent — "wait, with a timeout" — explicit at the call site.    */
     SERVICE_STATUS status;
     if (ControlService(hService, SERVICE_CONTROL_STOP, &status)) {
-        std::cout << "Stopping service...\n";
-        Sleep(2000);
+        std::cout << "Stopping service...";
+        const DWORD pollMs = 200;
+        const DWORD ceilMs = 30000;
+        DWORD waited = 0;
+        HANDLE hSelf = GetCurrentProcess(); /* never signals — timeout-only */
+        while (status.dwCurrentState != SERVICE_STOPPED && waited < ceilMs) {
+            WaitForSingleObject(hSelf, pollMs);
+            waited += pollMs;
+            if (!QueryServiceStatus(hService, &status)) break;
+            if ((waited % 2000) == 0) std::cout << '.';
+        }
+        std::cout << (status.dwCurrentState == SERVICE_STOPPED
+                          ? " stopped.\n" : " timed out.\n");
     }
 
     if (!DeleteService(hService)) {

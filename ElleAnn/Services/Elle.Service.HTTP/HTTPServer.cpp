@@ -1118,13 +1118,15 @@ private:
             if (s == INVALID_SOCKET) continue;
             try { HandleClient(s); }
             catch (const std::exception& e) { ELLE_ERROR("HTTP worker: %s", e.what()); }
-            catch (...) {
-                /* Top-of-worker-thread boundary: swallowing unknown
-                 * exceptions here keeps the worker alive for the next
-                 * client. Nothing inside HandleClient uses catch(...)
-                 * except this outermost guard.                          */
-                ELLE_ERROR("HTTP worker unknown exception — connection dropped, worker continues");
-            }
+            /* Deliberately no catch(...) here. Non-std exceptions (SEH
+             * access violations, foreign-runtime throws) are real bugs;
+             * the right response is process termination so SCM restarts
+             * the service with a clean state AND the failure is visible
+             * in Windows Event Log. Silent swallowing at this boundary
+             * used to hide access-violation crashes that looked like
+             * "mysteriously dropped connections". The OpSec audit
+             * (Feb 2026 round 2) confirmed: if it's not a std::exception,
+             * we do not know how to handle it — fail loudly.              */
         }
     }
 
@@ -1246,19 +1248,12 @@ private:
                 ELLE_WARN("HTTP 500 write failed: %s", se.what());
                 closesocket(clientSocket);
             }
-        } catch (...) {
-            /* Top-of-HandleClient boundary: an unknown non-std exception
-             * escaped from dispatching. Best-effort 500 back to the
-             * client, then the worker returns to the queue. Upstream
-             * catch(...) at HTTP worker level is the final safety net. */
-            ELLE_ERROR("HTTP handler unknown exception on %s %s",
-                       /* best-effort context — req may have been parsed */
-                       "?", "?");
-            try { SendResponse(clientSocket, HTTPResponse::Err(500, "unknown")); }
-            catch (const std::exception& se) {
-                ELLE_WARN("HTTP 500 write failed: %s", se.what());
-                closesocket(clientSocket);
-            }
+            /* Deliberately no catch(...) here either. See the matching
+             * comment at the worker-loop level: non-std exceptions are
+             * crashes (SEH, foreign-runtime) and must not be swallowed.
+             * Let them propagate — the process will terminate, SCM will
+             * restart the service, and Windows Event Log will record
+             * the cause.                                                 */
         }
     }
 

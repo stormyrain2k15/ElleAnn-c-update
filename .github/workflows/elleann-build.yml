@@ -303,29 +303,37 @@ jobs:
           exit $exit_code
 
   # ────────────────────────────────────────────────────────────────────────
-  # catch(...) discipline canary — `catch(...)` is only acceptable as a
-  # top-of-worker-thread boundary (so one bad request can't kill the
-  # service). Bare catch(...) anywhere else silently masks bugs. This
-  # canary flags catch(...) that isn't preceded by an inline comment
-  # containing "boundary" or "top-of-" within 10 lines (a liberal window
-  # — the actual standard is "any comment block mentioning why it's
-  # swallowing is acceptable").
+  # catch(...) total prohibition canary
+  #
+  #   Rule (locked-in Feb 2026 round 2 audit):
+  #     catch(...) is forbidden anywhere in ElleAnn/Shared or
+  #     ElleAnn/Services. Every exception is either std::exception (and
+  #     caught by name) or it's a non-std crash (SEH / foreign runtime /
+  #     raw `throw 42`) that MUST terminate the process so SCM restarts
+  #     the service and Windows Event Log records the cause.
+  #
+  #   Why the prohibition is absolute:
+  #     Previous policy was "catch(...) allowed at top-of-thread
+  #     boundaries with a comment". In practice this became a weasel-
+  #     word: every site grew a "boundary" comment and the rule
+  #     degenerated to meaningless. A total ban has no ambiguity.
+  #
+  #   If a legitimate exception needs catching at a boundary, it MUST
+  #   be caught by std::exception type. Non-std throws are bugs and
+  #   should crash loudly.
   # ────────────────────────────────────────────────────────────────────────
   catch-all-discipline-canary:
-    name: catch(...) Discipline Canary
+    name: catch(...) Total Prohibition Canary
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Enforce catch(...) is a documented boundary
+      - name: Forbid catch(...) anywhere in our code
         run: |
           set -u
           python3 <<'PY'
           import pathlib, re, sys
           roots = ["ElleAnn/Shared", "ElleAnn/Services"]
-          # Match `catch ( ... )` only where the `...` is the sole content
-          # of the parens (not `catch(const ...)` or similar).
           pat = re.compile(r'(?<!\w)catch\s*\(\s*\.\.\.\s*\)')
-          just = re.compile(r'boundary|top-of-|top of |worker-thread|intentional', re.I)
           violations = []
           for root in roots:
               for p in pathlib.Path(root).rglob("*"):
@@ -335,19 +343,68 @@ jobs:
                   for i, ln in enumerate(lines):
                       if not pat.search(ln): continue
                       stripped = ln.lstrip()
-                      # Skip lines that are comments themselves
+                      # Skip pure comment lines that just *mention* catch(...)
                       if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
                           continue
-                      # Allow the match if any of the ±5 surrounding lines carry a
-                      # justification keyword.
-                      window = "\n".join(lines[max(0, i-5):i+6])
-                      if not just.search(window):
-                          violations.append(f"{p}:{i+1}: {ln.rstrip()}")
+                      violations.append(f"{p}:{i+1}: {ln.rstrip()}")
           if violations:
-              print("::error::Undocumented catch(...) — must be a top-of-thread boundary with a comment within ±5 lines:")
+              print("::error::catch(...) is forbidden. Catch std::exception by name, or let it propagate:")
               for v in violations: print("  " + v)
               sys.exit(1)
-          print("ok — all catch(...) sites are documented boundaries")
+          print("ok — zero catch(...) in code paths")
+          PY
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Raw Sleep() ban in worker/service paths
+  #
+  #   Rule: `Sleep(N)` is not allowed in ElleAnn/Shared or
+  #   ElleAnn/Services code. Use one of:
+  #     - ElleServiceBase::InterruptibleSleep(ms)   — services
+  #     - ElleWait::PollingSleep(ms, m_running)     — shared workers
+  #     - ElleWait::PollingSleepUntilSet(ms, cancel) — cancel-flag workers
+  #     - WaitForSingleObject(handle, ms)           — one-shot CLI/admin
+  #
+  #   Raw Sleep blocks for its full duration regardless of shutdown
+  #   signals, which is how Windows SCM "service did not respond in a
+  #   timely fashion" warnings happen and how slow clean-shutdown
+  #   regressions creep in.
+  # ────────────────────────────────────────────────────────────────────────
+  no-raw-sleep-canary:
+    name: No Raw Sleep() in Worker/Service Paths
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Forbid raw Sleep() in code paths
+        run: |
+          set -u
+          python3 <<'PY'
+          import pathlib, re, sys
+          roots = ["ElleAnn/Shared", "ElleAnn/Services"]
+          # Bare Sleep( — NOT preceded by a word char (excludes
+          # InterruptibleSleep, PollingSleep, ::Sleep on explicit types).
+          pat = re.compile(r'(?<![A-Za-z0-9_:])Sleep\s*\(')
+          # Whitelist: ElleWait.h DEFINES the helper, which legitimately
+          # wraps the Win32 Sleep to implement PollingSleep.
+          WHITELIST = {"ElleAnn/Shared/ElleWait.h"}
+          violations = []
+          for root in roots:
+              for p in pathlib.Path(root).rglob("*"):
+                  if p.suffix not in (".cpp", ".h"): continue
+                  key = str(p).replace("\\", "/")
+                  if key in WHITELIST: continue
+                  try:    lines = p.read_text().splitlines()
+                  except Exception: continue
+                  for i, ln in enumerate(lines):
+                      if not pat.search(ln): continue
+                      stripped = ln.lstrip()
+                      if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
+                          continue
+                      violations.append(f"{p}:{i+1}: {ln.rstrip()}")
+          if violations:
+              print("::error::Raw Sleep() found. Use ElleServiceBase::InterruptibleSleep, ElleWait::PollingSleep(UntilSet), or WaitForSingleObject:")
+              for v in violations: print("  " + v)
+              sys.exit(1)
+          print("ok — zero raw Sleep() in worker/service paths")
           PY
 
   # ──────────────────────────────────────────────────────────────────────── — locks in the "policy lives in
