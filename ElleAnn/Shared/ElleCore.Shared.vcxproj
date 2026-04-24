@@ -49,6 +49,7 @@
     <ClCompile Include="ElleIdentityCore.cpp" />
     <ClCompile Include="ElleLLM.cpp" />
     <ClCompile Include="ElleLogger.cpp" />
+    <ClCompile Include="ElleQR.cpp" />
     <ClCompile Include="ElleQueueIPC.cpp" />
     <ClCompile Include="ElleSelfSurprise.cpp" />
     <ClCompile Include="ElleServiceBase.cpp" />
@@ -68,6 +69,7 @@
     <ClInclude Include="ElleJsonExtract.h" />
     <ClInclude Include="ElleLLM.h" />
     <ClInclude Include="ElleLogger.h" />
+    <ClInclude Include="ElleQR.h" />
     <ClInclude Include="ElleQueueIPC.h" />
     <ClInclude Include="ElleSelfSurprise.h" />
     <ClInclude Include="ElleSQLConn.h" />

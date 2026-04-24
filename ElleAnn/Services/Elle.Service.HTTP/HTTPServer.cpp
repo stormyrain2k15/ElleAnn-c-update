@@ -19,6 +19,7 @@
 #include "../../Shared/DictionaryLoader.h"
 #include "../../Shared/json.hpp"
 #include "../../Shared/ElleCrypto.h"
+#include "../../Shared/ElleQR.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -357,10 +358,68 @@ struct JwtVerifyResult {
     std::string failureReason;   /* one-line diagnostic for ELLE_WARN */
 };
 
+/*──────────────────────────────────────────────────────────────────────────────
+ * PAIRED-DEVICE CACHE (short TTL)
+ *
+ *   The Dispatch gate calls ElleDB::GetPairedDevice on every authenticated
+ *   request to check Revoked. That's a PK-indexed query so it's cheap, but
+ *   a local single-user app doing 50 req/s during a video-call session is
+ *   still 50 round-trips/s we can trivially coalesce. Cache by device_id
+ *   with a 30-second TTL; revocation propagates within that window, which
+ *   is fine for a local trust domain. The cache is per-process — an
+ *   operator who needs instant effect on revoke can `Stop()/Start()` the
+ *   service (already O(ms) because we have InterruptibleSleep discipline).
+ *──────────────────────────────────────────────────────────────────────────────*/
+struct PairedCacheEntry {
+    bool     revoked   = false;
+    uint64_t cached_ms = 0;
+    bool     exists    = false;
+};
+static std::mutex                                     g_pairedCacheMx;
+static std::unordered_map<std::string, PairedCacheEntry> g_pairedCache;
+static constexpr uint64_t kPairedCacheTtlMs = 30ull * 1000ull;
+
+/** Returns {exists, revoked}. Hits the DB only when the cache entry is
+ *  missing or older than kPairedCacheTtlMs.                              */
+static std::pair<bool, bool>
+PairedDeviceStatusCached(const std::string& device_id, uint64_t now_ms) {
+    {
+        std::lock_guard<std::mutex> lk(g_pairedCacheMx);
+        auto it = g_pairedCache.find(device_id);
+        if (it != g_pairedCache.end() &&
+            now_ms - it->second.cached_ms < kPairedCacheTtlMs) {
+            return { it->second.exists, it->second.revoked };
+        }
+    }
+    ElleDB::PairedDeviceRow row;
+    bool exists = ElleDB::GetPairedDevice(device_id, row);
+    bool revoked = exists && row.revoked;
+    {
+        std::lock_guard<std::mutex> lk(g_pairedCacheMx);
+        PairedCacheEntry e;
+        e.exists    = exists;
+        e.revoked   = revoked;
+        e.cached_ms = now_ms;
+        g_pairedCache[device_id] = e;
+        /* Cap map size to prevent unbounded growth under forged-token
+         * attacks. Whoever's trying to storm us with bogus device_ids
+         * would otherwise inflate the map — evict the oldest half. */
+        if (g_pairedCache.size() > 4096) {
+            std::vector<std::pair<std::string, uint64_t>> ordered;
+            ordered.reserve(g_pairedCache.size());
+            for (auto& kv : g_pairedCache) ordered.emplace_back(kv.first, kv.second.cached_ms);
+            std::sort(ordered.begin(), ordered.end(),
+                      [](const auto& a, const auto& b){ return a.second < b.second; });
+            for (size_t i = 0; i < ordered.size() / 2; i++)
+                g_pairedCache.erase(ordered[i].first);
+        }
+    }
+    return { exists, revoked };
+}
+
 static JwtVerifyResult VerifyJwtHs256(const std::string& token,
                                        const std::string& secret,
-                                       uint64_t now_ms) {
-    JwtVerifyResult r;
+                                       uint64_t now_ms) {    JwtVerifyResult r;
     if (token.empty() || secret.empty()) {
         r.failureReason = "empty token or secret";
         return r;
@@ -597,13 +656,16 @@ public:
                         uint64_t now_ms = (uint64_t)ELLE_MS_NOW();
                         auto vr = VerifyJwtHs256(tok, secret, now_ms);
                         if (vr.valid) {
-                            ElleDB::PairedDeviceRow prow;
-                            if (ElleDB::GetPairedDevice(vr.sub, prow) &&
-                                !prow.revoked) {
+                            auto status = PairedDeviceStatusCached(vr.sub, now_ms);
+                            bool exists = status.first;
+                            bool revoked = status.second;
+                            if (exists && !revoked) {
                                 haveBearer = true;
                                 jwtSub = vr.sub;
                                 /* Async touch — ignore failure; this is
-                                 * best-effort observability, not a gate. */
+                                 * best-effort observability, not a gate.
+                                 * Bypasses the cache (we WANT fresh DB
+                                 * state for "last seen").               */
                                 ElleDB::TouchPairedDeviceLastSeen(vr.sub);
                             } else {
                                 /* Valid signature but device revoked or
@@ -2292,6 +2354,145 @@ private:
                     {"paired_at_ms", (int64_t)now}
                 });
             }, AUTH_PUBLIC);
+
+        /* ==================================================================
+         *  /api/auth/devices          (ADMIN, GET)    — list paired devices
+         *  /api/auth/devices/{id}     (ADMIN, DELETE) — revoke a device
+         *
+         *  Companion admin surface for the pairing flow. Gives ops a way
+         *  to audit what phones have paired and to yank access without
+         *  restarting the service. Revocation is honoured on the very
+         *  next authenticated request via the JWT-gate's PairedDevices
+         *  lookup.
+         * ================================================================== */
+        m_router.Register("GET", "/api/auth/devices",
+            [](const HTTPRequest&) -> HTTPResponse {
+                std::vector<ElleDB::PairedDeviceRow> rows;
+                if (!ElleDB::ListPairedDevices(rows, 200)) {
+                    return HTTPResponse::Err(500, "failed to list paired devices");
+                }
+                json arr = json::array();
+                for (const auto& r : rows) {
+                    arr.push_back({
+                        {"device_id",       r.device_id},
+                        {"device_name",     r.device_name},
+                        {"paired_at_ms",    (int64_t)r.paired_at_ms},
+                        {"expires_ms",      (int64_t)r.expires_ms},
+                        {"last_seen_ms",    (int64_t)r.last_seen_ms},
+                        {"revoked",         r.revoked},
+                        {"revoked_at_ms",   (int64_t)r.revoked_at_ms},
+                        {"jwt_fingerprint", r.jwt_fingerprint}
+                    });
+                }
+                return HTTPResponse::OK({ {"devices", arr} });
+            }, AUTH_ADMIN);
+
+        m_router.Register("DELETE", "/api/auth/devices/{id}",
+            [](const HTTPRequest& req) -> HTTPResponse {
+                auto it = req.headers.find("x-path-id");
+                if (it == req.headers.end() || it->second.empty()) {
+                    return HTTPResponse::Err(400, "device id required");
+                }
+                /* Best-effort: if the device doesn't exist, still return
+                 * 200 — revocation is idempotent.                       */
+                ElleDB::RevokePairedDevice(it->second);
+                /* Invalidate the gate's paired-device cache so the next
+                 * request with this device's JWT fails immediately,
+                 * rather than waiting up to 30s for the cache TTL.    */
+                {
+                    std::lock_guard<std::mutex> lk(g_pairedCacheMx);
+                    g_pairedCache.erase(it->second);
+                }
+                ELLE_INFO("Device revoked via admin: id=%s",
+                          it->second.c_str());
+                return HTTPResponse::OK({
+                    {"revoked",   true},
+                    {"device_id", it->second}
+                });
+            }, AUTH_ADMIN);
+
+        /* ==================================================================
+         *  GET /api/auth/qr?code=XXXXXX&host=H.H.H.H&port=N  (ADMIN)
+         *
+         *  Renders the `ellepair://host:port/code` URI as an SVG QR so
+         *  admins can hold up the screen and let the companion app
+         *  scan, instead of typing the 6-digit code. The SVG is served
+         *  inline with `Content-Type: image/svg+xml` — any modern
+         *  browser will render it, and every mainstream scanner reads
+         *  SVG-rendered QRs as cleanly as PNG ones.
+         *
+         *  host/port default to `http_server.bind_address`/`http_server.port`
+         *  from config when omitted; the admin only needs to override
+         *  when the external hostname differs from the bind address
+         *  (e.g. Tailscale / LAN name).
+         * ================================================================== */
+        m_router.Register("GET", "/api/auth/qr",
+            [](const HTTPRequest& req) -> HTTPResponse {
+                /* Parse query string — the dispatcher stores these in
+                 * req.queryParams when present; if not, fall back to
+                 * pulling them from a stashed synthetic header.       */
+                std::string code, host, port;
+                auto findQ = [&](const std::string& key, std::string& out) {
+                    /* Scan the raw URL query in req.path — keep it
+                     * simple, we know the keys are ASCII.             */
+                    size_t q = req.path.find('?');
+                    if (q == std::string::npos) return;
+                    std::string qs = req.path.substr(q + 1);
+                    size_t start = 0;
+                    while (start < qs.size()) {
+                        size_t amp = qs.find('&', start);
+                        std::string pair = qs.substr(start,
+                            amp == std::string::npos ? qs.size() - start : amp - start);
+                        size_t eq = pair.find('=');
+                        if (eq != std::string::npos &&
+                            pair.substr(0, eq) == key) {
+                            out = pair.substr(eq + 1);
+                            return;
+                        }
+                        if (amp == std::string::npos) break;
+                        start = amp + 1;
+                    }
+                };
+                findQ("code", code);
+                findQ("host", host);
+                findQ("port", port);
+
+                if (code.size() != 6) {
+                    return HTTPResponse::Err(400, "code must be 6 digits");
+                }
+                for (char c : code) {
+                    if (c < '0' || c > '9')
+                        return HTTPResponse::Err(400, "code must be 6 digits");
+                }
+
+                const auto& http = ElleConfig::Instance().GetHTTP();
+                if (host.empty()) host = http.bind_address;
+                if (port.empty()) port = std::to_string(http.port);
+                if (host.empty() || host == "0.0.0.0") {
+                    /* 0.0.0.0 is a bind-any-interface placeholder; the
+                     * companion app can't connect to it. Admin must
+                     * supply an explicit &host= when bound to 0.0.0.0. */
+                    return HTTPResponse::Err(400,
+                        "host required when bind_address is 0.0.0.0 — "
+                        "pass ?host=<LAN-address>");
+                }
+
+                std::string uri = "ellepair://" + host + ":" + port + "/" + code;
+                auto qr = ElleQR::Encode(uri, ElleQR::Ecc::M);
+                if (qr.size == 0) {
+                    return HTTPResponse::Err(500, "qr encode failed");
+                }
+                std::string svg = ElleQR::ToSvg(qr, 6, 4);
+
+                HTTPResponse r;
+                r.status      = 200;
+                r.statusText  = "OK";
+                r.contentType = "image/svg+xml";
+                r.body        = std::move(svg);
+                /* Prevent aggressive caching — codes are short-lived. */
+                r.headers["Cache-Control"] = "no-store, max-age=0";
+                return r;
+            }, AUTH_ADMIN);
 
         /* ============== Diagnostics — live queue depth + orphan counts ==
          * One-shot observability for the intent / action / hardware_actions
