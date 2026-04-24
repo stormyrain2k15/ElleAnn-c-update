@@ -54,114 +54,129 @@
 ;             r8  = output hash (32 bytes)
 ; Returns:    void
 ;──────────────────────────────────────────────────────────────────────────────
-ASM_SHA256 PROC
+;──────────────────────────────────────────────────────────────────────────────
+; ASM_SHA256_SCAFFOLDED — INTENTIONALLY UNIMPLEMENTED
+;
+;   The body is a scaffold: prologue/epilogue + constants setup are
+;   real, but the 64-round message schedule + compression function are
+;   NOT implemented. A real MASM implementation is ~200 lines of
+;   schedule-expand + compression-round macro and was deferred to
+;   focus on the Windows-service core.
+;
+;   To prevent silent "all zero" or "initial-hash-value" outputs from
+;   being mistaken for real hashes, this stub FILLS the output buffer
+;   with a distinctive canary pattern 0xDEAD5CAF (SCAFFOLD) 32 bytes
+;   so any caller that accidentally links to it gets a loud, visible
+;   wrong-looking hash instead of a plausible-looking bug.
+;
+;   NOT exported in Crypto.def — nothing can link to this by mistake
+;   unless a caller manually adds the export + import. The Shared-side
+;   prototype in ElleTypes.h was removed at the same time.
+;
+;   When a real SHA-256 in MASM is implemented, rename back to
+;   ASM_SHA256, re-export, restore the Shared prototype, and run the
+;   NIST CAVS test vectors (FIPS 180-4 §5.3.3) before wiring any
+;   call sites. For now, production code uses Windows BCrypt via
+;   Shared/ElleCrypto.cpp (BCryptHashData / BCryptHmac).
+;
+; Parameters: rcx = data pointer (unused)
+;             edx = data length   (unused)
+;             r8  = output hash (32 bytes — filled with canary)
+;──────────────────────────────────────────────────────────────────────────────
+;──────────────────────────────────────────────────────────────────────────────
+; Three cryptographic primitives in this DLL are marked _SCAFFOLDED below
+; and have NO real implementation: SHA-256, AES-256 encrypt, AES-256 decrypt.
+; They fill the output buffer with a 0xDEAD5CAF canary so accidental callers
+; get an obvious wrong-looking result instead of a plausible bug.
+;
+; The _SCAFFOLDED functions are NOT exported (Crypto.def) and NOT declared
+; in Shared/ElleTypes.h — so nothing in the rest of the codebase can
+; accidentally link to them.
+;
+; Production SHA-256 / HMAC-SHA256 lives in Shared/ElleCrypto.{h,cpp} and
+; uses Windows CNG (BCrypt*). Replace these MASM scaffolds with real
+; AES-NI / SHA-NI implementations only when a hot-path bottleneck is
+; measured; the BCrypt wrappers are more than fast enough for JWT-sign /
+; config-decrypt / etc.
+;──────────────────────────────────────────────────────────────────────────────
+ASM_SHA256_SCAFFOLDED PROC
     push    rbp
     mov     rbp, rsp
-    sub     rsp, 300h               ; Working space: W[64] + state + padding
-    push    rbx
-    push    rdi
-    push    rsi
-    push    r12
-    push    r13
-    push    r14
-    push    r15
-
-    mov     rsi, rcx                ; data
-    mov     r12d, edx               ; length
-    mov     r13, r8                 ; output
-
-    ; Initialize hash state
-    lea     rdi, [rbp-20h]          ; h[0..7] on stack
-    mov     eax, [sha256_h0]
+    ; Fill 32-byte output with 0xDEAD5CAF repeated 8 times.
+    mov     rdi, r8
+    mov     eax, 0DEAD5CAFh
+    mov     ecx, 8
+@@fill:
     mov     [rdi], eax
-    mov     eax, [sha256_h1]
-    mov     [rdi+4], eax
-    mov     eax, [sha256_h2]
-    mov     [rdi+8], eax
-    mov     eax, [sha256_h3]
-    mov     [rdi+0Ch], eax
-    mov     eax, [sha256_h4]
-    mov     [rdi+10h], eax
-    mov     eax, [sha256_h5]
-    mov     [rdi+14h], eax
-    mov     eax, [sha256_h6]
-    mov     [rdi+18h], eax
-    mov     eax, [sha256_h7]
-    mov     [rdi+1Ch], eax
-
-    ; SHA-256 compression would process 64-byte blocks here
-    ; For brevity, this is the scaffold — full round logic is 64 iterations
-    ; of the compression function with message schedule expansion.
-    
-    ; Copy final hash to output
-    lea     rsi, [rbp-20h]
-    mov     rdi, r13
-    mov     ecx, 8                  ; 8 DWORDs = 32 bytes
-@@copy_hash:
-    mov     eax, [rsi]
-    bswap   eax                     ; SHA-256 is big-endian
-    mov     [rdi], eax
-    add     rsi, 4
     add     rdi, 4
     dec     ecx
-    jnz     @@copy_hash
-
-    pop     r15
-    pop     r14
-    pop     r13
-    pop     r12
-    pop     rsi
-    pop     rdi
-    pop     rbx
+    jnz     @@fill
     leave
     ret
-ASM_SHA256 ENDP
+ASM_SHA256_SCAFFOLDED ENDP
 
 ;──────────────────────────────────────────────────────────────────────────────
-; ASM_AES256Encrypt — AES-256 encryption using AES-NI
-; Parameters: rcx = key (32 bytes)
-;             rdx = IV (16 bytes)
-;             r8  = input data
-;             r9  = output data
+; ASM_AES256Encrypt_SCAFFOLDED — INTENTIONALLY UNIMPLEMENTED
+;
+;   Same story as SHA-256: AES-NI aesenc / aesenclast were commented
+;   out; no real key schedule, no CBC chaining, no PKCS#7 padding. A
+;   real MASM implementation needs the 15-round AES-256 key expansion
+;   via aeskeygenassist + the aesenc/aesenclast loop with CBC IV
+;   chaining.
+;
+;   Canary-poison the output with 0xDEAD5CAF so any accidental caller
+;   gets an obvious wrong-looking ciphertext rather than a plausible
+;   stream. Length comes through [rbp+30h] per the original shadow-
+;   space convention.
+;
+; Parameters: rcx = key (32 bytes, unused)
+;             rdx = IV  (16 bytes, unused)
+;             r8  = input data       (unused)
+;             r9  = output data      (filled with canary)
 ;             [rbp+30h] = length in bytes
 ;──────────────────────────────────────────────────────────────────────────────
-ASM_AES256Encrypt PROC
+ASM_AES256Encrypt_SCAFFOLDED PROC
     push    rbp
     mov     rbp, rsp
     sub     rsp, 40h
-
-    ; Load key into XMM registers
-    movdqu  xmm1, XMMWORD PTR [rcx]        ; key part 1
-    movdqu  xmm2, XMMWORD PTR [rcx+16]     ; key part 2
-    
-    ; Load IV
-    movdqu  xmm0, XMMWORD PTR [rdx]        ; IV / counter
-
-    ; AES-256 CBC encryption loop
-    ; For each 16-byte block:
-    ;   1. XOR plaintext with previous ciphertext (or IV)
-    ;   2. 14 rounds of AESENC
-    ;   3. Final AESENCLAST
-    
-    ; aesenc xmm0, xmm_roundkey    ; AES-NI instruction
-    ; aesenclast xmm0, xmm_lastkey ; Final round
-
+    mov     rdi, r9
+    mov     r10d, DWORD PTR [rbp+30h]
+    test    r10d, r10d
+    jz      @@done
+    mov     eax, 0DEAD5CAFh
+@@fill:
+    mov     [rdi], al
+    inc     rdi
+    dec     r10d
+    jnz     @@fill
+@@done:
     leave
     ret
-ASM_AES256Encrypt ENDP
+ASM_AES256Encrypt_SCAFFOLDED ENDP
 
 ;──────────────────────────────────────────────────────────────────────────────
-; ASM_AES256Decrypt — AES-256 decryption using AES-NI
+; ASM_AES256Decrypt_SCAFFOLDED — INTENTIONALLY UNIMPLEMENTED
+;   Same rationale as the Encrypt scaffold above. Canary-poisons the
+;   output buffer. Not exported.
 ;──────────────────────────────────────────────────────────────────────────────
-ASM_AES256Decrypt PROC
+ASM_AES256Decrypt_SCAFFOLDED PROC
     push    rbp
     mov     rbp, rsp
     sub     rsp, 40h
-
-    ; aesdec / aesdeclast with inverse key schedule
+    mov     rdi, r9
+    mov     r10d, DWORD PTR [rbp+30h]
+    test    r10d, r10d
+    jz      @@done
+    mov     eax, 0DEAD5CAFh
+@@fill:
+    mov     [rdi], al
+    inc     rdi
+    dec     r10d
+    jnz     @@fill
+@@done:
     leave
     ret
-ASM_AES256Decrypt ENDP
+ASM_AES256Decrypt_SCAFFOLDED ENDP
 
 ;──────────────────────────────────────────────────────────────────────────────
 ; ASM_XorCipher — Simple XOR encryption/decryption

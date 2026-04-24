@@ -927,9 +927,14 @@ static inline uint32_t Elle_IPC_Checksum(const uint8_t* data, uint32_t len) {
     __declspec(dllimport) int   __stdcall ASM_MemCompare(const void* a, const void* b, DWORD len);
 
     /* Crypto DLL */
-    __declspec(dllimport) void  __stdcall ASM_SHA256(const void* data, DWORD len, BYTE outHash[32]);
-    __declspec(dllimport) void  __stdcall ASM_AES256Encrypt(const BYTE key[32], const BYTE iv[16], const void* in, void* out, DWORD len);
-    __declspec(dllimport) void  __stdcall ASM_AES256Decrypt(const BYTE key[32], const BYTE iv[16], const void* in, void* out, DWORD len);
+    /* SHA-256 and AES-256 in Elle.ASM.Crypto are SCAFFOLDED (no real
+     * compression / AES-NI yet). Intentionally NOT declared here so
+     * nothing can accidentally link to them. Production hashing /
+     * HMAC / symmetric crypto lives in Shared/ElleCrypto.{h,cpp} via
+     * Windows CNG (BCryptHashData / BCryptHmac / BCryptEncrypt).
+     * When real MASM AES-NI / SHA-NI is implemented, re-expose the
+     * prototypes here, re-export in Crypto.def, and benchmark vs.
+     * BCrypt before wiring any call sites.                            */
     __declspec(dllimport) void  __stdcall ASM_XorCipher(const void* in, void* out, DWORD len, const BYTE* key, DWORD keyLen);
     __declspec(dllimport) DWORD __stdcall ASM_CRC32(const void* data, DWORD len);
     __declspec(dllimport) void  __stdcall ASM_RandomBytes(void* buffer, DWORD len);

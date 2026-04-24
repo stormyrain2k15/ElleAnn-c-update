@@ -1,8 +1,8 @@
 LIBRARY Elle.ASM.Crypto.dll
 EXPORTS
-    ASM_SHA256
-    ASM_AES256Encrypt
-    ASM_AES256Decrypt
+    ; SHA-256 / AES-256 are SCAFFOLDED — NOT EXPORTED. See Crypto.asm
+    ; header comment. Production hashing/HMAC is in Shared/ElleCrypto
+    ; via Windows CNG.
     ASM_XorCipher
     ASM_CRC32
     ASM_RandomBytes
