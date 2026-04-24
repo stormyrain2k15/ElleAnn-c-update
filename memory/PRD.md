@@ -681,6 +681,41 @@ User reported "the .env and .env example are missing" after cloning.
 `.env` files remain git-ignored (correct — secrets don't go to GitHub).
 `.env.example` files are now tracked; next push carries them.
 
+### Lua 5.4.6 source VENDORED in-tree (Feb 2026)
+User uploaded the official lua-5.4.6.zip (386 KB, 72 files). Extracted
+to `ElleAnn/Lua/lua54/{src,doc}/` — the location the vcxproj already
+expects via `$(LuaDir)src\*.c`. All 34 .c files shipped; 32 of them
+match the vcxproj `<ClCompile>` list exactly (interpreter `lua.c` and
+compiler `luac.c` shipped but not compiled — we embed the library).
+Total 1.4 MB vendored.
+
+**CI workflow overhaul:**
+- Retired the `Cache Lua` + `Download Lua` + SHA-256 verification steps
+  (lua.org download, ~60 lines). The tarball SHA hash was
+  upstream-authoritative but network-dependent.
+- Replaced with a short `Verify vendored Lua source` step that checks
+  the directory exists and has ≥ 30 .c files — fail-fast on a partial
+  vendor, no network I/O.
+- Removed the `LUA_SHA256` workflow env var (no longer needed);
+  `LUA_VERSION` kept as observability metadata.
+
+**New docs:**
+- `ElleAnn/Lua/lua54/README.md` — provenance (version, source URL,
+  import date, upstream MIT license attribution), explanation of the
+  32-of-34 vcxproj layout + per-file warning opt-out, upgrade procedure,
+  and the `!bloated-lua` rule (zero local modifications to vendored
+  code).
+
+**Why vendor vs. download-at-build:**
+- Builds work offline / on firewalled hosts
+- lua.org outage or supply-chain compromise cannot affect our build
+- CI cache is no longer load-bearing — git history IS the cache
+- Reproducibility: exact bytes compiled against are in commit history
+- User explicitly asked for in-tree vendor placement
+
+**Canary + test regression check after vendoring: all 5 green, embedding
+test 7/7.**
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).
