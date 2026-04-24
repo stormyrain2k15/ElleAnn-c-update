@@ -18,6 +18,7 @@
 #include "../../Shared/ElleLLM.h"
 #include "../../Shared/DictionaryLoader.h"
 #include "../../Shared/json.hpp"
+#include "../../Shared/ElleCrypto.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -1066,6 +1067,97 @@ private:
     ELLE_EMOTION_STATE m_cachedEmotions = {};
 
     /*────────────────────────────────────────────────────────────────────────
+     * PAIRING CODE REGISTRY
+     *
+     *   Short-lived (5-minute TTL, single-use) codes issued by admin via
+     *   POST /api/auth/pair-code and consumed by companion apps via
+     *   POST /api/auth/pair. In-memory by design — a lost-power restart
+     *   simply invalidates any un-redeemed codes, which is the correct
+     *   security posture. The permanent record of paired devices lives
+     *   in ElleCore.dbo.PairedDevices (see ElleDB_Domain.cpp).
+     *────────────────────────────────────────────────────────────────────────*/
+    struct PairingCode {
+        uint64_t expires_ms = 0;
+        uint64_t issued_ms  = 0;
+        bool     consumed   = false;
+    };
+    std::mutex                                      m_pairingMutex;
+    std::unordered_map<std::string, PairingCode>    m_pairingCodes;
+
+    /* Evict expired/consumed codes — called on every issue and every
+     * redeem to keep the map bounded. O(n) over a map that stays small
+     * in practice (admin rarely has more than a handful open at once). */
+    void PairingGcLocked(uint64_t now) {
+        for (auto it = m_pairingCodes.begin(); it != m_pairingCodes.end(); ) {
+            if (it->second.consumed || it->second.expires_ms <= now) {
+                it = m_pairingCodes.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    /*────────────────────────────────────────────────────────────────────────
+     * JWT (HS256) — minimal self-contained implementation.
+     *
+     *   We don't pull a full library — the JWT contract here is:
+     *
+     *     header  = base64url({"alg":"HS256","typ":"JWT"})
+     *     payload = base64url({"sub":device_id,"name":device_name,
+     *                          "iat":<ms>,"exp":<ms>})
+     *     sig     = base64url(HMAC-SHA256(header + "." + payload,
+     *                                      http_server.jwt_secret))
+     *     token   = header + "." + payload + "." + sig
+     *
+     *   The signing key is `http_server.jwt_secret` from config — the
+     *   SAME key used by the legacy shared-secret Bearer gate in
+     *   RouteDispatch. That's deliberate: a client that presents a real
+     *   HS256 JWT signed with the secret will be accepted by the legacy
+     *   gate today (because the gate compares the WHOLE Bearer string
+     *   against the secret, which will fail — future ticket) AND will
+     *   parse & verify cleanly when the gate is upgraded to a real
+     *   JWT-verify path in the next ticket. For now the flow is:
+     *
+     *     - Admin holds the shared secret (x-admin-key) to issue codes.
+     *     - Device redeems code → receives a real JWT (not the secret).
+     *     - Device stores JWT; existing gate still requires the shared
+     *       secret on every call until the JWT-verify upgrade lands.
+     *
+     *   This is captured in Android/spec/Auth.kt's migration note. The
+     *   DB row and JWT are already authoritative so the upgrade is a
+     *   pure gate-code change with no data migration.
+     *────────────────────────────────────────────────────────────────────────*/
+    static std::string MintJwt(const std::string& deviceId,
+                               const std::string& deviceName,
+                               uint64_t iat_ms, uint64_t exp_ms,
+                               const std::string& secret) {
+        /* Header and payload assembled by hand to avoid depending on
+         * json.hpp's exact serialisation (key order matters for JWT
+         * round-trip tooling even though the spec doesn't mandate it). */
+        const std::string header = R"({"alg":"HS256","typ":"JWT"})";
+        std::ostringstream ps;
+        ps << R"({"sub":")" << deviceId
+           << R"(","name":")" << deviceName
+           << R"(","iat":)" << iat_ms
+           << R"(,"exp":)" << exp_ms << "}";
+        const std::string payload = ps.str();
+
+        std::string h64 = ElleCrypto::Base64UrlEncode(header.data(), header.size());
+        std::string p64 = ElleCrypto::Base64UrlEncode(payload.data(), payload.size());
+        std::string signingInput = h64 + "." + p64;
+
+        uint8_t mac[32];
+        if (!ElleCrypto::HmacSha256(secret.data(), secret.size(),
+                                     signingInput.data(), signingInput.size(),
+                                     mac)) {
+            return {};
+        }
+        std::string s64 = ElleCrypto::Base64UrlEncode(mac, 32);
+        return signingInput + "." + s64;
+    }
+
+
+    /*────────────────────────────────────────────────────────────────────────
      * ACCEPT LOOP
      *────────────────────────────────────────────────────────────────────────*/
     void AcceptLoop() {
@@ -1845,6 +1937,175 @@ private:
             };
             return HTTPResponse::OK(j);
         }, AUTH_PUBLIC);
+
+        /* ==================================================================
+         *  /api/auth/pair-code  (ADMIN)  —  issue a 6-digit pairing code.
+         *  /api/auth/pair       (PUBLIC) —  redeem code → real HS256 JWT.
+         *
+         *  Flow matches the contract in Android/spec/Auth.kt. The code is
+         *  single-use and expires 5 minutes after issuance. The resulting
+         *  JWT is stored in the client's Keystore and is authoritative for
+         *  that device_id going forward; revocation lives in
+         *  ElleCore.dbo.PairedDevices.Revoked.
+         * ================================================================== */
+        m_router.Register("POST", "/api/auth/pair-code",
+            [this](const HTTPRequest& req) -> HTTPResponse {
+                /* Optional TTL override (seconds), capped at 15 min.       */
+                uint32_t ttlSec = 300;  /* default 5 min */
+                try {
+                    if (!req.body.empty()) {
+                        auto j = json::parse(req.body);
+                        if (j.contains("ttl_seconds") && j["ttl_seconds"].is_number_integer()) {
+                            int64_t t = j["ttl_seconds"].get<int64_t>();
+                            if (t >= 30 && t <= 900) ttlSec = (uint32_t)t;
+                        }
+                    }
+                } catch (const json::exception&) {
+                    /* Malformed body — stick with defaults rather than
+                     * failing the whole request; the TTL is a convenience
+                     * and admin uses the endpoint from a trusted session. */
+                }
+
+                std::string code = ElleCrypto::RandomDigits(6);
+                if (code.size() != 6) {
+                    return HTTPResponse::Err(500, "rng failure");
+                }
+                uint64_t now   = (uint64_t)ELLE_MS_NOW();
+                uint64_t expMs = now + (uint64_t)ttlSec * 1000ull;
+
+                {
+                    std::lock_guard<std::mutex> lk(m_pairingMutex);
+                    PairingGcLocked(now);
+                    /* Extremely unlikely collision (6-digit space, minutes
+                     * TTL) — just refuse so admin can retry.               */
+                    if (m_pairingCodes.find(code) != m_pairingCodes.end()) {
+                        return HTTPResponse::Err(503, "code collision — retry");
+                    }
+                    m_pairingCodes[code] = PairingCode{ expMs, now, false };
+                }
+
+                ELLE_INFO("Pairing code issued (ttl=%us, expires_ms=%llu)",
+                          ttlSec, (unsigned long long)expMs);
+
+                return HTTPResponse::OK({
+                    {"code",        code},
+                    {"expires_ms",  (int64_t)expMs},
+                    {"issued_ms",   (int64_t)now},
+                    {"ttl_seconds", (int64_t)ttlSec}
+                });
+            }, AUTH_ADMIN);
+
+        m_router.Register("POST", "/api/auth/pair",
+            [this](const HTTPRequest& req) -> HTTPResponse {
+                /* Parse body. Fail-closed on any malformed field.          */
+                std::string code, device_name, device_id;
+                try {
+                    auto j = json::parse(req.body);
+                    if (j.contains("code")        && j["code"].is_string())
+                        code = j["code"].get<std::string>();
+                    if (j.contains("device_name") && j["device_name"].is_string())
+                        device_name = j["device_name"].get<std::string>();
+                    if (j.contains("device_id")   && j["device_id"].is_string())
+                        device_id = j["device_id"].get<std::string>();
+                } catch (const json::exception&) {
+                    return HTTPResponse::Err(400, "malformed JSON body");
+                }
+
+                if (code.size() != 6) {
+                    return HTTPResponse::Err(400, "code must be 6 digits");
+                }
+                /* Accept only ASCII digits. Guards against unicode lookalikes
+                 * that would otherwise bypass the timing-safe compare.      */
+                for (char c : code) {
+                    if (c < '0' || c > '9') {
+                        return HTTPResponse::Err(400, "code must be 6 digits");
+                    }
+                }
+                if (device_id.empty() || device_id.size() > 128) {
+                    return HTTPResponse::Err(400, "device_id required (<=128 chars)");
+                }
+                if (device_name.empty() || device_name.size() > 256) {
+                    return HTTPResponse::Err(400, "device_name required (<=256 chars)");
+                }
+
+                uint64_t now = (uint64_t)ELLE_MS_NOW();
+
+                /* Timing-safe code lookup: iterate ALL outstanding codes
+                 * and compare constant-time. Lookup time is independent
+                 * of which code matched (no map.find shortcut) so an
+                 * attacker can't learn about the set of valid codes by
+                 * timing the response. The map stays small (admin
+                 * issues < 10 codes/minute in practice) so the O(n)
+                 * scan is still microseconds.                           */
+                bool matched = false;
+                {
+                    std::lock_guard<std::mutex> lk(m_pairingMutex);
+                    PairingGcLocked(now);
+                    for (auto& [stored, rec] : m_pairingCodes) {
+                        if (rec.consumed) continue;
+                        if (rec.expires_ms <= now) continue;
+                        if (stored.size() != code.size()) continue;
+                        if (ElleCrypto::ConstantTimeEquals(stored.data(),
+                                                             code.data(),
+                                                             stored.size())) {
+                            /* Consume exactly once, even under concurrent
+                             * redeem attempts.                           */
+                            rec.consumed = true;
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+                if (!matched) {
+                    return HTTPResponse::Err(401, "invalid or expired code");
+                }
+
+                const auto& http = ElleConfig::Instance().GetHTTP();
+                const std::string& secret = http.jwt_secret;
+                if (secret.empty()) {
+                    return HTTPResponse::Err(503,
+                        "http_server.jwt_secret not configured");
+                }
+
+                /* JWT lifetime: 90 days. Matches the Android/spec/Auth.kt
+                 * "long-lived" contract. Re-pair flow handles expiry.   */
+                const uint64_t kJwtTtlMs = 90ull * 24 * 60 * 60 * 1000;
+                uint64_t exp_ms = now + kJwtTtlMs;
+
+                std::string jwt = MintJwt(device_id, device_name, now, exp_ms, secret);
+                if (jwt.empty()) {
+                    return HTTPResponse::Err(500, "jwt signing failed");
+                }
+
+                /* First 32 hex chars of SHA-256(jwt) — enough to identify
+                 * the token for revocation / audit without storing the
+                 * token itself anywhere but the device.                  */
+                std::string fp = ElleCrypto::Sha256Hex(jwt).substr(0, 32);
+
+                ElleDB::PairedDeviceRow row;
+                row.device_id       = device_id;
+                row.device_name     = device_name;
+                row.paired_at_ms    = now;
+                row.expires_ms      = exp_ms;
+                row.jwt_fingerprint = fp;
+                if (!ElleDB::UpsertPairedDevice(row)) {
+                    /* The DB persist failing does NOT invalidate the JWT
+                     * (it's already signed) but it DOES mean we can't
+                     * audit / revoke it later, which is a P0 guarantee.
+                     * Fail-closed and let admin retry.                   */
+                    return HTTPResponse::Err(500, "failed to persist paired device");
+                }
+
+                ELLE_INFO("Device paired: name=\"%s\" id=%s exp=%llu",
+                          device_name.c_str(), device_id.c_str(),
+                          (unsigned long long)exp_ms);
+
+                return HTTPResponse::OK({
+                    {"jwt",          jwt},
+                    {"expires_ms",   (int64_t)exp_ms},
+                    {"paired_at_ms", (int64_t)now}
+                });
+            }, AUTH_PUBLIC);
 
         /* ============== Diagnostics — live queue depth + orphan counts ==
          * One-shot observability for the intent / action / hardware_actions

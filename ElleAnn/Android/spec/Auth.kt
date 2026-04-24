@@ -39,15 +39,23 @@ package com.elleann.android.data.spec
  *   Step 5. On 401 from any endpoint: clear stored JWT, navigate back to
  *           pairing screen, show "Re-pair with ElleAnn".
  *
- *   NOTE: The `/api/auth/pair` endpoint does NOT YET EXIST in
- *         Services/Elle.Service.HTTP/HTTPServer.cpp — it needs to be added
- *         before any Android implementation begins. This spec defines the
- *         target contract. Implementation ticket should:
- *           (a) Add m_pairingCodes registry (code → { expiry_ms, single_use })
- *           (b) Add POST /api/auth/pair route
- *           (c) Mint JWT via existing helpers (http.jwt_secret already exists)
- *           (d) Persist paired devices to a new x_paired_devices table for
- *               audit + revocation.
+ *   NOTE: The `/api/auth/pair` endpoint NOW EXISTS in
+ *         Services/Elle.Service.HTTP/HTTPServer.cpp (see RegisterRoutes,
+ *         POST /api/auth/pair-code [AUTH_ADMIN, issues 6-digit code] and
+ *         POST /api/auth/pair [AUTH_PUBLIC, redeems code → JWT]). The JWT
+ *         is real HS256, signed with `http_server.jwt_secret`. Paired
+ *         devices are audited in ElleCore.dbo.PairedDevices (see SQL/
+ *         ElleAnn_PairedDevicesDelta.sql).
+ *
+ *         Open ticket (outside the Android scope): the central auth gate
+ *         in RouteDispatch currently validates Bearer tokens by
+ *         constant-time compare against the shared jwt_secret. The next
+ *         upgrade is to parse+verify the Bearer as an HS256 JWT, check
+ *         `exp`, and hit PairedDevices.Revoked. Until that lands, ONLY
+ *         /api/auth/pair itself issues JWTs — other routes still require
+ *         the shared secret as the Bearer. The JWT path is forward-
+ *         compatible; no Android-side changes will be needed when the
+ *         gate upgrades.
  */
 object Auth {
 

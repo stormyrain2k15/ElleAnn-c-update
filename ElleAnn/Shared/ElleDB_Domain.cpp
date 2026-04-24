@@ -559,6 +559,103 @@ bool GetTrustState(ELLE_TRUST_STATE& out) {
     return true;
 }
 
+/*══════════════════════════════════════════════════════════════════════════════
+ * PAIRED DEVICES — persistent audit of companion-app pairings.
+ *
+ *   Schema lives in SQL/ElleAnn_PairedDevicesDelta.sql; this is the only
+ *   code surface that touches the table. Row granularity is device_id,
+ *   and we upsert on re-pair so the "devices you've paired" list in the
+ *   admin UI never grows ghost rows when a phone is reinstalled and
+ *   pairs again with the same device_id.
+ *══════════════════════════════════════════════════════════════════════════════*/
+bool UpsertPairedDevice(const PairedDeviceRow& row) {
+    /* MERGE pattern — matches the rest of this file. Idempotent by
+     * DeviceId. Re-pair refreshes ExpiresMs + PairedAtMs + unrevokes. */
+    return ElleSQLPool::Instance().QueryParams(
+        "MERGE ElleCore.dbo.PairedDevices WITH (HOLDLOCK) AS t "
+        "USING (SELECT ? AS DeviceId) AS s ON t.DeviceId = s.DeviceId "
+        "WHEN MATCHED THEN "
+        "  UPDATE SET DeviceName = ?, PairedAtMs = ?, ExpiresMs = ?, "
+        "             Revoked = 0, RevokedAtMs = NULL, "
+        "             JwtFingerprint = ? "
+        "WHEN NOT MATCHED THEN "
+        "  INSERT (DeviceId, DeviceName, PairedAtMs, ExpiresMs, "
+        "          Revoked, JwtFingerprint) "
+        "  VALUES (?, ?, ?, ?, 0, ?);",
+        {
+            row.device_id,                                  /* MATCH key */
+            row.device_name,                                /* UPDATE set */
+            std::to_string((int64_t)row.paired_at_ms),
+            std::to_string((int64_t)row.expires_ms),
+            row.jwt_fingerprint,
+            row.device_id,                                  /* INSERT cols */
+            row.device_name,
+            std::to_string((int64_t)row.paired_at_ms),
+            std::to_string((int64_t)row.expires_ms),
+            row.jwt_fingerprint
+        }).success;
+}
+
+bool GetPairedDevice(const std::string& device_id, PairedDeviceRow& out) {
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT DeviceId, DeviceName, PairedAtMs, ExpiresMs, "
+        "       ISNULL(LastSeenMs, 0), Revoked, ISNULL(RevokedAtMs, 0), "
+        "       JwtFingerprint "
+        "FROM ElleCore.dbo.PairedDevices WHERE DeviceId = ?;",
+        { device_id });
+    if (!rs.success || rs.rows.empty()) return false;
+    auto& r = rs.rows[0];
+    out.device_id       = r[0];
+    out.device_name     = r[1];
+    out.paired_at_ms    = (uint64_t)r.GetIntOr(2, 0);
+    out.expires_ms      = (uint64_t)r.GetIntOr(3, 0);
+    out.last_seen_ms    = (uint64_t)r.GetIntOr(4, 0);
+    out.revoked         = r.GetIntOr(5, 0) != 0;
+    out.revoked_at_ms   = (uint64_t)r.GetIntOr(6, 0);
+    out.jwt_fingerprint = r[7];
+    return true;
+}
+
+bool ListPairedDevices(std::vector<PairedDeviceRow>& out, uint32_t limit) {
+    out.clear();
+    if (limit == 0) limit = 50;
+    auto rs = ElleSQLPool::Instance().QueryParams(
+        "SELECT TOP (?) DeviceId, DeviceName, PairedAtMs, ExpiresMs, "
+        "       ISNULL(LastSeenMs, 0), Revoked, ISNULL(RevokedAtMs, 0), "
+        "       JwtFingerprint "
+        "FROM ElleCore.dbo.PairedDevices ORDER BY PairedAtMs DESC;",
+        { std::to_string(limit) });
+    if (!rs.success) return false;
+    out.reserve(rs.rows.size());
+    for (auto& r : rs.rows) {
+        PairedDeviceRow row;
+        row.device_id       = r[0];
+        row.device_name     = r[1];
+        row.paired_at_ms    = (uint64_t)r.GetIntOr(2, 0);
+        row.expires_ms      = (uint64_t)r.GetIntOr(3, 0);
+        row.last_seen_ms    = (uint64_t)r.GetIntOr(4, 0);
+        row.revoked         = r.GetIntOr(5, 0) != 0;
+        row.revoked_at_ms   = (uint64_t)r.GetIntOr(6, 0);
+        row.jwt_fingerprint = r[7];
+        out.push_back(std::move(row));
+    }
+    return true;
+}
+
+bool RevokePairedDevice(const std::string& device_id) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.PairedDevices "
+        "SET Revoked = 1, RevokedAtMs = ? WHERE DeviceId = ?;",
+        { std::to_string((int64_t)ELLE_MS_NOW()), device_id }).success;
+}
+
+bool TouchPairedDeviceLastSeen(const std::string& device_id) {
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.PairedDevices SET LastSeenMs = ? "
+        "WHERE DeviceId = ? AND Revoked = 0;",
+        { std::to_string((int64_t)ELLE_MS_NOW()), device_id }).success;
+}
+
 bool RegisterWorker(ELLE_SERVICE_ID svc, const std::string& name) {
     auto& pool = ElleSQLPool::Instance();
     return pool.QueryParams(

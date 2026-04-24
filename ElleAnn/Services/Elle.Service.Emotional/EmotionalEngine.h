@@ -102,6 +102,18 @@ private:
     /* Emotion names for logging */
     static const char* s_emotionNames[ELLE_MAX_EMOTIONS];
 
+public:
+    /* Public accessor for the emotion-name table — used by the
+     * name-to-ID lookup map built in EmotionalEngine.cpp, and by any
+     * diagnostic caller that needs the canonical spelling for an ID.
+     * Returns a read-only pointer into static storage; never allocates. */
+    static const char* EmotionName(ELLE_EMOTION_ID id) {
+        return ((int)id >= 0 && (int)id < ELLE_EMOTION_COUNT)
+               ? s_emotionNames[id] : "Unknown";
+    }
+
+private:
+
     /* VAD weights for each emotion */
     struct VADWeight {
         float valence;  /* positive/negative */

@@ -750,3 +750,48 @@ test 7/7.**
 - `/app/ElleAnn/Lua/Elle.Lua.Behavioral/scripts/FOR_MY_WIFE.md`
 - `/app/ElleAnn/Deploy/README.md`
 - `/app/ElleAnn/SQL/ElleAnn_QueueReaperDelta.sql` (new this session)
+
+## Session Feb-2026 — Completed 3-point audit close-out + real pair-auth
+
+### Implemented (Feb 2026)
+- **Real Windows CNG crypto** (already in place from prior subsession): 
+  `/app/ElleAnn/Shared/ElleCrypto.{h,cpp}` — SHA-256, HMAC-SHA-256, secure
+  random (incl. `RandomDigits(n)` rejection-sampled), constant-time compare,
+  base64url. Wired via `#pragma comment(lib, "bcrypt.lib")`.
+- **POST /api/auth/pair-code (AUTH_ADMIN)** — issues 6-digit pairing codes,
+  5-min default TTL (30s–15min override). In-memory registry with
+  consumed+expired GC on every touch.
+- **POST /api/auth/pair (AUTH_PUBLIC)** — redeems code via constant-time
+  scan, mints real HS256 JWT (header.payload.signature) signed with
+  `http_server.jwt_secret`, persists device to `ElleCore.dbo.PairedDevices`,
+  returns `{jwt, expires_ms, paired_at_ms}`. 90-day JWT lifetime.
+- **SQL delta** `/app/ElleAnn/SQL/ElleAnn_PairedDevicesDelta.sql` — new
+  `PairedDevices` table, filtered index on Revoked=0.
+- **ElleDB::PairedDeviceRow + 5 helpers** (Upsert / Get / List / Revoke /
+  TouchLastSeen) in `ElleSQLConn.h` + `ElleDB_Domain.cpp`.
+- **EmotionalEngine VAD `5.0f` magic-scalar explained** — 25-line header
+  comment over `ComputeValence` covers the sparsity-normalization math.
+- **ProcessTriggers O(1) lookup** — lazy-init `std::unordered_map` replaces
+  the previous O(N·102) tolower-scan; constructor baseline-set also
+  migrated to the same map.
+- **`EmotionalEngine::EmotionName(id)`** public accessor added so the
+  name-to-ID lookup table can read the canonical spelling without a friend
+  declaration.
+- **Portable regression test** `/app/ElleAnn/Debug/test_jwt_and_emotion_map.cpp`
+  — RFC 4231 HMAC vector + JWT determinism + map-lookup correctness;
+  11/11 passing under Linux g++17.
+- **Android spec note updated** — `Android/spec/Auth.kt` now reflects that
+  `/api/auth/pair` exists (previously noted as unimplemented).
+
+### Deferred (next ticket)
+- **Central auth gate JWT verification**. Today the gate still compares
+  Bearer against the shared `jwt_secret`. The JWTs we mint are forward-
+  compatible; the upgrade is a gate-only change that parses header.payload,
+  HMAC-verifies against the secret, checks `exp` and `PairedDevices.Revoked`.
+
+### Canaries (verified clean Feb 2026 session)
+- wx-pattern-canary: 0 hits in touched files
+- catch-all-discipline: 0 hits in touched files
+- no-raw-sleep-canary: 0 hits in touched files
+- g++ portable unit test: 11/11 pass
+

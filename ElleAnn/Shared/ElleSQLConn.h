@@ -236,6 +236,44 @@ namespace ElleDB {
     bool UpdateTrust(int32_t delta, const std::string& reason);
     bool GetTrustState(ELLE_TRUST_STATE& out);
 
+    /*──────────────────────────────────────────────────────────────────────
+     * Paired devices — persistent audit of Android (or other companion)
+     * devices that have completed /api/auth/pair. See
+     * SQL/ElleAnn_PairedDevicesDelta.sql for the schema. The HTTP server
+     * keeps an in-memory pairing-code registry for the 5-minute handshake
+     * window; THIS table is the long-lived record.
+     *──────────────────────────────────────────────────────────────────────*/
+    struct PairedDeviceRow {
+        std::string device_id;
+        std::string device_name;
+        uint64_t    paired_at_ms  = 0;
+        uint64_t    expires_ms    = 0;
+        uint64_t    last_seen_ms  = 0;
+        bool        revoked       = false;
+        uint64_t    revoked_at_ms = 0;
+        std::string jwt_fingerprint;   /* first 32 hex chars of SHA-256(jwt) */
+    };
+
+    /* Upsert a device's pairing row. New devices inherit revoked=0; an
+     * existing device that re-pairs gets its row's ExpiresMs / PairedAtMs
+     * refreshed and Revoked forced back to 0. Idempotent by device_id.    */
+    bool UpsertPairedDevice(const PairedDeviceRow& row);
+
+    /* Look up a pairing record by device_id. Returns false when the row
+     * doesn't exist (caller must fail the 401 in that case).              */
+    bool GetPairedDevice(const std::string& device_id, PairedDeviceRow& out);
+
+    /* Admin: list paired devices (newest first). Caller controls limit.   */
+    bool ListPairedDevices(std::vector<PairedDeviceRow>& out, uint32_t limit = 50);
+
+    /* Admin: mark a device revoked. Sets Revoked=1 and RevokedAtMs=now.   */
+    bool RevokePairedDevice(const std::string& device_id);
+
+    /* Touch LastSeenMs — called on every authenticated request once full
+     * JWT verification is wired through the gate. Noop-safe.              */
+    bool TouchPairedDeviceLastSeen(const std::string& device_id);
+
+
     /* Goals */
     bool StoreGoal(const ELLE_GOAL_RECORD& goal);
     /* StoreGoal + return the DB-assigned IDENTITY id so callers don't
