@@ -331,6 +331,136 @@ enum HttpAuthLevel {
 };
 
 /*──────────────────────────────────────────────────────────────────────────────
+ * JWT VERIFICATION (HS256) — gate-side
+ *
+ *   Validates a device-issued HS256 JWT produced by MintJwt(). Returns
+ *   true iff ALL of the following are true:
+ *
+ *     1. Token has exactly three '.'-separated segments.
+ *     2. Header decodes as JSON with {"alg":"HS256","typ":"JWT"}.
+ *          (We accept only HS256. "none" and unknown algs are refused —
+ *          the classic JWT downgrade attack.)
+ *     3. Signature equals HMAC-SHA256(header_b64 + "." + payload_b64,
+ *        secret). Compared constant-time.
+ *     4. Payload decodes as JSON with string `sub` and integer `exp`.
+ *     5. `exp` is strictly greater than `now_ms`.
+ *
+ *   On success, `sub_out` receives the device_id and `exp_ms_out` the
+ *   expiry time. The caller is responsible for follow-up checks against
+ *   PairedDevices.Revoked — the JWT alone is not the final word on
+ *   authenticity once a device is revoked out-of-band.
+ *──────────────────────────────────────────────────────────────────────────────*/
+struct JwtVerifyResult {
+    bool        valid       = false;
+    std::string sub;             /* device_id */
+    uint64_t    exp_ms       = 0;
+    std::string failureReason;   /* one-line diagnostic for ELLE_WARN */
+};
+
+static JwtVerifyResult VerifyJwtHs256(const std::string& token,
+                                       const std::string& secret,
+                                       uint64_t now_ms) {
+    JwtVerifyResult r;
+    if (token.empty() || secret.empty()) {
+        r.failureReason = "empty token or secret";
+        return r;
+    }
+
+    /* Split on '.'. A valid HS256 JWT has exactly two dots. */
+    size_t d1 = token.find('.');
+    if (d1 == std::string::npos) { r.failureReason = "no dots"; return r; }
+    size_t d2 = token.find('.', d1 + 1);
+    if (d2 == std::string::npos) { r.failureReason = "one dot"; return r; }
+    if (token.find('.', d2 + 1) != std::string::npos) {
+        r.failureReason = "too many dots";
+        return r;
+    }
+    const std::string h64 = token.substr(0, d1);
+    const std::string p64 = token.substr(d1 + 1, d2 - d1 - 1);
+    const std::string s64 = token.substr(d2 + 1);
+    if (h64.empty() || p64.empty() || s64.empty()) {
+        r.failureReason = "empty segment";
+        return r;
+    }
+
+    /* 1. Decode + validate header. */
+    auto headerBytes = ElleCrypto::Base64UrlDecode(h64);
+    if (headerBytes.empty()) { r.failureReason = "header b64 invalid"; return r; }
+    try {
+        auto jh = nlohmann::json::parse(std::string(headerBytes.begin(),
+                                                     headerBytes.end()));
+        if (!jh.is_object()) { r.failureReason = "header not object"; return r; }
+        /* Accept only HS256. Reject "none" and any unknown alg. */
+        std::string alg = jh.value("alg", "");
+        if (alg != "HS256") { r.failureReason = "bad alg=" + alg; return r; }
+        /* typ is optional per RFC 7519 §5.1 but if present must be JWT.   */
+        if (jh.contains("typ") && jh["typ"].is_string() &&
+            jh["typ"].get<std::string>() != "JWT") {
+            r.failureReason = "bad typ";
+            return r;
+        }
+    } catch (const nlohmann::json::exception&) {
+        r.failureReason = "header json parse";
+        return r;
+    }
+
+    /* 2. Compute expected signature over (h64 "." p64). */
+    const std::string signingInput = h64 + "." + p64;
+    uint8_t expected[32];
+    if (!ElleCrypto::HmacSha256(secret.data(), secret.size(),
+                                 signingInput.data(), signingInput.size(),
+                                 expected)) {
+        r.failureReason = "hmac compute failed";
+        return r;
+    }
+    auto sigBytes = ElleCrypto::Base64UrlDecode(s64);
+    if (sigBytes.size() != 32) {
+        r.failureReason = "sig size != 32";
+        return r;
+    }
+    if (!ElleCrypto::ConstantTimeEquals(expected, sigBytes.data(), 32)) {
+        r.failureReason = "signature mismatch";
+        return r;
+    }
+
+    /* 3. Decode + validate payload. */
+    auto payloadBytes = ElleCrypto::Base64UrlDecode(p64);
+    if (payloadBytes.empty()) { r.failureReason = "payload b64 invalid"; return r; }
+    try {
+        auto jp = nlohmann::json::parse(std::string(payloadBytes.begin(),
+                                                     payloadBytes.end()));
+        if (!jp.is_object()) { r.failureReason = "payload not object"; return r; }
+        if (!jp.contains("sub") || !jp["sub"].is_string()) {
+            r.failureReason = "missing sub";
+            return r;
+        }
+        if (!jp.contains("exp") || !jp["exp"].is_number_integer()) {
+            r.failureReason = "missing exp";
+            return r;
+        }
+        r.sub = jp["sub"].get<std::string>();
+        int64_t exp = jp["exp"].get<int64_t>();
+        if (exp <= 0) { r.failureReason = "non-positive exp"; return r; }
+        r.exp_ms = (uint64_t)exp;
+        if (r.exp_ms <= now_ms) {
+            r.failureReason = "expired";
+            return r;
+        }
+        if (r.sub.empty() || r.sub.size() > 128) {
+            r.failureReason = "bad sub size";
+            return r;
+        }
+    } catch (const nlohmann::json::exception&) {
+        r.failureReason = "payload json parse";
+        return r;
+    }
+
+    r.valid = true;
+    return r;
+}
+
+
+/*──────────────────────────────────────────────────────────────────────────────
  * ROUTE DISPATCHER — supports path patterns with {placeholders}
  *──────────────────────────────────────────────────────────────────────────────*/
 struct RouteEntry {
@@ -435,6 +565,7 @@ public:
                 return diff == 0;
             };
             bool haveBearer = false, haveAdmin = false;
+            std::string jwtSub;               /* device_id from verified JWT */
             auto authIt = req.headers.find("authorization");
             if (authIt != req.headers.end()) {
                 static const std::string kBearer = "Bearer ";
@@ -449,8 +580,54 @@ public:
                     while (!tok.empty() && (tok.front() == ' ' ||
                                             tok.front() == '\t'))
                         tok.erase(0, 1);
-                    if (!secret.empty()   && constTimeEq(tok, secret))   haveBearer = true;
-                    if (!adminKey.empty() && constTimeEq(tok, adminKey)) haveAdmin  = true;
+
+                    /*──────────────────────────────────────────────────────
+                     * JWT-first path.
+                     *   A real HS256 JWT always has exactly two dots. If
+                     *   the presented token has two dots, run the full
+                     *   verify (header/alg/signature/exp). On success, hit
+                     *   PairedDevices to check Revoked — revocation is the
+                     *   out-of-band escape hatch the audit table enables.
+                     *   On failure, fall through to the legacy shared-
+                     *   secret path so admin CLIs presenting the raw
+                     *   secret as a Bearer continue to work.
+                     *──────────────────────────────────────────────────────*/
+                    if (std::count(tok.begin(), tok.end(), '.') == 2 &&
+                        !secret.empty()) {
+                        uint64_t now_ms = (uint64_t)ELLE_MS_NOW();
+                        auto vr = VerifyJwtHs256(tok, secret, now_ms);
+                        if (vr.valid) {
+                            ElleDB::PairedDeviceRow prow;
+                            if (ElleDB::GetPairedDevice(vr.sub, prow) &&
+                                !prow.revoked) {
+                                haveBearer = true;
+                                jwtSub = vr.sub;
+                                /* Async touch — ignore failure; this is
+                                 * best-effort observability, not a gate. */
+                                ElleDB::TouchPairedDeviceLastSeen(vr.sub);
+                            } else {
+                                /* Valid signature but device revoked or
+                                 * missing from the audit table → refuse.
+                                 * Don't fall through to shared-secret
+                                 * because the signature PROVES they used
+                                 * a device-issued JWT, and we've marked
+                                 * that device untrusted.                 */
+                                ELLE_WARN("JWT verify ok but device revoked/missing: sub=%s",
+                                          vr.sub.c_str());
+                                return HTTPResponse::Err(401,
+                                    "device revoked — re-pair required");
+                            }
+                        } else {
+                            ELLE_DEBUG("JWT verify failed: %s",
+                                       vr.failureReason.c_str());
+                            /* Fall through to shared-secret compare.    */
+                        }
+                    }
+
+                    if (!haveBearer) {
+                        if (!secret.empty()   && constTimeEq(tok, secret))   haveBearer = true;
+                        if (!adminKey.empty() && constTimeEq(tok, adminKey)) haveAdmin  = true;
+                    }
                 }
             }
             auto keyIt = req.headers.find("x-admin-key");
@@ -474,6 +651,15 @@ public:
             }
             if (!ok) {
                 return HTTPResponse::Err(401, "authentication required");
+            }
+
+            /* Expose the verified device_id (if any) to handlers via a
+             * synthetic x-* header. This is the same stash-on-request
+             * pattern the path-param dispatcher uses. Handlers that want
+             * to personalise by device read `x-auth-device-id`; routes
+             * that don't care can ignore it entirely.                  */
+            if (!jwtSub.empty()) {
+                req.headers["x-auth-device-id"] = jwtSub;
             }
         }
 

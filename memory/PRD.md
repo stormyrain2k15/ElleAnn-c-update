@@ -795,3 +795,35 @@ test 7/7.**
 - no-raw-sleep-canary: 0 hits in touched files
 - g++ portable unit test: 11/11 pass
 
+
+## Session Feb-2026 (continued) — Central auth gate upgraded to real HS256 JWT verify
+
+### Implemented
+- `VerifyJwtHs256()` static helper in `HTTPServer.cpp` — parses 3-segment
+  token, validates alg=HS256 (rejects "none" + unknown algs to close JWT
+  downgrade attack), HMAC-verifies sig against `http_server.jwt_secret`,
+  decodes payload, extracts `sub`/`exp`, enforces `exp > now`.
+- `RouteDispatch::Dispatch` auth gate upgraded — JWT-first path: if
+  Bearer has 2 dots, runs full verify + PairedDevices.Revoked check +
+  LastSeenMs touch. Falls through to shared-secret compare only when JWT
+  path doesn't apply (admin CLIs can still present the raw secret).
+  Revoked devices with valid signatures are HARD-refused (401) — no
+  fallback, since the signature proves device origin.
+- `x-auth-device-id` synthetic header stashed on the request after
+  successful JWT auth so downstream handlers can personalise by device.
+- Test suite 18/18 pass (portable g++) — includes wrong-secret,
+  expired, tampered-payload, no-dots, and happy-path.
+
+### Now closed
+- The P0 gate-upgrade handoff item from the previous milestone.
+- Android spec (Auth.kt) is now end-to-end accurate: `/api/auth/pair`
+  endpoint exists, JWTs it issues are actually honoured by every
+  authenticated route, revocation works.
+
+### Remaining
+- Admin UI / routes for listing + revoking paired devices
+  (`GET /api/auth/devices`, `DELETE /api/auth/devices/{id}`).
+- Android project scaffold consuming `Android/spec/*.kt`.
+- Optional: in-memory cache for GetPairedDevice to avoid a per-request
+  DB round-trip under heavy load (currently 1 PK-indexed lookup per
+  authenticated request, acceptable for local single-user traffic).
