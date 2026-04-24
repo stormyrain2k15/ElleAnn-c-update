@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    network_security_config — allow cleartext HTTP to user-specified
+    private IPs. The companion app talks to a desktop server on the
+    user's LAN; there is no cloud endpoint, no TLS termination, and
+    the pairing handshake provides the trust fabric.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

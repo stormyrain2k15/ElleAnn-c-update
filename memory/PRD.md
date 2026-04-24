@@ -827,3 +827,53 @@ test 7/7.**
 - Optional: in-memory cache for GetPairedDevice to avoid a per-request
   DB round-trip under heavy load (currently 1 PK-indexed lookup per
   authenticated request, acceptable for local single-user traffic).
+
+## Session Feb-2026 (continued) — P1/P2/QR complete + Android scaffold
+
+### HTTP-side (all compiled + decoder-verified)
+- **P1 admin device management**
+  - `GET /api/auth/devices` (AUTH_ADMIN) — lists up to 200 paired devices.
+  - `DELETE /api/auth/devices/{id}` (AUTH_ADMIN) — revokes + wipes the
+    gate cache entry so revocation takes effect on the next request
+    rather than 30 s later.
+- **P2 cache** — `PairedDeviceStatusCached()` 30-second TTL map (bounded
+  at 4096 entries, LRU-ish eviction of oldest half when full). Replaces
+  the per-request `ElleDB::GetPairedDevice` round-trip in the JWT gate.
+- **QR endpoint** — `GET /api/auth/qr?code=XXXXXX&host=...&port=...`
+  (AUTH_ADMIN) returns `image/svg+xml` rendered from a pure-C++
+  spec-compliant encoder at `Shared/ElleQR.{h,cpp}`. Covers QR versions
+  1–10, all 4 ECC levels, 8-mask penalty-selection, RS-over-GF(256).
+- **Decoder verification** — `/tmp/qr_verify.py` fed 6 payloads through
+  the encoder and `pyzbar` decoded all 6 back byte-identical.
+
+### Android scaffold (ready to `./gradlew assembleDebug`)
+- Root: `settings.gradle.kts`, `build.gradle.kts`, `gradle.properties`,
+  `README.md`.
+- App module `app/` with Compose UI, Retrofit + OkHttp + kotlinx-
+  serialization, `androidx.security` encrypted token storage, ZXing
+  QR scanner.
+- Kotlin source tree:
+  - `ElleApp.kt` — Application subclass owning `AppContainer`.
+  - `MainActivity.kt` — Compose host with `ellepair://` deep-link parser.
+  - `data/TokenStore.kt` — EncryptedSharedPreferences + stable device UUID.
+  - `data/AuthInterceptor.kt` — Bearer attach + 401-wipe logic.
+  - `data/ElleApi.kt` — Retrofit interface (pair / health / emotions).
+  - `data/AppContainer.kt` — hand-rolled DI; `apiFor(host, port)` cache.
+  - `ui/PairScreen.kt` — host/port/code form + QR scan launcher.
+  - `ui/HomeScreen.kt` — sanity call to `/api/emotions` to verify the
+    Bearer plumbing end-to-end.
+  - `ui/theme/Theme.kt` — muted teal/umber (dodges the default purple).
+- Resources: manifest with camera + INTERNET + `ellepair://` intent
+  filter, strings/themes XML, cleartext allowed (LAN-only), no-backup
+  rules on the auth blob.
+
+### Canaries
+- All three `.cpp`/`.h` added this session pass wx-pattern,
+  catch-all-discipline, no-raw-sleep, transform-tolower canaries.
+
+### Still deferred
+- Admin UI (web frontend) to call the device-mgmt routes and render
+  the QR endpoint inline. Today the C++ service returns the SVG; an
+  admin can hit it with a browser tab and screenshot/point the phone.
+- Android build + wire-up validation — requires Android Studio + a
+  physical or emulated device on the LAN.

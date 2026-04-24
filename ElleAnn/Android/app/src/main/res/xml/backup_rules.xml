@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No app data should be exfiltrated to cloud backups — the JWT is in
+     Keystore-wrapped prefs and the whole point is local-first trust. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="elle_auth.xml"/>
+</full-backup-content>
