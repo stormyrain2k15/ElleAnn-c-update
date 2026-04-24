@@ -411,7 +411,13 @@ private:
             } catch (const std::exception& e) {
                 ELLE_ERROR("Chat orchestration exception: %s", e.what());
             } catch (...) {
-                ELLE_ERROR("Chat orchestration unknown exception");
+                /* Top-of-worker-thread boundary: swallowing here is
+                 * deliberate so one malformed chat request doesn't tear
+                 * down the whole orchestration loop and leave the
+                 * service unable to answer subsequent requests. Every
+                 * inner `catch(...)` has been removed — anything
+                 * surprising ends up here with full context.           */
+                ELLE_ERROR("Chat orchestration unknown exception — request dropped, loop continues");
             }
         }
     }
@@ -643,9 +649,17 @@ private:
         uint64_t t0 = ELLE_MS_NOW();
 
         /* 1. Persist the user turn immediately so cross-session recall works
-         *    even if we crash mid-pipeline. */
+         *    even if we crash mid-pipeline. `StoreMessage` returns bool;
+         *    we catch `std::exception` defensively against deep ODBC
+         *    surprises but NOT `catch(...)` — an unknown exception here
+         *    is a real bug that should propagate to the top-of-orchestration
+         *    boundary (the try at line ~413) where it's logged with the
+         *    request context, rather than being silently swallowed.      */
         try { ElleDB::StoreMessage(convId, 1 /*user*/, userText, m_cachedEmotions, 0.0f); }
-        catch (...) { ELLE_WARN("StoreMessage(user) failed"); }
+        catch (const std::exception& e) {
+            ELLE_WARN("StoreMessage(user, conv=%llu) failed: %s",
+                      (unsigned long long)convId, e.what());
+        }
 
         /* 2. Mode + entities */
         ChatMode mode = DetectMode(userText);
@@ -659,9 +673,17 @@ private:
         std::vector<ELLE_MEMORY_RECORD> memories =
             CrossReferenceByEntities(entities, userText, mode);
 
-        /* 5. Conversation history (last 20 turns) */
+        /* 5. Conversation history (last 20 turns). Catch std::exception
+         *    (not `...`) — if the history pull fails we degrade to
+         *    "no prior turns" rather than fail the whole chat, but
+         *    unknown exceptions still propagate up to the orchestration
+         *    boundary.                                                   */
         std::vector<ELLE_CONVERSATION_MSG> history;
-        try { ElleDB::GetConversationHistory(convId, history, 20); } catch (...) {}
+        try { ElleDB::GetConversationHistory(convId, history, 20); }
+        catch (const std::exception& e) {
+            ELLE_WARN("GetConversationHistory(conv=%llu) failed: %s — degrading to empty history",
+                      (unsigned long long)convId, e.what());
+        }
 
         /* 6. Build system prompt (identity + context) */
         std::string identity =
@@ -754,6 +776,10 @@ private:
          *     in-process calls that were never reachable, and means every
          *     chat system prompt reflects one unified mind, not per-process
          *     islands.                                                     */
+        /* Optional context pulls from Bonding + InnerLife. Both are
+         * nice-to-have — missing the row or an ODBC hiccup should NOT
+         * fail the chat pipeline. Scope the catch to std::exception so
+         * unknown throws propagate up to the orchestration boundary.    */
         try {
             auto rs = ElleSQLPool::Instance().Query(
                 "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
@@ -765,7 +791,9 @@ private:
                 && !rs.rows[0].values[0].empty()) {
                 ctx << rs.rows[0].values[0] << "\n";
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            ELLE_DEBUG("bonding_context pull failed: %s", e.what());
+        }
         try {
             auto rs = ElleSQLPool::Instance().Query(
                 "IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s "
@@ -777,7 +805,9 @@ private:
                 && !rs.rows[0].values[0].empty()) {
                 ctx << rs.rows[0].values[0] << "\n";
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            ELLE_DEBUG("innerlife_context pull failed: %s", e.what());
+        }
 
         if (!memories.empty()) {
             ctx << "What you remember that's relevant to this turn:\n";
@@ -949,7 +979,12 @@ private:
                     }
                 }
             }
-        } catch (...) { /* XChromosome offline — system prompt stays clean. */ }
+        } catch (const std::exception& e) {
+            /* XChromosome offline / schema-not-seeded is an expected
+             * degraded mode — system prompt stays clean. Logging at
+             * DEBUG so ops can still see the exact reason if they care.  */
+            ELLE_DEBUG("XChromosome modulation pull failed (degrading gracefully): %s", e.what());
+        }
 
         ctx << "\n";
 

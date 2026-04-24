@@ -1118,7 +1118,13 @@ private:
             if (s == INVALID_SOCKET) continue;
             try { HandleClient(s); }
             catch (const std::exception& e) { ELLE_ERROR("HTTP worker: %s", e.what()); }
-            catch (...) { ELLE_ERROR("HTTP worker unknown exception"); }
+            catch (...) {
+                /* Top-of-worker-thread boundary: swallowing unknown
+                 * exceptions here keeps the worker alive for the next
+                 * client. Nothing inside HandleClient uses catch(...)
+                 * except this outermost guard.                          */
+                ELLE_ERROR("HTTP worker unknown exception — connection dropped, worker continues");
+            }
         }
     }
 
@@ -1241,6 +1247,10 @@ private:
                 closesocket(clientSocket);
             }
         } catch (...) {
+            /* Top-of-HandleClient boundary: an unknown non-std exception
+             * escaped from dispatching. Best-effort 500 back to the
+             * client, then the worker returns to the queue. Upstream
+             * catch(...) at HTTP worker level is the final safety net. */
             ELLE_ERROR("HTTP handler unknown exception on %s %s",
                        /* best-effort context — req may have been parsed */
                        "?", "?");
@@ -1695,7 +1705,13 @@ private:
     void HandleWebSocketMessage(std::shared_ptr<WSClient> client, const std::string& payload) {
         json msg;
         try { msg = json::parse(payload); }
-        catch (...) {
+        catch (const std::exception& e) {
+            /* Bad JSON from WS client — surface the parse error back over
+             * the socket rather than catch(...) swallowing what `e.what()`
+             * would tell us. Unknown non-std exceptions are intentionally
+             * NOT caught here so they propagate to the top-of-thread WS
+             * handler boundary.                                          */
+            ELLE_DEBUG("WS invalid JSON: %s", e.what());
             WsSendText(client->socket, client->sendMutex,
                        R"({"type":"error","error":"invalid_json"})");
             return;
@@ -2868,12 +2884,22 @@ private:
 
         /* ============== Dictionary — dbo.dictionary_words ============== */
         m_router.Register("POST", "/api/dictionary/load", [](const HTTPRequest& req) {
+            /* Body is optional for this endpoint — callers may POST with
+             * no body to start with defaults. But if a body IS present
+             * and it's malformed JSON, that's a client error the user
+             * wants to know about — return 400 rather than silently
+             * treating malformed input as "use defaults".               */
             uint32_t start = 0, limit = 0;
-            try {
-                json body = req.BodyJSON();
-                start = body.value("start", 0);
-                limit = body.value("limit", 0);
-            } catch (...) { /* no body — use defaults */ }
+            if (!req.body.empty()) {
+                try {
+                    json body = req.BodyJSON();
+                    start = body.value("start", 0);
+                    limit = body.value("limit", 0);
+                } catch (const std::exception& e) {
+                    return HTTPResponse::Err(400,
+                        std::string("malformed JSON body: ") + e.what());
+                }
+            }
             if (!DictionaryLoader::Instance().StartLoad(start, limit)) {
                 auto s = DictionaryLoader::Instance().GetState();
                 return HTTPResponse::JSON(409, json({
@@ -4465,10 +4491,12 @@ private:
             } catch (const std::exception& e) {
                 ELLE_ERROR("admin/reload failed: %s", e.what());
                 return HTTPResponse::Err(500, std::string("reload failed: ") + e.what());
-            } catch (...) {
-                ELLE_ERROR("admin/reload failed (unknown)");
-                return HTTPResponse::Err(500, "reload failed");
             }
+            /* No inner catch(...) — unknown exceptions escape to the
+             * HandleClient top-of-scope boundary, which returns 500 and
+             * logs with full request context. Preventing the inner
+             * catch-all removes a blind spot where an unknown throw was
+             * silently turning into a generic "reload failed" 500.       */
         }, AUTH_ADMIN);
 
         ELLE_INFO("Registered %zu API routes", m_router.Count());

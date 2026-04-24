@@ -169,7 +169,10 @@ private:
             if (hService) {
                 SERVICE_STATUS status;
                 ControlService(hService, SERVICE_CONTROL_STOP, &status);
-                Sleep(2000);
+                /* Interruptible — if we ourselves are told to stop
+                 * mid-restart, bail out in <=50ms instead of blocking
+                 * the full 2s.                                        */
+                InterruptibleSleep(2000);
                 StartServiceA(hService, 0, nullptr);
                 CloseServiceHandle(hService);
             }

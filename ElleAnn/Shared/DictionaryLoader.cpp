@@ -7,6 +7,7 @@
 #include "DictionaryLoader.h"
 #include "ElleLogger.h"
 #include "ElleSQLConn.h"
+#include "ElleWait.h"
 #include "json.hpp"
 
 #include <windows.h>
@@ -112,8 +113,9 @@ void DictionaryLoader::WorkerRun(uint32_t startIdx, uint32_t limit) {
                 m_state.last_word = word;
             }
             PersistState();
-            /* Be nice to the free public API — sleep a tick on failure too. */
-            Sleep(500);
+            /* Be nice to the free public API — and still interruptible
+             * so Shutdown() doesn't have to wait 500ms per failed word.  */
+            ElleWait::PollingSleep(500, m_running);
             continue;
         }
 
@@ -128,12 +130,9 @@ void DictionaryLoader::WorkerRun(uint32_t startIdx, uint32_t limit) {
         }
         PersistState();
 
-        /* Rate-limit: dictionaryapi.dev is free. ~100 ms between calls.
-         * Poll m_running every 40 ms so a Shutdown() request aborts the
-         * run within ~40 ms worst case instead of the full 120 ms sleep. */
-        for (int slept = 0; slept < 120 && m_running.load(); slept += 40) {
-            Sleep(40);
-        }
+        /* Rate-limit: dictionaryapi.dev is free. ~120 ms between calls,
+         * checked against m_running so Shutdown() aborts within ~50 ms. */
+        ElleWait::PollingSleep(120, m_running);
     }
 
     {

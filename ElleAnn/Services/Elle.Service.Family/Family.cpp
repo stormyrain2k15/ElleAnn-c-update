@@ -596,8 +596,10 @@ private:
             spawned++;
 
             /* Stagger so Heartbeat + named-pipe servers have time to come
-             * up before their consumers try to connect.                   */
-            if (spawnDelayMs > 0) Sleep(spawnDelayMs);
+             * up before their consumers try to connect. Interruptible so
+             * Family itself stopping mid-birth bails out in <=50ms rather
+             * than waiting the full spawn_delay per remaining child.     */
+            if (spawnDelayMs > 0) InterruptibleSleep(spawnDelayMs);
         }
 
         /* Promote the HTTP pid to the summary row so MonitorLiveChildren's

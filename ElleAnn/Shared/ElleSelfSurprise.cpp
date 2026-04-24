@@ -67,7 +67,10 @@ ElleSelfSurprise::SurpriseResult ElleSelfSurprise::EvaluateOwnResponse(
             if (sj["score"].is_number()) score = sj["score"].get<float>();
             else if (sj["score"].is_string()) {
                 try { score = std::stof(sj["score"].get<std::string>()); }
-                catch (...) { score = -1.0f; }
+                catch (const std::invalid_argument&) { score = -1.0f; }
+                catch (const std::out_of_range&)     { score = -1.0f; }
+                /* No catch(...) — std::stof only documents these two.
+                 * Anything else is a real bug and should propagate.   */
             }
         }
         if (sj.contains("what_surprised") && sj["what_surprised"].is_string())

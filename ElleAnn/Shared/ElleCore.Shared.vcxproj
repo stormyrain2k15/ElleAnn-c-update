@@ -70,6 +70,7 @@
     <ClInclude Include="ElleSelfSurprise.h" />
     <ClInclude Include="ElleSQLConn.h" />
     <ClInclude Include="ElleTypes.h" />
+    <ClInclude Include="ElleWait.h" />
     <ClInclude Include="json.hpp" />
   </ItemGroup>
 

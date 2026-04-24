@@ -113,7 +113,12 @@ inline JsonExtractResult ExtractJsonObjectEx(const std::string& s, nlohmann::jso
              * an object, we report RootNotObject (more specific than
              * ParseFailed).                                               */
             saw_parse_failure = true;
-        } catch (...) {
+        } catch (const nlohmann::json::parse_error&) {
+            /* Tighter than catch(...): nlohmann::json::parse only ever
+             * throws parse_error for invalid input. If something else
+             * appears here (e.g. std::bad_alloc from a huge buffer),
+             * let it propagate — that's a real system signal, not a
+             * candidate-rejected signal.                                 */
             saw_parse_failure = true;
         }
         i = start + 1;
@@ -130,80 +135,6 @@ inline JsonExtractResult ExtractJsonObjectEx(const std::string& s, nlohmann::jso
  * `ExtractJsonObjectEx` directly.                                      */
 inline bool ExtractJsonObject(const std::string& s, nlohmann::json& out) {
     return ExtractJsonObjectEx(s, out) == JsonExtractResult::Ok;
-}
-
-/* ── Legacy implementation retained below only to keep unit-test
- * parity in case someone inlines it. All production call sites go
- * through ExtractJsonObject / ExtractJsonObjectEx above.              */
-inline bool ExtractJsonObject_Legacy_UNUSED(const std::string& s, nlohmann::json& out) {
-    if (s.empty()) return false;
-    constexpr int kMaxDepth = 1024;
-    size_t i = 0;
-    while (i < s.size()) {
-        size_t start = s.find('{', i);
-        if (start == std::string::npos) return false;
-        int depth = 0;
-        bool inStr = false;
-        size_t end = std::string::npos;
-        bool aborted = false;
-        for (size_t j = start; j < s.size(); j++) {
-            unsigned char c = static_cast<unsigned char>(s[j]);
-            if (inStr) {
-                if (c == '\\') {
-                    /* Consume the escape sequence in full so a bogus
-                     * byte pattern like `\"` or `\u007D` inside a
-                     * string can never be mistaken for a close-brace
-                     * or close-quote at the outer level.           */
-                    if (j + 1 >= s.size()) { aborted = true; break; }
-                    char esc_char = s[j + 1];
-                    if (esc_char == 'u') {
-                        /* \uXXXX -- 4 hex digits must follow.      */
-                        if (j + 5 >= s.size()) { aborted = true; break; }
-                        j += 5; /* skip `u` + 4 hex; loop `j++` skips `\\` */
-                    } else {
-                        /* \" \\ \/ \b \f \n \r \t -- one char.      */
-                        j += 1;
-                    }
-                    continue;
-                }
-                if (c == '"') { inStr = false; continue; }
-                /* JSON forbids raw control chars < 0x20 inside a
-                 * string literal; but we intentionally tolerate them
-                 * here because the final parse step will reject the
-                 * candidate, and the outer loop will move on.      */
-            } else {
-                if (c == 0) { aborted = true; break; }  /* embedded NUL -- fail closed */
-                if (c == '"') { inStr = true; continue; }
-                if (c == '{') {
-                    if (++depth > kMaxDepth) { aborted = true; break; }
-                } else if (c == '}') {
-                    depth--;
-                    if (depth < 0) { aborted = true; break; }
-                    if (depth == 0) { end = j; break; }
-                }
-            }
-        }
-        if (aborted) return false;
-        if (end == std::string::npos) {
-            /* Candidate ran off the end without closing. Per the
-             * documented contract ("tries the next `{` until
-             * something parses or the string is exhausted"), advance
-             * past THIS `{` and keep looking -- a later brace run may
-             * still balance (e.g. prose `{ dangling... {"real":1}`).
-             * Previously we returned false immediately, so well-formed
-             * JSON appearing after a stray brace was invisible.       */
-            i = start + 1;
-            continue;
-        }
-        try {
-            out = nlohmann::json::parse(s.substr(start, end - start + 1));
-            return out.is_object();
-        } catch (...) {
-            /* this candidate didn't parse -- advance past it and try again */
-            i = start + 1;
-        }
-    }
-    return false;
 }
 
 } /* namespace Elle */

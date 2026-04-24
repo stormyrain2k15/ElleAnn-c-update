@@ -439,6 +439,16 @@ void ElleServiceBase::ServiceLoop() {
 bool ElleServiceBase::InitializeCore() {
     ELLE_INFO("Initializing %s...", m_displayName.c_str());
 
+    /* Arm m_running at the *start* of init so InterruptibleSleep() calls
+     * inside ConnectDependencies() (and any other init-time waits) block
+     * the full interval unless SCM asks us to stop mid-init. Previously
+     * m_running stayed false until ServiceLoop, which meant the new
+     * InterruptibleSleep(1s/2s/3s) in the retry loop degenerated to a
+     * zero-wait tight loop during normal boot. Shutdown requests during
+     * init still work: ServiceCtrlHandler flips it to false and
+     * notifies, and the next InterruptibleSleep returns immediately.   */
+    m_running.store(true, std::memory_order_release);
+
     /* 1. Load config */
     std::string configPath = "elle_master_config.json";
     /* Try exe directory first */
@@ -566,9 +576,14 @@ void ElleServiceBase::ConnectDependencies() {
                 ELLE_INFO("Connected to %s", ElleIPC::GetServiceName(dep));
                 break;
             }
-            ELLE_WARN("Failed to connect to %s (attempt %d/5)", 
+            ELLE_WARN("Failed to connect to %s (attempt %d/5)",
                       ElleIPC::GetServiceName(dep), attempt + 1);
-            Sleep(1000 * (attempt + 1));
+            /* Interruptible back-off: if SCM asks us to stop mid-init
+             * (e.g. a dependency is down and Heartbeat escalates),
+             * InterruptibleSleep returns immediately on m_running==false
+             * instead of blocking up to 5 seconds per attempt.         */
+            InterruptibleSleep(1000 * (attempt + 1));
+            if (!m_running.load()) break;
         }
     }
 }

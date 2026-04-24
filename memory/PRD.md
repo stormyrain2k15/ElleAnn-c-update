@@ -480,6 +480,90 @@ files:
 
 Next build expected: **0 errors, 0 warnings**.
 
+### OpSec forensic audit round 2 (Feb 2026) — 7-point sweep CLOSED
+User forensic audit flagged 7 concrete violations. All landed + canaried:
+
+**1. GoalEngine: completed goals not persisted**
+- `GoalEngine.cpp:88` — `g.status = GOAL_COMPLETED` in memory only, no
+  SQL UPDATE. Added `ElleDB::UpdateGoalStatus(goalId, GOAL_COMPLETED)`
+  with a warn-on-failure path matching the existing abandon handler.
+
+**2. EmotionalEngine: raw Sleep in decay loop**
+- `EmotionalEngine.cpp:578` — `Sleep(m_intervalMs)` blocked SCM shutdown
+  for a full tick. Replaced with `ElleWait::PollingSleep(m_intervalMs,
+  m_running)` — 50ms stop latency regardless of tick size.
+
+**3. Repo-wide raw Sleep cleanup**
+- New helper `Shared/ElleWait.h` — `PollingSleep(ms, atomic<bool>& run, step)`
+  + `PollingSleepUntilSet(ms, atomic<bool>& stop, step)`. Standalone (no
+  ServiceBase dependency) so Shared-layer code can use it.
+- `DictionaryLoader.cpp` — 2 raw Sleep sites replaced (500ms retry + 120ms
+  rate-limit, the latter consolidated from a hand-rolled 40ms poll loop).
+- `MemoryEngine.cpp:749` — `Sleep(recallMs)` → `PollingSleep`.
+- `ActionExecutor.cpp:353` — `Sleep(500)` → `PollingSleepUntilSet(w->cancel)`.
+- `Heartbeat.cpp:172` — `Sleep(2000)` inside SCM restart → `InterruptibleSleep`.
+- `Family.cpp:600` — `Sleep(spawnDelayMs)` between child births →
+  `InterruptibleSleep`.
+- `ElleServiceBase.cpp:571` — `Sleep(1000 * (attempt+1))` in
+  `ConnectDependencies` retry → `InterruptibleSleep`. Also armed
+  `m_running = true` at top of `InitializeCore` so init-time
+  InterruptibleSleep actually waits the intended interval (previously
+  m_running defaulted false and the sleep degenerated to zero-wait).
+- `ElleServiceBase.cpp:263` (Sleep inside `UninstallService`) **intentionally
+  retained** — one-shot admin CLI path, not a worker loop.
+
+**4. CognitiveEngine broad catch(...) — narrowed**
+- Four logic-path `catch(...)` tightened to `catch(const std::exception&)`
+  with context-bearing log messages:
+  * `StoreMessage` failure (now logs conv id + e.what())
+  * `GetConversationHistory` failure (now degrades-to-empty with log)
+  * `bonding_context` / `innerlife_context` DB pulls (2 sites)
+  * `RefreshXModulation` DB pull (narrowed to std::exception + DEBUG log)
+- `catch(...)` at line 413 **retained** as documented top-of-chat-
+  orchestration-thread boundary — comment rewritten to make the
+  boundary intent explicit.
+
+**5. HTTPServer malformed-body fallback**
+- `POST /api/dictionary/load` body-parse: previously `catch(...) { use
+  defaults }`, now returns `400 "malformed JSON body: <e.what()>"` when
+  a body IS present and malformed (empty body still defaults).
+- `HandleWebSocketMessage` JSON parse: narrowed to `std::exception`.
+- `/api/admin/reload`: removed inner `catch(...)` so unknown throws
+  escape to the HandleClient top-of-scope boundary instead of being
+  flattened to a generic 500.
+- Worker-thread + HandleClient top-level `catch(...)` **retained** with
+  documented "Top-of-worker-thread boundary" comments.
+
+**6. ElleJsonExtract.h catch-all**
+- Narrowed the remaining `catch(...)` on `json::parse` to
+  `catch(const nlohmann::json::parse_error&)` with a comment explaining
+  why std::bad_alloc and other non-parse throws should propagate.
+- Deleted the 70-line `ExtractJsonObject_Legacy_UNUSED` dead function
+  (had its own `catch(...)`).
+
+**7. ElleSelfSurprise.cpp**
+- `std::stof` `catch(...)` narrowed to the two exceptions it documents:
+  `std::invalid_argument` and `std::out_of_range`.
+
+### Build hygiene audit
+- `Directory.Build.props` verified: single-policy root with `Level4` +
+  `TreatWarningAsError=true`; narrow 5-code documented whitelist
+  (C4100, C4201, C4251, C4505, C4702). No non-vendored vcxproj overrides.
+- Lua opt-out is the only documented exception, per-file in the one
+  vendored project.
+
+### New CI canaries
+- `catch-all-discipline-canary`: every `catch(...)` must have a
+  `boundary` / `top-of-` / `worker-thread` / `intentional` comment
+  within ±5 lines. All 3 current sites (HTTPServer worker-thread top,
+  HandleClient top, CognitiveEngine chat-orchestration top) pass.
+- `warning-policy-canary`: fails the build if any non-vendored
+  `.vcxproj` introduces a local `WarningLevel` or `TreatWarningAsError`
+  override, or if `Directory.Build.props` stops setting `Level4` + /WX.
+
+All three canaries scan clean on the current tree; embedding-novelty
+test still 7/7 pass.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

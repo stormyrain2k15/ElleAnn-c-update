@@ -86,6 +86,15 @@ public:
 
                 if (progress >= 1.0f) {
                     g.status = GOAL_COMPLETED;
+                    /* Durable — matches the auto-abandon path at line 178.
+                     * Without this, Elle would "complete" goals in memory
+                     * but they'd come back ACTIVE on the next service
+                     * restart and UpdateProgress would happily push them
+                     * over 100% again.                                   */
+                    if (!ElleDB::UpdateGoalStatus(goalId, GOAL_COMPLETED)) {
+                        ELLE_WARN("Goal %llu UpdateGoalStatus(COMPLETED) failed",
+                                  (unsigned long long)goalId);
+                    }
                     ELLE_INFO("Goal COMPLETED: [%llu] %s", goalId, g.description);
                 }
                 break;

@@ -13,6 +13,7 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include "../../Shared/ElleQueueIPC.h"
+#include "../../Shared/ElleWait.h"
 #include "../../Shared/json.hpp"
 #include <sstream>
 #include <string>
@@ -350,7 +351,11 @@ private:
                 if (err == ERROR_NOTIFY_ENUM_DIR) continue;
                 ELLE_WARN("FileWatcher ReadDirectoryChangesW err=%lu path=%s",
                           err, w->path.c_str());
-                Sleep(500);
+                /* Back off before retry — but stay interruptible. Raw
+                 * Sleep(500) delayed watcher cancellation by a full
+                 * half-second after the error.                         */
+                ElleWait::PollingSleepUntilSet(500, w->cancel, 50);
+                if (w->cancel.load()) break;
                 continue;
             }
 

@@ -6,6 +6,7 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include "../../Shared/ElleLLM.h"
+#include "../../Shared/ElleWait.h"
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -746,7 +747,10 @@ void RecallLoop::Run() {
             lastConsolidate = ELLE_MS_NOW();
         }
 
-        Sleep(recallMs);
+        /* Pollable wait so Stop() returns within ~50ms regardless of
+         * recallMs (often 60+ seconds in prod). Raw Sleep blocked SCM
+         * shutdown for the full recall interval.                        */
+        ElleWait::PollingSleep(recallMs, m_running);
     }
 }
 

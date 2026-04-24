@@ -10,6 +10,7 @@
 #include <cmath>
 #include <sstream>
 #include <iomanip>
+#include "../../Shared/ElleWait.h"
 
 /*──────────────────────────────────────────────────────────────────────────────
  * EMOTION NAMES
@@ -357,8 +358,12 @@ void EmotionalEngine::RefreshXModulation() {
         }
         /* If the query ran but returned nothing, leave cached values — the
          * previous snapshot is better than a sudden reset to 1.0.          */
-    } catch (...) {
-        /* DB down / X service offline — fall back silently. */
+    } catch (const std::exception& e) {
+        /* DB down / X service offline — expected degraded mode. Fall
+         * back silently on the stale cache (better than 1.0 reset) but
+         * log at DEBUG so ops can see the reason on demand. Narrower
+         * than catch(...) so truly unexpected throws propagate up.    */
+        ELLE_DEBUG("RefreshXModulation: %s — using cached multipliers", e.what());
     }
     m_xmod.refreshed_ms = now;
 }
@@ -575,7 +580,12 @@ void DecayLoop::Stop() {
 void DecayLoop::Run() {
     while (m_running) {
         m_engine.Tick();
-        Sleep(m_intervalMs);
+        /* Pollable wait so Stop() returns within ~50ms regardless of
+         * m_intervalMs. A raw Sleep(m_intervalMs) meant SCM had to wait
+         * a full tick (often multiple seconds) before the shutdown flag
+         * was re-read — long enough for "service did not respond" to
+         * fire during ungraceful restarts.                               */
+        ElleWait::PollingSleep(m_intervalMs, m_running);
     }
 }
 

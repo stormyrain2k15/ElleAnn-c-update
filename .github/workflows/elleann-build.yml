@@ -303,6 +303,104 @@ jobs:
           exit $exit_code
 
   # ────────────────────────────────────────────────────────────────────────
+  # catch(...) discipline canary — `catch(...)` is only acceptable as a
+  # top-of-worker-thread boundary (so one bad request can't kill the
+  # service). Bare catch(...) anywhere else silently masks bugs. This
+  # canary flags catch(...) that isn't preceded by an inline comment
+  # containing "boundary" or "top-of-" within 10 lines (a liberal window
+  # — the actual standard is "any comment block mentioning why it's
+  # swallowing is acceptable").
+  # ────────────────────────────────────────────────────────────────────────
+  catch-all-discipline-canary:
+    name: catch(...) Discipline Canary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Enforce catch(...) is a documented boundary
+        run: |
+          set -u
+          python3 <<'PY'
+          import pathlib, re, sys
+          roots = ["ElleAnn/Shared", "ElleAnn/Services"]
+          # Match `catch ( ... )` only where the `...` is the sole content
+          # of the parens (not `catch(const ...)` or similar).
+          pat = re.compile(r'(?<!\w)catch\s*\(\s*\.\.\.\s*\)')
+          just = re.compile(r'boundary|top-of-|top of |worker-thread|intentional', re.I)
+          violations = []
+          for root in roots:
+              for p in pathlib.Path(root).rglob("*"):
+                  if p.suffix not in (".cpp", ".h"): continue
+                  try:    lines = p.read_text().splitlines()
+                  except Exception: continue
+                  for i, ln in enumerate(lines):
+                      if not pat.search(ln): continue
+                      stripped = ln.lstrip()
+                      # Skip lines that are comments themselves
+                      if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
+                          continue
+                      # Allow the match if any of the ±5 surrounding lines carry a
+                      # justification keyword.
+                      window = "\n".join(lines[max(0, i-5):i+6])
+                      if not just.search(window):
+                          violations.append(f"{p}:{i+1}: {ln.rstrip()}")
+          if violations:
+              print("::error::Undocumented catch(...) — must be a top-of-thread boundary with a comment within ±5 lines:")
+              for v in violations: print("  " + v)
+              sys.exit(1)
+          print("ok — all catch(...) sites are documented boundaries")
+          PY
+
+  # ──────────────────────────────────────────────────────────────────────── — locks in the "policy lives in
+  # Directory.Build.props, exceptions live only in the vendored Lua
+  # project" rule. If any non-vendored .vcxproj starts overriding
+  # WarningLevel or TreatWarningAsError locally, the PR fails here.
+  # This stops silent "let me just lower this to Level3 to quiet one
+  # warning" drift — the loudest category of regression in the /WX
+  # push rounds of Feb 2026.
+  # ────────────────────────────────────────────────────────────────────────
+  warning-policy-canary:
+    name: Warning Policy Invariant Canary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify policy is centralized
+        run: |
+          set -u
+          exit_code=0
+
+          echo "::group::Directory.Build.props must set policy"
+          if ! grep -q '<WarningLevel>Level4</WarningLevel>' ElleAnn/Directory.Build.props; then
+              echo "::error::Directory.Build.props must set WarningLevel=Level4"
+              exit_code=1
+          fi
+          if ! grep -q '<TreatWarningAsError>true</TreatWarningAsError>' ElleAnn/Directory.Build.props; then
+              echo "::error::Directory.Build.props must set TreatWarningAsError=true"
+              exit_code=1
+          fi
+          echo "ok"
+          echo "::endgroup::"
+
+          echo "::group::No vcxproj outside vendored Lua may override policy"
+          # Whitelist: Elle.Lua.Behavioral.vcxproj has per-file overrides
+          # for each of the 32 vendored Lua source files. That's the ONLY
+          # place a WarningLevel or TreatWarningAsError tag may appear in
+          # a vcxproj.
+          drift=$(grep -rn --include='*.vcxproj' \
+                -E 'WarningLevel|TreatWarningAsError' ElleAnn/ \
+                | grep -vE 'Elle\.Lua\.Behavioral\.vcxproj' \
+                | grep -vE '^\s*$' || true)
+          if [ -n "$drift" ]; then
+              echo "::error::Non-vendored vcxproj overrides the central warning policy:"
+              echo "$drift"
+              exit_code=1
+          else
+              echo "ok"
+          fi
+          echo "::endgroup::"
+
+          exit $exit_code
+
+  # ────────────────────────────────────────────────────────────────────────
   # Static hygiene — sln ↔ disk, XML well-formedness.
   # ────────────────────────────────────────────────────────────────────────
   sln-integrity:
