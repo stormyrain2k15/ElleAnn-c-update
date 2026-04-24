@@ -545,12 +545,20 @@ std::string ToSvg(const Code& code, int scale, int quietZone) {
     int total = (code.size + quietZone * 2) * scale;
 
     std::ostringstream s;
-    s << R"(<?xml version="1.0" encoding="UTF-8"?>)"
-      << R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 )"
-      << total << " " << total << R"(" width=")" << total
-      << R"(" height=")" << total << R"(" shape-rendering="crispEdges">)"
-      << R"(<rect width="100%" height="100%" fill="#ffffff"/>)"
-      << R"(<path fill="#000000" d=")";
+    /* SVG literals use ordinary escape-quoted strings (not raw strings)
+     * so the CI's naive string/comment stripper — which doesn't
+     * understand C++11 raw-string syntax — correctly treats them as
+     * strings when counting brace/paren balance. Inside a regular
+     * "..." literal the stripper skips until the closing quote, so
+     * `//` in a URL does not trigger comment mode.                   */
+    s << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+      << "<svg xmlns=\"http://www.w3.org/2000/svg\""
+         " viewBox=\"0 0 "
+      << total << " " << total << "\" width=\"" << total
+      << "\" height=\"" << total
+      << "\" shape-rendering=\"crispEdges\">"
+      << "<rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>"
+      << "<path fill=\"#000000\" d=\"";
     for (int y = 0; y < code.size; y++) {
         /* Collapse consecutive dark modules into one horizontal run per
          * row; cheaper than a rect per module, and every scanner I've
@@ -569,7 +577,7 @@ std::string ToSvg(const Code& code, int scale, int quietZone) {
               << "h-" << (len * scale) << "z";
         }
     }
-    s << R"("/></svg>)";
+    s << "\"/></svg>";
     return s.str();
 }
 
