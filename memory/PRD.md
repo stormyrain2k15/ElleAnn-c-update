@@ -414,6 +414,48 @@ Measured signal quality (test results):
   downloadable as an artifact for auditing.
 - Removed ghost gitlink `ElleAnn_PythonRef/` (+ `.gitignore` guard).
 
+### Android companion spec scaffolded (Feb 2026) — P1 partial
+User directive: "For anything that is app side just make a code file that
+explains what the app needs to do for said connection to work correctly."
+
+Created `ElleAnn/Android/spec/` with 8 contract files (1,111 LOC total)
+— code-shaped contracts (Kotlin + README), not prose. Every connection
+point the app will consume is documented exactly as the live C++ HTTP
+service exposes it, verified against `HTTPServer.cpp`:
+
+- `README.md` — index, TL;DR, versioning rules, out-of-scope list
+- `ConnectionPoints.kt` — transport (port 8000 / `127.0.0.1` default),
+  auth model, functional surfaces, data-shape rules, explicit "NEVER"s
+- `XApi.kt` — Retrofit-style interface for all **17** `/api/x/*` routes
+  (10 GET + 7 POST), Retrofit annotations commented until the library
+  lands in the real Android project
+- `XModels.kt` — data classes for every request/response body; enum
+  parsers with defensive UNKNOWN fallback; timestamps = `Long` (ms);
+  hormones = `Double`
+- `Auth.kt` — pairing handshake spec: QR/manual → 6-digit code → JWT
+  via `POST /api/auth/pair`. NOTE: this route does not exist in the
+  server yet; spec defines the target contract for the ticket
+- `WsCommand.kt` — WebSocket `/command` push-event envelope + 7
+  `WsEvent` subclasses, reconnect policy with exponential back-off
+- `IpcOpcodes.kt` — read-only reference of the 20 `IPC_X_*` opcodes
+  for debugging; `broadcastTypeFor()` maps opcode → WS envelope type
+- `ErrorEnvelope.kt` — HTTP status → user-facing disposition bucket
+- `SyncPolicy.kt` — poll-vs-push decision matrix per endpoint; NO
+  offline write queue; WS event → REST re-fetch reconciliation rules
+
+Verification: balanced-brace spot check passes on all 8 files; every
+file declares `package com.elleann.android.data.spec`. `kotlinc` is
+not available in this container — files are contract spec, not
+live code. Will be validated by the Kotlin toolchain in a future
+session when the Android project is actually created.
+
+Next step for Android (when work resumes):
+- Add `POST /api/auth/pair` + pairing-code registry to the HTTP service
+- Scaffold Android project (Gradle + Compose + Retrofit + OkHttp +
+  androidx.security for Keystore-backed EncryptedSharedPreferences)
+- Copy spec/*.kt into `app/data/spec/`, uncomment Retrofit annotations
+- Build UI layer separately (not in scope for this spec pass)
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).
