@@ -606,6 +606,60 @@ earlier `/WX-pattern-canary`, `warning-policy-canary`, and
 `embedding-novelty-test`, that's **5 independent tripwires** making
 the OpSec invariants self-enforcing.
 
+### IPC_WORLD_QUERY / IPC_WORLD_RESPONSE pair — ADDED (Feb 2026)
+User forensic audit caught a symmetry gap: Trust, Goal, and Consent all
+had IPC query opcodes, but WorldModel (owner of trust, sentiment,
+predicted_behavior, mental_model data per entity) did not. `IPC_WORLD_STATE`
+was write-only, so Cognitive had no IPC path to ask "what do I know about
+this person before I respond?" at chat time.
+
+**Changes (3 files, +/-225 lines):**
+
+- `Shared/ElleTypes.h` — added `IPC_WORLD_QUERY` + `IPC_WORLD_RESPONSE`
+  opcodes with a documented JSON contract (following the Consent
+  request/response pattern, not the Trust single-opcode pattern, because
+  world queries benefit from multi-entity rich results). Request:
+  `{request_id, names, types, min_familiarity, limit}`. Response:
+  `{request_id, entities:[{name,type,description,familiarity,sentiment,
+  trust,interaction_count,last_interaction_ms,mental_model}]}`.
+
+- `Services/Elle.Service.WorldModel/WorldModel.cpp`:
+  - Added `WorldModel::Query(names, types, minFam, limit)` — in-memory
+    filter + sort-by-recency + cap. No SQL read; the in-memory cache
+    is warmed from SQL at Initialize() and is always ≥ as fresh.
+  - Added `IPC_WORLD_QUERY` case in `OnMessage`: parses the JSON
+    request, runs Query, ships the results back as `IPC_WORLD_RESPONSE`
+    to the original sender with echoed `request_id` for correlation.
+
+- `Services/Elle.Service.Cognitive/CognitiveEngine.cpp`:
+  - New `WorldCorrelator` class (mirrors HTTPServer's `ChatCorrelator`):
+    request_id → mutex+CV waiter, populated from `IPC_WORLD_RESPONSE`
+    on the IPC worker thread and delivered to whichever chat-orchestrator
+    thread is blocked in `wait_for`.
+  - New `FetchWorldContext(entities)` helper with a hard 200ms timeout
+    so a WorldModel outage can never stall the chat pipeline — degrades
+    to empty string. Formats results for the system prompt as
+    "What you remember about who's on your mind right now: ..." with
+    familiarity / trust / sentiment / interaction_count and a
+    300-char cap on the `mental_model` field.
+  - `HandleChatRequest` now calls `FetchWorldContext(entities)` right
+    after the "People/things mentioned right now: ..." stanza, so
+    every chat turn that mentions an entity gets its world context
+    injected into the LLM prompt.
+  - New `IPC_WORLD_RESPONSE` case in `OnMessage` dispatches to the
+    correlator.
+
+**Why the single-writer pattern is preserved:**
+Cognitive already routes *writes* through `IPC_WORLD_STATE` to WorldModel
+(added in an earlier audit). Now *reads* also go through WorldModel via
+`IPC_WORLD_QUERY`. No service except WorldModel talks to `world_entities`
+SQL directly from a chat-time code path.
+
+**Latency budget:**
+WorldModel::Query is a vector scan + stable sort of ≤ a few hundred
+entities — microseconds. IPC round-trip is sub-millisecond on loopback
+named pipes. 200ms ceiling is ~200× safety margin.
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

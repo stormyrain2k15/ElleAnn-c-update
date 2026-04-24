@@ -528,7 +528,36 @@ typedef enum ELLE_IPC_MSG_TYPE {
      * Payload on both is a JSON string:
      *   {"op":"<name>","args":{...},"seq":<monotonic uint64>}             */
     IPC_IDENTITY_MUTATE,
-    IPC_IDENTITY_DELTA
+    IPC_IDENTITY_DELTA,
+    /* WorldModel query pair (SVC_WORLD_MODEL). Cognitive needs to ask
+     * "what do I know about this entity/person/topic before I respond?"
+     * at chat time — trust, sentiment, familiarity, interaction count,
+     * mental_model. That data persists to SQL and warms in memory inside
+     * the WorldModel process, but until this opcode pair existed there
+     * was no IPC path to pull it at request time (IPC_WORLD_STATE is
+     * write-only — pushes observations into WorldModel). Cognitive was
+     * reduced to either (a) bypassing WorldModel entirely by hitting SQL
+     * directly (defeats the single-writer pattern), or (b) responding
+     * without world context (user-visible: "Elle doesn't remember me").
+     *
+     * Payload is a JSON string to match the Consent pattern (rich, multi-
+     * entity, extensible) rather than the Trust pattern (single binary
+     * struct). Request:
+     *   {"request_id":"...",
+     *    "names":["Tom","mom"],         // optional, exact-match lookup
+     *    "types":["person","place"],    // optional, type filter
+     *    "min_familiarity":0.2,         // optional, 0..1
+     *    "limit":10}                    // optional, caps result size
+     * Response (IPC_WORLD_RESPONSE) to the original sender:
+     *   {"request_id":"...",
+     *    "entities":[
+     *      {"name":"...","type":"...","description":"...",
+     *       "familiarity":0.7,"sentiment":0.3,"trust":0.6,
+     *       "interaction_count":42,"last_interaction_ms":...,
+     *       "mental_model":"..."}, ...
+     *    ]}                                                             */
+    IPC_WORLD_QUERY,
+    IPC_WORLD_RESPONSE
 } ELLE_IPC_MSG_TYPE;
 
 #define ELLE_IPC_FLAG_URGENT      0x0001

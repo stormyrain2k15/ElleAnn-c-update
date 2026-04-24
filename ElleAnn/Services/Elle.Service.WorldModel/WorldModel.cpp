@@ -7,8 +7,12 @@
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
+#include "../../Shared/json.hpp"
 #include <vector>
 #include <unordered_map>
+#include <algorithm>
+
+using json = nlohmann::json;
 
 class WorldModel {
 public:
@@ -78,6 +82,47 @@ public:
         }
     }
 
+    /* Query the in-memory entity set against the request filters.
+     * Returns up to `limit` entities matching any of the supplied names
+     * OR types, with familiarity ≥ min_familiarity. Empty `names` means
+     * "no name filter"; empty `types` means "no type filter". If both
+     * are empty and min_familiarity is 0, returns the first `limit`
+     * entities sorted by last_interaction_ms descending (most recent
+     * first) — useful for "what has she been thinking about lately?".
+     *
+     * Returns a vector rather than writing directly into the IPC
+     * response so the caller can serialize once.                       */
+    std::vector<ELLE_WORLD_ENTITY> Query(const std::vector<std::string>& names,
+                                         const std::vector<std::string>& types,
+                                         float minFamiliarity,
+                                         size_t limit) const {
+        std::vector<ELLE_WORLD_ENTITY> out;
+        auto nameMatches = [&](const char* n) {
+            if (names.empty()) return true;
+            for (auto& q : names) if (q == n) return true;
+            return false;
+        };
+        auto typeMatches = [&](const char* t) {
+            if (types.empty()) return true;
+            for (auto& q : types) if (q == t) return true;
+            return false;
+        };
+        for (const auto& e : m_entities) {
+            if (!nameMatches(e.name)) continue;
+            if (!typeMatches(e.type)) continue;
+            if (e.familiarity < minFamiliarity) continue;
+            out.push_back(e);
+        }
+        /* Sort by recency so "give me the top 5" returns the most
+         * relevant five, not the first five alphabetically.             */
+        std::sort(out.begin(), out.end(),
+                  [](const ELLE_WORLD_ENTITY& a, const ELLE_WORLD_ENTITY& b) {
+                      return a.last_interaction_ms > b.last_interaction_ms;
+                  });
+        if (limit > 0 && out.size() > limit) out.resize(limit);
+        return out;
+    }
+
 private:
     std::vector<ELLE_WORLD_ENTITY> m_entities;
 };
@@ -101,11 +146,72 @@ protected:
     void OnTick() override { m_model.Tick(); }
 
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
-        if (msg.header.msg_type == IPC_WORLD_STATE) {
-            ELLE_WORLD_ENTITY entity;
-            if (msg.GetPayload(entity)) {
-                m_model.UpdateEntity(entity.name, entity.type, entity.description);
+        switch ((ELLE_IPC_MSG_TYPE)msg.header.msg_type) {
+            case IPC_WORLD_STATE: {
+                ELLE_WORLD_ENTITY entity;
+                if (msg.GetPayload(entity)) {
+                    m_model.UpdateEntity(entity.name, entity.type, entity.description);
+                }
+                break;
             }
+            case IPC_WORLD_QUERY: {
+                /* Parse the JSON request, query the in-memory set, reply
+                 * IPC_WORLD_RESPONSE to the sender with the matching
+                 * entities. Strict JSON — malformed bodies return an
+                 * empty entity list with the echoed request_id so the
+                 * caller can still correlate.                            */
+                std::string bodyStr = msg.GetStringPayload();
+                std::string requestId;
+                std::vector<std::string> names, types;
+                float  minFam = 0.0f;
+                size_t limit  = 16;  /* sensible default ceiling */
+                try {
+                    json req = json::parse(bodyStr);
+                    if (req.contains("request_id") && req["request_id"].is_string())
+                        requestId = req["request_id"].get<std::string>();
+                    if (req.contains("names") && req["names"].is_array())
+                        for (auto& n : req["names"])
+                            if (n.is_string()) names.push_back(n.get<std::string>());
+                    if (req.contains("types") && req["types"].is_array())
+                        for (auto& t : req["types"])
+                            if (t.is_string()) types.push_back(t.get<std::string>());
+                    if (req.contains("min_familiarity") && req["min_familiarity"].is_number())
+                        minFam = req["min_familiarity"].get<float>();
+                    if (req.contains("limit") && req["limit"].is_number_integer())
+                        limit = (size_t)std::max<int64_t>(1,
+                                    std::min<int64_t>(256,
+                                        req["limit"].get<int64_t>()));
+                } catch (const std::exception& e) {
+                    ELLE_WARN("IPC_WORLD_QUERY malformed JSON from svc=%d: %s — returning empty result",
+                              (int)sender, e.what());
+                }
+
+                auto hits = m_model.Query(names, types, minFam, limit);
+
+                json resp;
+                resp["request_id"] = requestId;
+                resp["entities"]   = json::array();
+                for (const auto& e : hits) {
+                    json j;
+                    j["name"]                = std::string(e.name);
+                    j["type"]                = std::string(e.type);
+                    j["description"]         = std::string(e.description);
+                    j["familiarity"]         = e.familiarity;
+                    j["sentiment"]           = e.sentiment;
+                    j["trust"]               = e.trust;
+                    j["interaction_count"]   = e.interaction_count;
+                    j["last_interaction_ms"] = (uint64_t)e.last_interaction_ms;
+                    j["mental_model"]        = std::string(e.mental_model);
+                    resp["entities"].push_back(j);
+                }
+
+                auto out = ElleIPCMessage::Create(IPC_WORLD_RESPONSE,
+                                                  SVC_WORLD_MODEL, sender);
+                out.SetStringPayload(resp.dump());
+                GetIPCHub().Send(sender, out);
+                break;
+            }
+            default: break;
         }
     }
 

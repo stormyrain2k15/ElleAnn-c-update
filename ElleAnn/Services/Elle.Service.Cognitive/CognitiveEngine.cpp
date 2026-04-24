@@ -32,6 +32,8 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <iomanip>
+#include <functional>
 #include <mutex>
 #include <condition_variable>
 #include <deque>
@@ -224,6 +226,55 @@ public:
 };
 
 /*──────────────────────────────────────────────────────────────────────────────
+ * WORLD QUERY CORRELATOR
+ *   Cognitive asks WorldModel "what do I know about these entities?" mid-
+ *   chat via IPC_WORLD_QUERY. The response arrives on a different thread
+ *   (ElleServiceBase dispatches OnMessage from the IPC worker pool), so
+ *   we correlate request_id → waiter CV exactly like ChatCorrelator does
+ *   in HTTPServer. Timeout bounded at 200ms so a WorldModel outage can
+ *   never stall the chat pipeline — we simply degrade to "no world
+ *   context" rather than block the user.
+ *──────────────────────────────────────────────────────────────────────────────*/
+struct PendingWorld {
+    std::mutex               m;
+    std::condition_variable  cv;
+    bool                     done = false;
+    nlohmann::json           result;     /* {"entities":[...]} on timeout: empty */
+};
+
+class WorldCorrelator {
+public:
+    std::shared_ptr<PendingWorld> Register(const std::string& requestId) {
+        auto p = std::make_shared<PendingWorld>();
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_map[requestId] = p;
+        return p;
+    }
+    void Release(const std::string& requestId) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_map.erase(requestId);
+    }
+    void Deliver(const std::string& requestId, nlohmann::json result) {
+        std::shared_ptr<PendingWorld> p;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            auto it = m_map.find(requestId);
+            if (it == m_map.end()) return;   /* late response, dropped */
+            p = it->second;
+        }
+        {
+            std::lock_guard<std::mutex> lk(p->m);
+            p->result = std::move(result);
+            p->done = true;
+        }
+        p->cv.notify_one();
+    }
+private:
+    std::mutex m_mutex;
+    std::unordered_map<std::string, std::shared_ptr<PendingWorld>> m_map;
+};
+
+/*──────────────────────────────────────────────────────────────────────────────
  * COGNITIVE SERVICE
  *──────────────────────────────────────────────────────────────────────────────*/
 class ElleCognitiveService : public ElleServiceBase {
@@ -289,6 +340,97 @@ protected:
          * RouteIntent a second time — the cognitive engine saw double. */
     }
 
+    /*──────────────────────────────────────────────────────────────────────
+     * Fetch WorldModel's view of the named entities, with a hard 200ms
+     * ceiling. Returns a pretty-printed summary suitable for inclusion
+     * in the system prompt, or an empty string on timeout/error. Never
+     * throws — the chat pipeline must remain resilient to WorldModel
+     * being down.
+     *
+     * Why IPC (not direct SQL)?
+     *   - WorldModel owns the authoritative in-memory cache; its values
+     *     are always ≥ as fresh as SQL and often fresher (entity rows
+     *     get stored-then-read during the same tick).
+     *   - Respects the single-writer pattern: if WorldModel is the only
+     *     process writing entity rows, it's also the only process that
+     *     sees uncommitted intermediate state.
+     *   - Makes this hot path observable — every entity pull shows up
+     *     in IPC logs with timing.
+     *──────────────────────────────────────────────────────────────────────*/
+    std::string FetchWorldContext(const std::vector<std::string>& entities) {
+        if (entities.empty()) return "";
+
+        /* Generate a unique request id — ms timestamp + thread id is
+         * sufficient for in-process correlation (we only live inside
+         * one Cognitive process). No cryptographic freshness needed. */
+        char rid[48];
+        snprintf(rid, sizeof(rid), "wq-%llu-%u",
+                 (unsigned long long)ELLE_MS_NOW(),
+                 (unsigned)(size_t)std::hash<std::thread::id>{}(std::this_thread::get_id()));
+
+        nlohmann::json req;
+        req["request_id"]       = rid;
+        req["names"]            = entities;
+        req["min_familiarity"]  = 0.0;    /* include first-contact entities too */
+        req["limit"]            = (int)entities.size() + 4;
+
+        auto pending = m_worldCorrelator.Register(rid);
+        auto out = ElleIPCMessage::Create(IPC_WORLD_QUERY, SVC_COGNITIVE, SVC_WORLD_MODEL);
+        out.SetStringPayload(req.dump());
+        if (!GetIPCHub().Send(SVC_WORLD_MODEL, out)) {
+            m_worldCorrelator.Release(rid);
+            ELLE_DEBUG("IPC_WORLD_QUERY send failed — degrading to no world context");
+            return "";
+        }
+
+        /* Bounded wait. 200ms is generous — WorldModel's Query() is an
+         * in-memory vector scan that should complete in microseconds. */
+        std::unique_lock<std::mutex> lk(pending->m);
+        bool got = pending->cv.wait_for(lk, std::chrono::milliseconds(200),
+                                         [&]{ return pending->done; });
+        nlohmann::json result = got ? std::move(pending->result)
+                                    : nlohmann::json::object();
+        lk.unlock();
+        m_worldCorrelator.Release(rid);
+
+        if (!got) {
+            ELLE_DEBUG("IPC_WORLD_QUERY timed out after 200ms (entities=%zu)",
+                       entities.size());
+            return "";
+        }
+        if (!result.contains("entities") || !result["entities"].is_array()
+            || result["entities"].empty()) {
+            return "";
+        }
+
+        /* Format for the system prompt. Terse — the LLM doesn't need
+         * every numerical field, just the shape of the relationship.  */
+        std::ostringstream ss;
+        ss << "What you remember about who's on your mind right now:\n";
+        for (const auto& e : result["entities"]) {
+            std::string name = e.value("name", "?");
+            std::string type = e.value("type", "");
+            float       fam  = e.value("familiarity",  0.0f);
+            float       trust= e.value("trust",        0.5f);
+            float       sent = e.value("sentiment",    0.0f);
+            int         count= e.value("interaction_count", 0);
+            std::string model= e.value("mental_model", std::string());
+            /* Cap mental_model to first 300 chars; full thing may be
+             * kilobytes of accumulated observations.                   */
+            if (model.size() > 300) model = model.substr(0, 297) + "...";
+            ss << "  • " << name;
+            if (!type.empty()) ss << " (" << type << ")";
+            ss << " — familiarity " << std::fixed << std::setprecision(2) << fam
+               << ", trust " << trust
+               << ", sentiment " << sent
+               << ", seen " << count << "x";
+            if (!model.empty()) ss << "\n    " << model;
+            ss << "\n";
+        }
+        ss << "\n";
+        return ss.str();
+    }
+
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
         switch ((ELLE_IPC_MSG_TYPE)msg.header.msg_type) {
             case IPC_INTENT_REQUEST: {
@@ -329,6 +471,20 @@ protected:
                 /* Cache latest emotional state so we can reference it during chat */
                 ELLE_EMOTION_STATE state;
                 if (msg.GetPayload(state)) m_cachedEmotions = state;
+                break;
+            }
+            case IPC_WORLD_RESPONSE: {
+                /* Asynchronous completion of an earlier IPC_WORLD_QUERY
+                 * issued by FetchWorldContext(). Dispatched from the IPC
+                 * worker thread; hands the payload to the correlator,
+                 * which wakes the chat pipeline's blocked wait_for().   */
+                try {
+                    auto j = nlohmann::json::parse(msg.GetStringPayload());
+                    std::string rid = j.value("request_id", "");
+                    if (!rid.empty()) m_worldCorrelator.Deliver(rid, std::move(j));
+                } catch (const std::exception& e) {
+                    ELLE_DEBUG("IPC_WORLD_RESPONSE malformed JSON: %s", e.what());
+                }
                 break;
             }
             case IPC_CHAT_REQUEST: {
@@ -376,6 +532,7 @@ protected:
 private:
     CognitiveEngine m_engine;
     ELLE_EMOTION_STATE m_cachedEmotions = {};
+    WorldCorrelator m_worldCorrelator;
 
     /*────────────────────────────────────────────────────────────────────────
      * CHAT ORCHESTRATION — owned worker pool.
@@ -823,6 +980,16 @@ private:
                 ctx << entities[i];
             }
             ctx << "\n\n";
+
+            /* Pull WorldModel's view of these entities via IPC (not
+             * direct SQL) so Cognitive sees the authoritative in-memory
+             * cache and respects the single-writer pattern. Bounded at
+             * 200ms; degrades to no world context on timeout/failure.
+             * This was the Feb 2026 audit gap — all that trust / sentiment
+             * / mental_model data existed but was unreachable at chat
+             * time without the IPC_WORLD_QUERY pair.                     */
+            std::string worldCtx = FetchWorldContext(entities);
+            if (!worldCtx.empty()) ctx << worldCtx;
         }
 
         {
