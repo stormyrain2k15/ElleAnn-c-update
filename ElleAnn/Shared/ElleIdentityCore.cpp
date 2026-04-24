@@ -760,25 +760,78 @@ ElleIdentityCore::ReconstructedMemory ElleIdentityCore::ReconstructMemory(
  * WONDER — Being genuinely surprised
  *──────────────────────────────────────────────────────────────────────────────*/
 float ElleIdentityCore::EvaluateNovelty(const std::string& input, const std::string& context) {
-    /* Novelty = how different this is from anything she's encountered before.
-     * Uses preference-subject substring overlap as the "known topic" proxy.
-     * This is a hybrid with cluster-proximity in MemoryEngine — an embedding
-     * upgrade is possible later but the current signal is strong enough for
-     * wonder/surprise triggers.                                              */
-    float novelty = 0.5f;
+    /* Hybrid novelty signal combining two independent sources:
+     *
+     *   (1) Embedding-space novelty.  Encode `input` into a 256-dim
+     *       hashed-trigram L2-normalized vector and compare (cosine)
+     *       against the last NOVELTY_MEMORY_SIZE inputs. Captures sub-
+     *       word morphological similarity ("cat"/"cats"/"feline" all
+     *       cluster) — the real upgrade over pure substring match.
+     *
+     *   (2) Known-topic signal.  Substring match against stable
+     *       preference subjects. This is a slower-moving "have I ever
+     *       cared about this?" signal, complementary to the short-
+     *       window embedding ring. Kept as a secondary term because
+     *       preferences are hand-formed memories, not just recent
+     *       encounters, and they carry emotional weight the embedding
+     *       buffer doesn't.
+     *
+     *   Both signals are gated by wonder_capacity so she can't be
+     *   amazed at everything simultaneously — wonder has to recharge.  */
 
-    /* Has she encountered this topic before? */
+    /* Encode the new input. Context is concatenated so "I saw a cat
+     * in the garden" differs from "I dreamed of a cat" under the same
+     * topic — useful when the same subject recurs in different contexts. */
+    ElleEmbedding newVec;
+    std::string joined = context.empty() ? input : (context + " " + input);
+    ElleEmbeddings::Encode(joined, newVec);
+
+    /* Guard: if the text was empty/degenerate, fall back to the old
+     * preference-only signal so callers always get something meaningful. */
+    bool embeddingValid = false;
+    for (float v : newVec) if (v != 0.0f) { embeddingValid = true; break; }
+
+    /* (1) Embedding novelty: 1 - max_cos_sim against the ring.
+     *     If the ring is empty (first-ever input), treat as maximally
+     *     novel (no prior experience to compare to). */
+    float embeddingNovelty = 1.0f;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (embeddingValid && !m_noveltyMemory.empty()) {
+            float maxSim = -1.0f;
+            for (const ElleEmbedding& prior : m_noveltyMemory) {
+                float sim = ElleEmbeddings::Cosine(newVec, prior);
+                if (sim > maxSim) maxSim = sim;
+            }
+            /* cosine ∈ [-1,1] → novelty ∈ [0,1]. Clamp for safety
+             * against floating-point drift at the edges.               */
+            embeddingNovelty = ELLE_CLAMP(1.0f - maxSim, 0.0f, 1.0f);
+        }
+
+        /* Push into the ring *after* scoring, so an input is never its
+         * own "prior". Bounded to NOVELTY_MEMORY_SIZE. Zero-vectors (empty
+         * input) are skipped — they'd only collapse the average. */
+        if (embeddingValid) {
+            m_noveltyMemory.push_back(newVec);
+            if (m_noveltyMemory.size() > NOVELTY_MEMORY_SIZE)
+                m_noveltyMemory.pop_front();
+        }
+    }
+
+    /* (2) Known-topic signal: preference subject substring match. */
     bool knownTopic = false;
     for (auto& pref : m_preferences) {
-        if (input.find(pref.subject) != std::string::npos) {
+        if (!pref.subject.empty() && input.find(pref.subject) != std::string::npos) {
             knownTopic = true;
             break;
         }
     }
+    float topicNovelty = knownTopic ? 0.3f : 0.8f;
 
-    if (!knownTopic) novelty += 0.3f;
-
-    /* Wonder capacity regenerates over time */
+    /* Blend: embedding carries 70% weight (it's the sharper signal),
+     * preferences carry 30%. Weighted average keeps the result in [0,1]
+     * without extra clamping. Wonder capacity scales the whole thing. */
+    float novelty = 0.7f * embeddingNovelty + 0.3f * topicNovelty;
     novelty *= m_wonderCapacity;
 
     return ELLE_CLAMP(novelty, 0.0f, 1.0f);

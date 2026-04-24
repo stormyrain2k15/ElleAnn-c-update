@@ -41,6 +41,7 @@
 #define ELLE_IDENTITY_CORE_H
 
 #include "ElleTypes.h"
+#include "ElleEmbedding.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -386,6 +387,16 @@ private:
 
     /* Wonder accumulator */
     float m_wonderCapacity = 1.0f;  /* Refreshes over time */
+
+    /* Novelty signal — a ring buffer of the last 64 input embeddings
+     * (see Shared/ElleEmbedding.h). EvaluateNovelty computes the max
+     * cosine similarity of the new input against this buffer; "very
+     * similar to something seen recently" == low novelty. 64 entries
+     * gives ~1h of conversation coverage at typical turn rates and
+     * costs ~64 KB. Pushed under m_mutex to keep lock discipline
+     * consistent with the rest of the identity state.                 */
+    std::deque<ElleEmbedding> m_noveltyMemory;
+    static constexpr size_t NOVELTY_MEMORY_SIZE = 64;
 
     /* Single-writer fabric state. In non-authoritative processes, mutators
      * apply locally AND send IPC_IDENTITY_MUTATE to SVC_IDENTITY. In the

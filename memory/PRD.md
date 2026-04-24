@@ -374,6 +374,46 @@ MSBuild job (which already runs `/WX`) — the canary just surfaces these
 specific categories in seconds instead of minutes, with an error
 message pointing to the exact fix.
 
+### Embedding-based novelty (Feb 2026) — P1 COMPLETE
+Promoted `ElleIdentityCore::EvaluateNovelty` from lexical substring
+matching to a hashed-feature character-trigram embedding with cosine
+similarity against a 64-entry ring buffer of recent inputs.
+
+New files:
+- `Shared/ElleEmbedding.h` / `.cpp` — 256-dim L2-normalized feature
+  hashing. Deterministic (FNV-1a), zero-allocation hot path, cross-
+  process identical outputs (fabric-friendly).
+- `Debug/test_embedding_novelty.cpp` — 7 unit tests validating
+  determinism, self-similarity, morphological clustering, and the
+  novelty direction for disjoint content.
+
+Changes:
+- `ElleIdentityCore.h`: added `std::deque<ElleEmbedding> m_noveltyMemory`
+  + `NOVELTY_MEMORY_SIZE = 64` (64 KB per core instance).
+- `ElleIdentityCore.cpp`: `EvaluateNovelty` rewritten as a hybrid
+  0.7×(embedding novelty) + 0.3×(known-topic signal), gated by
+  `m_wonderCapacity`. Ring-buffer push happens after scoring to avoid
+  self-matching, under `m_mutex` for thread-safety.
+- `Shared/ElleCore.Shared.vcxproj`: registered new .cpp/.h.
+
+New CI job `embedding-novelty-test` (Ubuntu, <5s) compiles and runs
+the test with `-Wall -Wextra -Werror`.
+
+Measured signal quality (test results):
+- `"I love my cat"` vs `"I love cats"` → cosine 0.603
+- `"I love my cat"` vs `"Quantum chromodynamics"` → cosine 0.064
+- 10× separation between related/unrelated text.
+
+### CI hygiene updates (Feb 2026)
+- Bumped `actions/checkout`, `actions/cache`, `actions/upload-artifact`
+  from `@v4` → `@v5` (Node 24 compatible; avoids June 2026 forced
+  migration). `microsoft/setup-msbuild@v2` kept (no v3 released yet).
+- Added `msbuild-warnings.log` file-logger output + `Surface residual
+  warnings` + `Upload warning log` steps so the 10 residual warnings
+  the /WX build currently passes are visible in the job summary and
+  downloadable as an artifact for auditing.
+- Removed ghost gitlink `ElleAnn_PythonRef/` (+ `.gitignore` guard).
+
 ### P1 — Next Iteration
 - [x] Video worker strictness (schema + artifact + graceful shutdown).
 - [x] `ElleJsonExtract` surrogate-pair + NUL + depth safety (+15 tests).

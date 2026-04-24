@@ -66,7 +66,7 @@ jobs:
       # Checkout
       # ───────────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -85,7 +85,7 @@ jobs:
       # ───────────────────────────────────────────────────────────
       - name: Cache Lua source
         id: cache-lua
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ElleAnn/Lua/lua54
           key: lua-${{ env.LUA_VERSION }}
@@ -148,7 +148,44 @@ jobs:
             /p:Configuration=${{ matrix.configuration }} `
             /p:Platform=x64 `
             /v:minimal `
-            /clp:ErrorsOnly`;Summary
+            /clp:ErrorsOnly`;Summary `
+            /fl1 /flp1:LogFile=msbuild-warnings.log`;WarningsOnly`;NoSummary
+
+      # ───────────────────────────────────────────────────────────
+      # Warning visibility: /WX makes warnings fatal, so a green build
+      # shouldn't carry any — but the vendored Lua opt-out (Level3, no
+      # /WX) and any future relaxations mean warnings CAN slip in without
+      # breaking the build. File-logger captures them; this step echoes
+      # the count to the job summary and uploads the full log as an
+      # artifact so reviewers can audit residual warnings without spelunking
+      # through 3 minutes of MSBuild output.
+      # ───────────────────────────────────────────────────────────
+      - name: Surface residual warnings
+        if: always() && matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          if (Test-Path msbuild-warnings.log) {
+              $lines = Get-Content msbuild-warnings.log
+              $count = ($lines | Where-Object { $_ -match ': warning ' }).Count
+              Write-Host "::notice::MSBuild emitted $count residual warning(s) (non-fatal under /WX opt-outs)."
+              "## MSBuild residual warnings: $count" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              if ($count -gt 0) {
+                  "``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+                  $lines | Select-Object -First 50 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+                  "``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              }
+          } else {
+              Write-Host "::notice::No warning log produced."
+          }
+
+      - name: Upload warning log
+        if: always() && matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v5
+        with:
+          name: msbuild-warnings-${{ github.sha }}
+          path: msbuild-warnings.log
+          retention-days: 14
+          if-no-files-found: ignore
 
       # ───────────────────────────────────────────────────────────
       # Collect binaries into an artifact. Only Release is uploaded —
@@ -162,12 +199,33 @@ jobs:
 
       - name: Upload Release binaries
         if: matrix.configuration == 'Release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ElleAnn-Release-x64-${{ github.sha }}
           path: ElleAnn/Deploy/Release/x64/
           retention-days: 14
           if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Embedding novelty unit test — builds and runs the standalone hashed-
+  # trigram test on Linux in ~5s. Catches regressions to the novelty
+  # signal's core properties (determinism, self-cosine, morphological
+  # clustering) without needing a full MSBuild pass on Windows.
+  # ────────────────────────────────────────────────────────────────────────
+  embedding-novelty-test:
+    name: ElleEmbedding Novelty Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build + run novelty test
+        run: |
+          cd ElleAnn/Debug
+          g++ -std=c++17 -O2 -Wall -Wextra -Werror \
+              -I../Shared \
+              ../Shared/ElleEmbedding.cpp \
+              test_embedding_novelty.cpp \
+              -o test_embedding_novelty
+          ./test_embedding_novelty
 
   # ────────────────────────────────────────────────────────────────────────
   # MSBuild /WX regression canary — runs on Linux in <1s BEFORE the slow
@@ -193,7 +251,7 @@ jobs:
     name: MSBuild /WX Pattern Canary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Scan for known /WX-breaking patterns
         run: |
           set -u
@@ -251,7 +309,7 @@ jobs:
     name: Solution ↔ Filesystem Integrity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Verify vcxproj set
         run: |
           python3 - <<'PY'
@@ -299,7 +357,7 @@ jobs:
     name: C++ Brace / Paren Balance + ElleDB Symbol Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Balance sweep
         run: |
           python3 - <<'PY'
@@ -398,7 +456,7 @@ jobs:
     name: Service Name Consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Audit manifest vs C++
         run: |
           python3 - <<'PY'
@@ -440,7 +498,7 @@ jobs:
     name: PowerShell Syntax
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Parse every .ps1
         shell: pwsh
         run: |
@@ -476,7 +534,7 @@ jobs:
     name: SQL Delta Idempotency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Audit deltas
         run: |
           python3 - <<'PY'
@@ -546,7 +604,7 @@ jobs:
     name: SQL Schema End-to-End Coherence
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Audit schema graph
         run: |
           python3 - <<'PY'
@@ -685,7 +743,7 @@ jobs:
     name: C++ Static Analysis (cppcheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install cppcheck
         run: |
           sudo apt-get update

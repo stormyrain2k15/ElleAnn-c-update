@@ -44,6 +44,7 @@
   <ItemGroup>
     <ClCompile Include="DictionaryLoader.cpp" />
     <ClCompile Include="ElleConfig.cpp" />
+    <ClCompile Include="ElleEmbedding.cpp" />
     <ClCompile Include="ElleIdentityCore.cpp" />
     <ClCompile Include="ElleLLM.cpp" />
     <ClCompile Include="ElleLogger.cpp" />
@@ -60,6 +61,7 @@
   <ItemGroup>
     <ClInclude Include="DictionaryLoader.h" />
     <ClInclude Include="ElleConfig.h" />
+    <ClInclude Include="ElleEmbedding.h" />
     <ClInclude Include="ElleIdentityCore.h" />
     <ClInclude Include="ElleJsonExtract.h" />
     <ClInclude Include="ElleLLM.h" />
