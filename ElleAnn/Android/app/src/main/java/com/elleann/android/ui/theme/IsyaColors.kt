@@ -16,6 +16,15 @@ val IsyaGoldBright = Color(0xFFFFD700) // Glow / active states
 val IsyaGoldDeep   = Color(0xFFA0701A) // Button deep gradient end
 val IsyaGoldMid    = Color(0xFFC8922A) // Button gradient start
 
+// ─── Isya Silver — Default panel border (replaces the prior red tint) ──────
+//   The reference UI specifies the default panel frame as a silver-grey,
+//   not the ruby red the legacy DANGER variant used. This palette is the
+//   one IsyaPanel paints by default; flowingBorder=true cycles through
+//   it together with gold and teal for the live look.
+val IsyaSilver     = Color(0xFFC8D0DC) // Bright silver — highlight
+val IsyaSilverMid  = Color(0xFF8E97A8) // Mid silver — main border
+val IsyaSilverDeep = Color(0xFF5A6478) // Deep silver — shadow / inactive
+
 // ─── Isya Magic — Secondary accent ─────────────────────────────────────────
 val IsyaMagic      = Color(0xFF2ECBD4) // Teal accent / keyword highlight
 val IsyaMagicBright= Color(0xFF5EFBFF) // Glow / particle effects

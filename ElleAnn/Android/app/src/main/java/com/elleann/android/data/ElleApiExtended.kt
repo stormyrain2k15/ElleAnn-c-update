@@ -56,7 +56,7 @@ interface ElleApiExtended {
     @POST("/api/memory/{id}/files")
     suspend fun attachFileToMemory(
         @Path("id") id: Long,
-        @Body body: Map<String, String>,
+        @Body body: AttachFileRequest,
     ): OkResponse
 
     // ── EMOTIONS ─────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ interface ElleApiExtended {
     @PUT("/api/emotions/dimensions/{name}")
     suspend fun setEmotionDimension(
         @Path("name") name: String,
-        @Body body: Map<String, Float>,
+        @Body body: SetEmotionDimensionRequest,
     ): OkResponse
 
     /** GET /api/emotions/weights — dimension weight configuration */
@@ -191,7 +191,7 @@ interface ElleApiExtended {
 
     /** POST /api/ai/hardware/actions/claim — claim next action (ADMIN) */
     @POST("/api/ai/hardware/actions/claim")
-    suspend fun claimHardwareAction(@Body body: Map<String, String>): HardwareAction
+    suspend fun claimHardwareAction(@Body body: ClaimHardwareActionRequest): HardwareAction
 
     /** POST /api/ai/hardware/actions/{id}/ack — acknowledge action (ADMIN) */
     @POST("/api/ai/hardware/actions/{id}/ack")
@@ -201,7 +201,7 @@ interface ElleApiExtended {
     @POST("/api/ai/hardware/actions/{id}/result")
     suspend fun reportHardwareResult(
         @Path("id") id: Long,
-        @Body body: Map<String, String>,
+        @Body body: CompleteHardwareActionRequest,
     ): OkResponse
 
     /** POST /api/ai/voice-call/{id}/end — end a voice call session */
@@ -286,27 +286,27 @@ interface ElleApiExtended {
 
     /** POST /api/education/subjects — add subject (ADMIN) */
     @POST("/api/education/subjects")
-    suspend fun createSubject(@Body subject: Map<String, String>): LearnedSubject
+    suspend fun createSubject(@Body subject: CreateSubjectRequest): LearnedSubject
 
     /** PUT /api/education/subjects/{id} — update subject (ADMIN) */
     @PUT("/api/education/subjects/{id}")
     suspend fun updateSubject(
         @Path("id") id: Int,
-        @Body patch: Map<String, String>,
+        @Body patch: UpdateSubjectRequest,
     ): OkResponse
 
     /** POST /api/education/subjects/{id}/milestones — add milestone (ADMIN) */
     @POST("/api/education/subjects/{id}/milestones")
     suspend fun addMilestone(
         @Path("id") subjectId: Int,
-        @Body milestone: Map<String, String>,
+        @Body milestone: CreateMilestoneRequest,
     ): Milestone
 
     /** POST /api/education/subjects/{id}/references — add reference (ADMIN) */
     @POST("/api/education/subjects/{id}/references")
     suspend fun addReference(
         @Path("id") subjectId: Int,
-        @Body reference: Map<String, String>,
+        @Body reference: CreateReferenceRequest,
     ): EducationReference
 
     /** GET /api/education/skills — skill inventory */
@@ -315,7 +315,7 @@ interface ElleApiExtended {
 
     /** POST /api/education/skills — add skill (ADMIN) */
     @POST("/api/education/skills")
-    suspend fun createSkill(@Body skill: Map<String, String>): Skill
+    suspend fun createSkill(@Body skill: CreateSkillRequest): Skill
 
     /** PUT /api/education/skills/{name}/use — log skill usage */
     @PUT("/api/education/skills/{name}/use")
@@ -345,7 +345,7 @@ interface ElleApiExtended {
 
     /** POST /api/dictionary/load — trigger dictionary load (ADMIN) */
     @POST("/api/dictionary/load")
-    suspend fun loadDictionary(@Body body: Map<String, String> = emptyMap()): OkResponse
+    suspend fun loadDictionary(@Body body: LoadDictionaryRequest = LoadDictionaryRequest()): OkResponse
 
     // ── MODELS ───────────────────────────────────────────────────────────────
 
@@ -379,7 +379,7 @@ interface ElleApiExtended {
 
     /** POST /api/models/workers — add a worker (ADMIN) */
     @POST("/api/models/workers")
-    suspend fun createModelWorker(@Body worker: Map<String, String>): ModelWorker
+    suspend fun createModelWorker(@Body worker: CreateModelWorkerRequest): ModelWorker
 
     /** PUT /api/models/workers/{worker_id}/decommission — decommission (ADMIN) */
     @PUT("/api/models/workers/{worker_id}/decommission")

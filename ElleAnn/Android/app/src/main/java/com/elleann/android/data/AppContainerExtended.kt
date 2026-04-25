@@ -47,7 +47,7 @@ class AppContainerExtended(
         coerceInputValues = true; encodeDefaults = true
     }
 
-    // ── Fix 8: Redacting logging interceptor ─────────────────────────────────
+    // ── Redacting logging interceptor ─────────────────────────────────
     // Never log Authorization or x-admin-key header values.
     // Level.HEADERS in debug only — never BODY (logs JWT, admin key, chat content).
     private val loggingInterceptor = RedactingLoggingInterceptor()
@@ -76,7 +76,7 @@ class AppContainerExtended(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    // ── WebSocket — Fix 5: nullable guard ────────────────────────────────────
+    // ── WebSocket : nullable guard ────────────────────────────────────
     private var _webSocket: ElleWebSocket? = null
     val webSocket: ElleWebSocket get() = _webSocket
         ?: error("WebSocket not initialized. Call initWebSocket() after pairing.")
@@ -132,7 +132,7 @@ class AppContainerExtended(
         get() = tokenStore.load()?.let { "http://${it.host}:$apachePort" }
 
 
-    // ── Issue 23: Separate admin OkHttp client — x-admin-key only on admin calls ──
+    // ── Separate admin OkHttp client — x-admin-key only on admin calls ──
     // The main okHttpClient no longer attaches x-admin-key (see AuthInterceptorExtended).
     // Use adminApi for any route requiring x-admin-key (ADMIN auth level).
     private val adminOkHttpClient = OkHttpClient.Builder()
@@ -164,7 +164,7 @@ class AppContainerExtended(
     val adminApi: ElleApiExtended?
         get() = tokenStore.load()?.let { adminApiFor(it.host, it.port) }
 
-    // ── Fix 3: Initialize WebSocket (call on cold start if already paired) ────
+    // ── Initialize WebSocket (call on cold start if already paired) ────
     fun initWebSocket() {
         val stored = tokenStore.load() ?: return
         _webSocket?.disconnect()
@@ -177,7 +177,7 @@ class AppContainerExtended(
         _webSocket?.connect()
     }
 
-    // ── Fix 4: Reconnect without full teardown — safe to call on resume ───────
+    // ── Reconnect without full teardown — safe to call on resume ───────
     fun reconnectWebSocketIfNeeded() {
         val ws = _webSocket
         if (ws == null) {

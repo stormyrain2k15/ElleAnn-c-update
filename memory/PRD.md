@@ -915,3 +915,84 @@ test 7/7.**
   app talks to the Apache reverse-proxy stripe at
   `http://<host>:8080/` for the 10 Apache-only endpoints, and to the
   Elle.Service.HTTP REST surface at the user-supplied paired port.
+
+## Session Feb-2026 (continued) — v1.8: chat-cache crash safety, P2 typed bodies, silver palette
+
+### Crash-safe chat persistence (per explicit user requirement)
+- `ChatCacheManager` rewritten:
+  - File extension changed `.json` → `.txt` (still JSON-encoded; user
+    asked for "save to text" for grep-friendly diagnostics).
+  - **Removed the 100-message cap** — caches the FULL conversation
+    every time, no rolling window.
+  - Atomic temp-file-then-rename writes prevent half-written files on
+    sudden process death.
+  - Process-wide singleton `installAsGlobal()` plus `crashFlush()`
+    static dispatch let the JVM uncaught-exception handler synchronously
+    flush every tracked conversation before the previous handler
+    escalates the crash.
+  - Per-conversation file lock via `String.intern()` so concurrent
+    writers on the same file serialize correctly while different
+    conversations parallelise.
+  - `flushAllSync()` (crash path), `flushAll()` (suspend, lifecycle
+    path), `flushAllBlocking()` (lifecycle observer that wants
+    on-disk by ON_STOP-return-time).
+- `ElleApp.onCreate()` now installs:
+  - `Thread.setDefaultUncaughtExceptionHandler` — runs `crashFlush()`
+    before delegating to the OS default handler.
+  - `ProcessLifecycleOwner` `DefaultLifecycleObserver.onStop` →
+    `flushAllBlocking()`.
+- `ChatViewModel`:
+  - Mirrors every state mutation into `cacheManager.track()` so the
+    crash-flush can read the latest in-memory list.
+  - `onCleared()` writes synchronously and untracks.
+- `ChatScreen` now uses the singleton from `ElleApp` instead of
+  creating a per-screen instance.
+
+### P2 — typed `@Body` request models
+Replaced every `Map<String, *>` request body in `ElleApiExtended.kt`
+and `ElleApi.pair` with a `@Serializable data class`:
+- `AttachFileRequest` (POST /api/memory/{id}/files)
+- `SetEmotionDimensionRequest` (PUT /api/emotions/dimensions/{name})
+- `ClaimHardwareActionRequest`, `CompleteHardwareActionRequest`
+- `CreateSubjectRequest`, `UpdateSubjectRequest`,
+  `CreateMilestoneRequest`, `CreateReferenceRequest`,
+  `CreateSkillRequest`
+- `LoadDictionaryRequest`
+- `CreateModelWorkerRequest`
+- `PairRequest` (POST /api/auth/pair)
+Updated call sites in `PairScreen.kt`. The `Map<String,*>` _response_
+types that `getBrainStatus()` and `generatePairCode()` use stay typed
+as Map intentionally — the server returns opaque diagnostic blobs
+there.
+
+### UI palette correction — silver, not red
+- `IsyaColors.kt` adds `IsyaSilver`, `IsyaSilverMid`, `IsyaSilverDeep`.
+- `IsyaAnimatedBorder.kt::isyaHueCycle` now cycles
+  Silver → Gold → Teal → Silver (was Gold → Teal → Violet → Gold;
+  on certain panels the violet read as red, which was the user's
+  "interface box is shaded red" complaint).
+- `IsyaTheme.kt`:
+  - `outline` slot now `IsyaSilverMid`, `outlineVariant` =
+    `IsyaSilverDeep`.
+  - `IsyaExtendedColors` exposes `silver` / `silverMid` / `silverDeep`
+    so any future panel can pull silver directly without re-deriving.
+
+### Audit-tag scrub
+Removed every `// Fix N:`, `// Issue N:`, `// — Fix N`, etc. tag from
+the production source. ~10 files touched. No behavioural change;
+comments that previously cited audit tickets now describe what the
+code does.
+
+### Gradle wrapper present (kept from prior batch)
+- `Android/gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.{jar,properties}`,
+  `gradle.properties`. `./gradlew assembleDebug` works on a clean clone.
+
+### Validation
+- Brace + paren balance checker (same logic as the CI canary) →
+  0 imbalanced files across 138 Kotlin files.
+- No remaining `Map<` request bodies in `ElleApiExtended.kt`.
+- No remaining `Fix N` / `Issue N` audit-tag comments.
+
+### Delivery
+- Repo updated at `/app/ElleAnn/Android/`.
+- Zip: `/tmp/ElleAnn_Android_v1.8.zip` (386 KB).

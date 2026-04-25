@@ -4,35 +4,67 @@ import android.content.Context
 import android.util.Log
 import com.elleann.android.data.models.Message
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * ChatCacheManager — persists the last 50 user+ESI message exchanges to a
- * local JSON file so they load instantly on app open, before SQL responds.
+ * ChatCacheManager — local on-disk mirror of every conversation the user
+ * has ever opened in this app. The on-disk format is JSON-encoded text
+ * stored alongside the app's private files; the file extension is `.txt`
+ * so it is grep-friendly for diagnostics.
  *
- * Flow:
- *   1. App opens → loadCache() returns cached messages immediately → UI shows them
- *   2. In parallel → verifyWithServer() fetches same messages from SQL
- *   3. Server response replaces cache if different → writeCache() saves new truth
- *   4. App closes/backgrounds → writeCache() is called by lifecycle observer
+ * Design contract:
+ *   - On app open, the cache file for a conversation is read SYNCHRONOUSLY
+ *     and supplied to the UI before any network round-trip happens. This
+ *     is the latency reduction the user requires.
+ *   - The cache is the FULL conversation history visible to the user, not
+ *     a tail-trimmed window. Memory cost is acceptable because messages
+ *     are short text and rarely exceed a few thousand per conversation.
+ *   - The cache is always rewritten on every message addition.
+ *   - The cache is always rewritten on every app lifecycle pause / stop.
+ *   - The cache is always rewritten on uncaught exceptions BEFORE the
+ *     process dies, via [flushAllSync] called from a JVM-level uncaught
+ *     exception handler installed in `ElleApp.onCreate()`. Even a hard
+ *     crash therefore preserves the most recent local state.
+ *   - SQL on the desktop server remains the single source of truth; the
+ *     local txt cache is purely a startup-latency optimisation.
  *
- * File location: Context.filesDir/elle_chat_{conversationId}.json
- * Each file holds up to MAX_MESSAGES (100 = 50 exchanges × 2 roles).
- *
- * Named Pipes note: the server's SQL connection uses Named Pipes transport.
- * From Android's perspective this is invisible — we call REST endpoints as normal.
+ * Thread-safety:
+ *   - [openConversations] is a [ConcurrentHashMap] so the crash-handler
+ *     thread can safely iterate while UI threads add/remove tracked
+ *     conversations.
+ *   - File writes are guarded per-conversation by the JVM's intrinsic
+ *     monitor on the file path string interned via [pathLockFor]; this
+ *     prevents two writers racing on the same file while still allowing
+ *     parallel writes for different conversations.
  */
 class ChatCacheManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "ChatCacheManager"
-        private const val MAX_MESSAGES = 100   // 50 exchanges × 2 (user + ESI)
+        private const val TAG          = "ChatCacheManager"
         private const val CACHE_PREFIX = "elle_chat_"
-        private const val CACHE_EXT    = ".json"
+        private const val CACHE_EXT    = ".txt"
+
+        /** Process-wide singleton handle. Set in `ElleApp.onCreate()`,
+         *  read by the uncaught-exception handler.                       */
+        private val instanceRef = AtomicReference<ChatCacheManager?>(null)
+
+        fun installAsGlobal(mgr: ChatCacheManager) {
+            instanceRef.set(mgr)
+        }
+
+        /** Called from the JVM uncaught-exception handler. Best-effort
+         *  synchronous flush of every tracked conversation to disk before
+         *  the previous handler escalates the crash.                     */
+        fun crashFlush() {
+            instanceRef.get()?.flushAllSync()
+        }
     }
 
     private val json = Json {
@@ -41,96 +73,153 @@ class ChatCacheManager(private val context: Context) {
         encodeDefaults    = true
     }
 
-    // ── File path ─────────────────────────────────────────────────────────────
+    /** Tracks every conversation the UI has opened, with the most recent
+     *  in-memory message list. Updated by [trackOpen] and removed by
+     *  [trackClosed]. The crash-flush iterates this map.                  */
+    private val openConversations = ConcurrentHashMap<Long, List<Message>>()
 
     private fun cacheFile(conversationId: Long): File =
         File(context.filesDir, "$CACHE_PREFIX$conversationId$CACHE_EXT")
 
-    // ── Load from cache ───────────────────────────────────────────────────────
+    private fun pathLockFor(conversationId: Long): Any =
+        ("ChatCache_$conversationId").intern()
 
-    /**
-     * Load cached messages for [conversationId] from disk.
-     * Returns empty list if no cache exists or file is corrupt.
-     * Fast — runs on IO dispatcher, no network.
-     */
+    // ── Tracking ─────────────────────────────────────────────────────────────
+
+    /** Register that the UI has [messages] for [conversationId] in memory.
+     *  The crash-flush will write this list verbatim. Call after every
+     *  state update. Cheap (no I/O).                                      */
+    fun track(conversationId: Long, messages: List<Message>) {
+        openConversations[conversationId] = messages
+    }
+
+    /** Forget [conversationId]. Call when the chat screen is destroyed
+     *  for good (not on lifecycle pause).                                 */
+    fun untrack(conversationId: Long) {
+        openConversations.remove(conversationId)
+    }
+
+    // ── Load ─────────────────────────────────────────────────────────────────
+
+    /** Load cached messages for [conversationId] from disk. Returns an
+     *  empty list when no cache exists or the file is unreadable. Run on
+     *  IO dispatcher.                                                     */
     suspend fun loadCache(conversationId: Long): List<Message> =
-        withContext(Dispatchers.IO) {
-            val file = cacheFile(conversationId)
-            if (!file.exists()) return@withContext emptyList()
-            runCatching {
-                val raw = file.readText()
-                json.decodeFromString<List<Message>>(raw)
-            }.onFailure { e ->
-                Log.w(TAG, "Cache read failed for conv $conversationId: ${e.message}")
-                file.delete() // corrupt — clear it
-            }.getOrElse { emptyList() }
-        }
+        withContext(Dispatchers.IO) { loadCacheSync(conversationId) }
 
-    // ── Write to cache ────────────────────────────────────────────────────────
+    /** Synchronous variant — caller decides the dispatcher. */
+    fun loadCacheSync(conversationId: Long): List<Message> {
+        val file = cacheFile(conversationId)
+        if (!file.exists()) return emptyList()
+        return runCatching {
+            val raw = file.readText()
+            if (raw.isBlank()) emptyList() else json.decodeFromString<List<Message>>(raw)
+        }.onFailure { e ->
+            Log.w(TAG, "Cache read failed for conv $conversationId: ${e.message}")
+            file.delete()
+        }.getOrElse { emptyList() }
+    }
+
+    // ── Write ────────────────────────────────────────────────────────────────
 
     /**
-     * Write [messages] to cache, keeping only the most recent [MAX_MESSAGES].
-     * Only user (role=1) and ESI (role=2) messages are cached — system and
-     * internal messages are excluded.
-     * Call this on app pause/stop and after every server sync.
+     * Write the FULL message history (filtered to user + ESI roles only —
+     * system / internal messages are not user-visible) for [conversationId]
+     * to its cache file.
+     *
+     * Atomic via write-to-temp + rename so a crash mid-write cannot leave
+     * a half-written file that fails to parse on next load.
      */
     suspend fun writeCache(conversationId: Long, messages: List<Message>) =
-        withContext(Dispatchers.IO) {
+        withContext(Dispatchers.IO) { writeCacheSync(conversationId, messages) }
+
+    /** Synchronous write. Safe to call from a crash handler.              */
+    fun writeCacheSync(conversationId: Long, messages: List<Message>) {
+        synchronized(pathLockFor(conversationId)) {
             runCatching {
-                val toCache = messages
-                    .filter { it.isUser || it.isElle }
-                    .takeLast(MAX_MESSAGES)
+                val toCache = messages.filter { it.isUser || it.isElle }
                 val encoded = json.encodeToString(toCache)
-                cacheFile(conversationId).writeText(encoded)
-                Log.d(TAG, "Cache written: conv $conversationId, ${toCache.size} messages")
+                val target  = cacheFile(conversationId)
+                val tmp     = File(target.parentFile, target.name + ".tmp")
+                tmp.writeText(encoded)
+                /* Atomic rename: on POSIX filesystems (which Android uses
+                 * internally for app-private storage) this is one
+                 * inode swap, so a power failure can never expose a
+                 * half-written file.                                    */
+                if (!tmp.renameTo(target)) {
+                    /* renameTo returns false if the target already
+                     * exists on some FS — fall back to overwrite. */
+                    tmp.copyTo(target, overwrite = true)
+                    tmp.delete()
+                }
             }.onFailure { e ->
                 Log.e(TAG, "Cache write failed for conv $conversationId: ${e.message}")
             }
         }
+    }
 
-    // ── Verify against server ─────────────────────────────────────────────────
+    /** Convenience — call after a message is added to in-memory state.   */
+    suspend fun writeAfterMessage(conversationId: Long, currentMessages: List<Message>) {
+        track(conversationId, currentMessages)
+        writeCache(conversationId, currentMessages)
+    }
 
-    /**
-     * Fetch messages from the server and compare with cached version.
-     *
-     * Returns [VerifyResult.Match] if content is identical (message IDs and count match).
-     * Returns [VerifyResult.Updated] with fresh messages if server has newer data.
-     * Returns [VerifyResult.Error] if the server request failed.
-     *
-     * On [VerifyResult.Updated], caller should replace displayed messages and
-     * call [writeCache] with the fresh list.
-     */
+    /** Synchronously flush every tracked conversation to disk. Called
+     *  from the JVM uncaught-exception handler — do not throw.            */
+    fun flushAllSync() {
+        for ((id, msgs) in openConversations) {
+            runCatching { writeCacheSync(id, msgs) }
+                .onFailure { Log.w(TAG, "flushAllSync conv $id: ${it.message}") }
+        }
+    }
+
+    /** Async equivalent for normal lifecycle paths. Iterates a snapshot
+     *  of [openConversations] so concurrent track() calls don't ConcMod. */
+    suspend fun flushAll() = withContext(Dispatchers.IO) {
+        val snapshot = openConversations.toMap()
+        for ((id, msgs) in snapshot) writeCacheSync(id, msgs)
+    }
+
+    /** Same as [flushAll] but blocks the calling thread. Used by lifecycle
+     *  observers that fire on the main thread but want a guaranteed
+     *  on-disk state by the time `onStop` returns.                        */
+    fun flushAllBlocking() = runBlocking(Dispatchers.IO) { flushAll() }
+
+    // ── Verify against server ────────────────────────────────────────────────
+
     sealed class VerifyResult {
         data object Match : VerifyResult()
         data class Updated(val messages: List<Message>) : VerifyResult()
         data class Error(val message: String) : VerifyResult()
     }
 
+    /**
+     * Pull [conversationId]'s messages from the server and compare to
+     * [cachedMessages] by (id, role, content, timestamp). Returns
+     * [VerifyResult.Match] when identical, [VerifyResult.Updated] with
+     * the server's list otherwise. The server response is the source of
+     * truth on mismatch — caller should adopt it and persist it.
+     */
     suspend fun verifyWithServer(
         conversationId: Long,
         cachedMessages: List<Message>,
         api: ElleApiExtended,
     ): VerifyResult = withContext(Dispatchers.IO) {
         runCatching {
-            val serverMessages = api.getMessages(conversationId).messages
-            val serverRecent = serverMessages                 // Issue 25: always build serverRecent
+            val server = api.getMessages(conversationId).messages
                 .filter { it.isUser || it.isElle }
-                .takeLast(MAX_MESSAGES)
 
-            // Issue 24: Compare messageId + role + content + timestampMs
-            // Shallow ID-only comparison misses content edits or role changes
             data class MsgKey(val id: Long, val role: Int, val content: String, val ts: Long)
-            fun List<Message>.keys() = map { MsgKey(it.messageId, it.role, it.content, it.timestampMs) }.toSet()
+            fun List<Message>.keys() =
+                map { MsgKey(it.messageId, it.role, it.content, it.timestampMs) }.toSet()
 
-            val cachedKeys = cachedMessages.keys()
-            val serverKeys = serverRecent.keys()
-
-            if (cachedKeys == serverKeys && cachedMessages.size == serverRecent.size) {
+            if (cachedMessages.keys() == server.keys() &&
+                cachedMessages.size == server.size) {
                 VerifyResult.Match
             } else {
                 Log.d(TAG, "Cache mismatch conv $conversationId — " +
-                    "cached: ${cachedMessages.size}, server: ${serverRecent.size}")
-                VerifyResult.Updated(serverRecent)            // Issue 25: return serverRecent, not full list
+                    "cached: ${cachedMessages.size}, server: ${server.size}")
+                VerifyResult.Updated(server)
             }
         }.getOrElse { e ->
             Log.w(TAG, "Server verify failed conv $conversationId: ${e.message}")
@@ -138,37 +227,27 @@ class ChatCacheManager(private val context: Context) {
         }
     }
 
-    /**
-     * Convenience wrapper — call after a message is added to state.
-     * Rewrites the trimmed cache file immediately so a fast app-close
-     * does not lose the newest local message before server refresh completes.
-     * Full file rewrite (same cost as writeCache) — not an incremental append.
-     */
-    suspend fun writeAfterMessage(conversationId: Long, currentMessages: List<Message>) =
-        writeCache(conversationId, currentMessages)
+    // ── Maintenance ──────────────────────────────────────────────────────────
 
-    // ── Clear cache ───────────────────────────────────────────────────────────
-
-    /** Delete cached messages for a specific conversation */
+    /** Delete cached messages for a specific conversation.                */
     fun clearCache(conversationId: Long) {
-        cacheFile(conversationId).delete()
+        synchronized(pathLockFor(conversationId)) { cacheFile(conversationId).delete() }
+        openConversations.remove(conversationId)
     }
 
-    /** Delete all cached conversations */
+    /** Delete every cache file and forget every tracked conversation.    */
     fun clearAll() {
         context.filesDir
             .listFiles { f -> f.name.startsWith(CACHE_PREFIX) && f.name.endsWith(CACHE_EXT) }
             ?.forEach { it.delete() }
+        openConversations.clear()
     }
 
-    /** List all conversation IDs that have a cache file */
+    /** List conversation IDs that have a cache file on disk.              */
     fun cachedConversationIds(): List<Long> =
         context.filesDir
             .listFiles { f -> f.name.startsWith(CACHE_PREFIX) && f.name.endsWith(CACHE_EXT) }
-            ?.mapNotNull { f ->
-                f.name
-                    .removePrefix(CACHE_PREFIX)
-                    .removeSuffix(CACHE_EXT)
-                    .toLongOrNull()
+            ?.mapNotNull {
+                it.name.removePrefix(CACHE_PREFIX).removeSuffix(CACHE_EXT).toLongOrNull()
             } ?: emptyList()
 }

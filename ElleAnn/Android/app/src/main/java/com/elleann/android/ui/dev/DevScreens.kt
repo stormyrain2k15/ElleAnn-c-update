@@ -39,7 +39,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * Fix 6: Helper for dev screens — uses adminApi (carries x-admin-key) for admin-level
+ * Helper for dev screens — uses adminApi (carries x-admin-key) for admin-level
  * endpoints, falls back to extendedApi if adminApi is unavailable (no key configured).
  * AUTH_USER endpoints can safely use extendedApi directly.
  */

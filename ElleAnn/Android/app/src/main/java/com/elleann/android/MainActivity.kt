@@ -27,10 +27,10 @@ class ElleAnnAppState(initialPaired: Boolean) {
 /**
  * MainActivity — single-activity entry point.
  *
- * Fix 3: WebSocket initialized immediately on cold start if already paired.
- * Fix 4: onStop no longer disconnects WebSocket. Only onDestroy does.
+ * WebSocket initialized immediately on cold start if already paired.
+ * onStop no longer disconnects WebSocket. Only onDestroy does.
  *        onStart calls reconnectWebSocketIfNeeded() instead.
- * Fix 6: isPaired→false triggers explicit navigate-to-pair via ElleNavHost LaunchedEffect.
+ * isPaired→false triggers explicit navigate-to-pair via ElleNavHost LaunchedEffect.
  */
 class MainActivity : ComponentActivity() {
 
@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
             },
         )
 
-        // Fix 3 — init WebSocket immediately if already paired (cold start)
+        // init WebSocket immediately if already paired (cold start)
         if (alreadyPaired) containerExtended.initWebSocket()
 
         intent?.data?.let { parseEllepairUri(it)?.let(appState::setPrefill) }
@@ -90,13 +90,13 @@ class MainActivity : ComponentActivity() {
         // Does NOT touch isPaired — a paired session is never forcibly disrupted
     }
 
-    // Fix 4 — resume reconnects WS without tearing it down
+    // resume reconnects WS without tearing it down
     override fun onStart() {
         super.onStart()
         if (appState.isPaired.value) containerExtended.reconnectWebSocketIfNeeded()
     }
 
-    // Fix 4 — onStop no longer disconnects. Background = WS stays alive.
+    // onStop no longer disconnects. Background = WS stays alive.
     override fun onStop() {
         super.onStop()
         // Intentionally empty — WebSocket persists through backgrounding.

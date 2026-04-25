@@ -207,7 +207,7 @@ fun ElleHomeScreen(
     Scaffold(
         containerColor = IsyaNight,
         topBar = {
-            // Issue 28: Custom IsyaTopBar replaces TopAppBar
+            // Custom IsyaTopBar replaces TopAppBar
             IsyaTopBar(
                 title = {
                     Text("ElleAnn", style = MaterialTheme.typography.titleMedium,

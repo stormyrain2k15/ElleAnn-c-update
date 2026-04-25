@@ -66,8 +66,24 @@ class ChatViewModel(
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
     init {
+        /* Mirror state mutations into the cache manager's tracked map so
+         * the global crash-flush always has the latest list to write. */
+        viewModelScope.launch {
+            _state.collect { st ->
+                cacheManager.track(conversationId, st.messages)
+            }
+        }
         loadCacheThenVerify()
         observeWebSocket()
+    }
+
+    override fun onCleared() {
+        /* Final flush + untrack when the chat screen is gone for good
+         * (process-survives, not crash). The crash path is handled
+         * separately in ElleApp.                                       */
+        cacheManager.writeCacheSync(conversationId, _state.value.messages)
+        cacheManager.untrack(conversationId)
+        super.onCleared()
     }
 
     /**
@@ -153,7 +169,7 @@ class ChatViewModel(
         if (text.isBlank() || _state.value.sending) return
         val requestId = java.util.UUID.randomUUID().toString()
 
-        // Fix 7: Optimistic user message — appended immediately and flushed to cache
+        // Optimistic user message — appended immediately and flushed to cache
         // so app-close between send and server-refresh doesn't lose the outgoing message
         val optimisticMsg = Message(
             messageId      = -System.nanoTime(),  // guaranteed-unique negative ID; server ID replaces on verify
@@ -217,9 +233,14 @@ fun ChatScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val tts = remember { TtsController(context) }
-    val cacheManager = remember { ChatCacheManager(context) }
+    /* Use the process-wide singleton so the crash-handler in ElleApp can
+     * see this conversation's in-memory state and flush it on a hard
+     * crash. Re-creating per-screen would defeat the crash-flush.       */
+    val cacheManager = remember {
+        (context.applicationContext as com.elleann.android.ElleApp).chatCacheManager
+    }
 
-    // Fix 5: Guard webSocket access — show error state instead of crashing on uninitialized WS
+    // Guard webSocket access — show error state instead of crashing on uninitialized WS
     val ws = containerExtended.webSocketOrNull
     if (ws == null) {
         Box(

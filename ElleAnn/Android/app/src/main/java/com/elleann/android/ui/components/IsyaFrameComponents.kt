@@ -31,7 +31,7 @@ import com.elleann.android.ui.theme.*
  * Replaces Material3 NavigationBar. Uses isya_tab_active/inactive textures for
  * the active indicator strip.
  *
- * Issue 28: replaces NavigationBar + NavigationBarItem.
+ * Replaces NavigationBar + NavigationBarItem.
  */
 data class IsyaNavItem(
     val label: String,
@@ -132,7 +132,7 @@ private fun IsyaNavTab(
 /**
  * IsyaTopBar — custom top bar with gold bottom border and teal accent.
  * Replaces Material3 TopAppBar.
- * Issue 28.
+ *
  */
 @Composable
 fun IsyaTopBar(
@@ -177,7 +177,7 @@ fun IsyaTopBar(
 /**
  * IsyaSearchBar — custom search field using the isya_input_field texture style.
  * Replaces OutlinedTextField for search purposes.
- * Issue 28.
+ *
  */
 @Composable
 fun IsyaSearchBar(
@@ -216,7 +216,7 @@ fun IsyaSearchBar(
 /**
  * IsyaScreenFrame — outer frame for a screen using corner ornaments from MainInterface.tga.
  * Wraps screen content with Fiesta-style border corners at screen edges.
- * Issue 28.
+ *
  */
 @Composable
 fun IsyaScreenFrame(
@@ -263,7 +263,7 @@ fun IsyaScreenFrame(
 /**
  * IsyaTabStrip — horizontal tab row using isya_tab_active/inactive images.
  * Replaces Material3 TabRow.
- * Issue 28.
+ *
  */
 @Composable
 fun IsyaTabStrip(

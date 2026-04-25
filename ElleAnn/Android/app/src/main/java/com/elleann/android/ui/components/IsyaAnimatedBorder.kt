@@ -156,24 +156,27 @@ private fun DrawScope.drawIsyaBorder(
 
 /**
  * Isya hue cycle: maps a 0..1 fraction to a color cycling through
- * Gold → Teal → Violet → Gold, matching the original Unreal material spec.
+ * Silver → Gold → Teal → Silver. The reference UI palette specifies
+ * silver as the dominant frame colour with gold + teal accents; the
+ * prior cycle used violet, which on certain displays read as red and
+ * was the source of the "interface box is shaded red" feedback.
  */
 private fun isyaHueCycle(fraction: Float): Color {
     return when {
         fraction < 0.33f -> {
-            // Gold → Teal
+            // Silver → Gold
             val t = fraction / 0.33f
-            lerpColor(IsyaGold, IsyaMagic, t)
+            lerpColor(IsyaSilverMid, IsyaGold, t)
         }
         fraction < 0.66f -> {
-            // Teal → Violet
+            // Gold → Teal
             val t = (fraction - 0.33f) / 0.33f
-            lerpColor(IsyaMagic, ElleViolet, t)
+            lerpColor(IsyaGold, IsyaMagic, t)
         }
         else -> {
-            // Violet → Gold
+            // Teal → Silver
             val t = (fraction - 0.66f) / 0.34f
-            lerpColor(ElleViolet, IsyaGold, t)
+            lerpColor(IsyaMagic, IsyaSilverMid, t)
         }
     }
 }

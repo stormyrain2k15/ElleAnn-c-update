@@ -70,7 +70,7 @@ class MemoryBrowserViewModel(private val container: AppContainerExtended) : View
             _state.update { it.copy(loading = true, error = null) }
             fetch()
             _state.update { it.copy(loading = false) }
-            // Issue 18: Only start polling after initial load completes (not before token/server settle)
+            // Only start polling after initial load completes (not before token/server settle)
             if (_state.value.error == null) startPolling()
         }
     }
@@ -180,7 +180,7 @@ fun MemoryBrowserScreen(
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
 
             // Search bar
-            // Issue 28: Custom IsyaSearchBar
+            // Custom IsyaSearchBar
             IsyaSearchBar(
                 value         = state.searchQuery,
                 onValueChange = vm::search,

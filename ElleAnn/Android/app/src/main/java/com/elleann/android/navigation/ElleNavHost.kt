@@ -63,7 +63,7 @@ fun ElleNavHost(
     val navController = rememberNavController()
     val startDestination = if (isPaired) ElleRoutes.ELLE else ElleRoutes.PAIR
 
-    // Fix 6: Explicit navigation when isPaired flips false (reauth or manual unpair)
+    // Explicit navigation when isPaired flips false (reauth or manual unpair)
     // Recomposition alone is not sufficient — the back stack must be cleared explicitly.
     androidx.compose.runtime.LaunchedEffect(isPaired) {
         if (!isPaired) {
@@ -160,7 +160,7 @@ private fun MainScaffold(
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
-            // Issue 28: Custom IsyaBottomNav replaces Material3 NavigationBar
+            // Custom IsyaBottomNav replaces Material3 NavigationBar
             val currentRoute = currentDestination?.route ?: ""
             IsyaBottomNav(
                 items = TopLevelDestination.all.map { d ->

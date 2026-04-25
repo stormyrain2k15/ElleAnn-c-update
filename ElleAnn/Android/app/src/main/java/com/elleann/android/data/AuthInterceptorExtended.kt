@@ -32,7 +32,7 @@ class AuthInterceptorExtended(
             requestBuilder.addHeader("Authorization", "Bearer ${stored.jwt}")
         }
 
-        // Issue 23: x-admin-key is NOT attached here.
+        // x-admin-key is NOT attached here.
         // It is only added by the dedicated adminOkHttpClient in AppContainerExtended.
         // This prevents the admin key from leaking onto every user-level request.
 

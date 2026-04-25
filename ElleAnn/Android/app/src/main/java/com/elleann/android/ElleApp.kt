@@ -93,7 +93,7 @@ interface ElleApi {
     suspend fun emotions(): EmotionsResponse
 
     @retrofit2.http.POST("/api/auth/pair")
-    suspend fun pair(@retrofit2.http.Body body: Map<String, String>): PairResponse
+    suspend fun pair(@retrofit2.http.Body body: com.elleann.android.data.models.PairRequest): PairResponse
 }
 
 // ─── AppContainer — locked base container ─────────────────────────────────────
@@ -134,7 +134,7 @@ class AppContainer(context: Context) {
         get() = tokenStore.load()?.let { apiFor(it.host, it.port) }
 }
 
-// ─── Private LAN validator — Fix 9 ───────────────────────────────────────────
+// ─── Private LAN validator ───────────────────────────────────────────
 /**
  * Rejects any host that is not a private RFC 1918 / loopback address.
  * Since the Elle server is always on a local network, connecting to a public
@@ -149,7 +149,7 @@ object PrivateLanValidator {
         Regex("""^127\.\d+\.\d+\.\d+$"""),           // Loopback IPv4
         Regex("""^::1$"""),                                 // Loopback IPv6
         Regex("""^localhost$"""),                           // Loopback hostname
-        Regex("""^.+\.local$"""),                         // Fix 8: mDNS — Josh's server may use .local
+        Regex("""^.+\.local$"""),                         // mDNS — Josh's server may use .local
     )
 
     /** @throws IllegalArgumentException if [host] is not a private/loopback address */
@@ -167,9 +167,49 @@ object PrivateLanValidator {
 class ElleApp : Application() {
     lateinit var container: AppContainer
         private set
+    lateinit var chatCacheManager: com.elleann.android.data.ChatCacheManager
+        private set
 
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(applicationContext)
+
+        /* Crash-safe chat cache — required by product spec. The local
+         * .txt cache is a startup-latency optimisation, but it MUST
+         * stay current across both clean exits and hard crashes,
+         * otherwise the next launch shows stale messages and the user
+         * sees the chat "rewind".
+         *
+         * Three escalating pathways to flush the cache:
+         *   (a) Per-message:  `ChatViewModel.flushCache()` rewrites the
+         *       file on every state mutation. (Cheapest, normal case.)
+         *   (b) Lifecycle:    [ProcessLifecycleOwner] ON_STOP fires when
+         *       the user backgrounds the app — flush every tracked
+         *       conversation in case (a) missed a write.
+         *   (c) Crash:        [Thread.setDefaultUncaughtExceptionHandler]
+         *       runs SYNCHRONOUSLY before the previous handler escalates.
+         *       Writes every tracked conversation to disk via the
+         *       atomic temp-file rename pattern in ChatCacheManager.
+         */
+        chatCacheManager = com.elleann.android.data.ChatCacheManager(applicationContext)
+        com.elleann.android.data.ChatCacheManager.installAsGlobal(chatCacheManager)
+
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching { com.elleann.android.data.ChatCacheManager.crashFlush() }
+            previousHandler?.uncaughtException(thread, throwable)
+                ?: Thread.getDefaultUncaughtExceptionHandler()?.uncaughtException(thread, throwable)
+        }
+
+        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : androidx.lifecycle.DefaultLifecycleObserver {
+                override fun onStop(owner: androidx.lifecycle.LifecycleOwner) {
+                    /* Background flush — non-blocking is fine here, the
+                     * user already left the app; anything they typed has
+                     * already been pushed via per-message writes.       */
+                    runCatching { chatCacheManager.flushAllBlocking() }
+                }
+            }
+        )
     }
 }

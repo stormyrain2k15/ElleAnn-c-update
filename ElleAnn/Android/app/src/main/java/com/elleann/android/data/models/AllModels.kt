@@ -891,10 +891,10 @@ data class ConsentLogResponse(val log: List<ConsentLogEntry> = emptyList())
 
 
 // ════════════════════════════════════════════════════════════════════════════
-// TYPED REQUEST MODELS — Issue 19+20: replace weakly-typed maps/full-objects
+// TYPED REQUEST MODELS +20: replace weakly-typed maps/full-objects
 // ════════════════════════════════════════════════════════════════════════════
 
-/** Issue 19: Use this instead of passing full Memory object to POST /api/memory/ */
+/** Use this instead of passing full Memory object to POST /api/memory/ */
 @Serializable
 data class CreateMemoryRequest(
     val content: String,
@@ -907,7 +907,7 @@ data class CreateMemoryRequest(
     val tags: List<String> = emptyList(),
 )
 
-/** Issue 20: Typed video call start request */
+/** Typed video call start request */
 @Serializable
 data class StartVideoCallRequest(
     @SerialName("conversation_id") val conversationId: Long? = null,
@@ -915,17 +915,126 @@ data class StartVideoCallRequest(
 )
 
 
-/** Fix 7: Typed model for POST /api/x/conception/attempt */
+/** Typed model for POST /api/x/conception/attempt */
 @Serializable
 data class AttemptConceptionRequest(
     val method: String? = null,
     val notes: String? = null,
 )
 
-/** Fix 7: Typed model for POST /api/x/pregnancy/accelerate */
+/** Typed model for POST /api/x/pregnancy/accelerate */
 @Serializable
 data class AcceleratePregnancyRequest(
     val days: Int = 1,
+)
+
+// ── Memory file attach ──────────────────────────────────────────────────────
+/** POST /api/memory/{id}/files — attach a file (path or bytes b64) to a memory */
+@Serializable
+data class AttachFileRequest(
+    @SerialName("file_path") val filePath: String? = null,
+    @SerialName("file_name") val fileName: String? = null,
+    @SerialName("mime_type") val mimeType: String? = null,
+    @SerialName("file_b64")  val fileB64:  String? = null,
+)
+
+// ── Emotion dimension manual set ────────────────────────────────────────────
+/** PUT /api/emotions/dimensions/{name} — manually set a dimension's value */
+@Serializable
+data class SetEmotionDimensionRequest(
+    val value:    Float,
+    val baseline: Float? = null,
+)
+
+// ── Hardware action queue ───────────────────────────────────────────────────
+/** POST /api/hardware/actions/{id}/claim — worker claims an action */
+@Serializable
+data class ClaimHardwareActionRequest(
+    @SerialName("worker_id") val workerId: String,
+)
+
+/** POST /api/hardware/actions/{id}/complete — worker reports completion */
+@Serializable
+data class CompleteHardwareActionRequest(
+    @SerialName("worker_id") val workerId: String,
+    val success: Boolean,
+    val output:  String? = null,
+    val error:   String? = null,
+)
+
+// ── Learning subjects + milestones ──────────────────────────────────────────
+/** POST /api/learning/subjects — register a new learning subject */
+@Serializable
+data class CreateSubjectRequest(
+    val name:        String,
+    val category:    String? = null,
+    val description: String? = null,
+    val priority:    Float = 0.5f,
+)
+
+/** PATCH /api/learning/subjects/{id} — update fields */
+@Serializable
+data class UpdateSubjectRequest(
+    val name:        String? = null,
+    val category:    String? = null,
+    val description: String? = null,
+    val priority:    Float?  = null,
+    val status:      String? = null,
+)
+
+/** POST /api/learning/subjects/{id}/milestones — add a milestone */
+@Serializable
+data class CreateMilestoneRequest(
+    val title:       String,
+    val description: String? = null,
+    @SerialName("target_date") val targetDate: String? = null,
+)
+
+/** POST /api/learning/subjects/{id}/references — add a reference URL */
+@Serializable
+data class CreateReferenceRequest(
+    val url:         String,
+    val title:       String? = null,
+    val description: String? = null,
+)
+
+/** POST /api/learning/skills — register a new skill */
+@Serializable
+data class CreateSkillRequest(
+    val name:        String,
+    val category:    String? = null,
+    val description: String? = null,
+    val proficiency: Float = 0f,
+)
+
+// ── Dictionary loader ───────────────────────────────────────────────────────
+/** POST /api/dictionary/load — bulk-load a dictionary file from disk */
+@Serializable
+data class LoadDictionaryRequest(
+    val path:    String? = null,
+    val source:  String? = null,
+    val replace: Boolean = false,
+)
+
+// ── Model workers ───────────────────────────────────────────────────────────
+/** POST /api/models/workers — register a model-execution worker */
+@Serializable
+data class CreateModelWorkerRequest(
+    val name:    String,
+    val role:    String,
+    val model:   String,
+    val host:    String? = null,
+    val port:    Int?    = null,
+    @SerialName("api_key") val apiKey: String? = null,
+)
+
+// ── Pair request (companion app pairing) ────────────────────────────────────
+/** POST /api/auth/pair — typed companion-app pairing payload. */
+@Serializable
+data class PairRequest(
+    val code:                                 String,
+    @SerialName("device_name") val deviceName: String,
+    @SerialName("device_id")   val deviceId:   String,
 )
 
 // ════════════════════════════════════════════════════════════════════════════

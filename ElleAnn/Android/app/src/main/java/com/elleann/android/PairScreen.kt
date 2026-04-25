@@ -51,7 +51,7 @@ class PairViewModel(
     fun onPort(v: String)  = _state.update { it.copy(port = v, error = null) }
     fun onCode(v: String)  = _state.update { it.copy(code = v, error = null) }
 
-    fun pair(onSuccess: () -> Unit) {
+    fun pair(deviceId: String, onSuccess: () -> Unit) {
         val s = _state.value
         val port = s.port.toIntOrNull() ?: run {
             _state.update { it.copy(error = "Invalid port number") }; return
@@ -67,7 +67,13 @@ class PairViewModel(
             _state.update { it.copy(loading = true, error = null) }
             runCatching {
                 val api = container.apiFor(s.host, port)
-                val resp = api.pair(mapOf("code" to s.code, "device_name" to "ElleAnn Android"))
+                val resp = api.pair(
+                    com.elleann.android.data.models.PairRequest(
+                        code       = s.code,
+                        deviceName = android.os.Build.MODEL ?: "ElleAnn Android",
+                        deviceId   = deviceId,
+                    )
+                )
                 container.tokenStore.save(
                     StoredToken(
                         jwt       = resp.jwt,
@@ -103,6 +109,17 @@ fun PairScreen(
         }
     )
     val state by vm.state.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    /* Stable per-install device id for the pair handshake. ANDROID_ID
+     * is a 64-bit value tied to the user/app-signing-key/device tuple
+     * — exactly what the server's PairedDevices table wants as PK. */
+    val deviceId = remember {
+        @Suppress("HardwareIds")
+        android.provider.Settings.Secure.getString(
+            context.contentResolver,
+            android.provider.Settings.Secure.ANDROID_ID,
+        ) ?: java.util.UUID.randomUUID().toString()
+    }
 
     Box(
         modifier = Modifier
@@ -170,7 +187,7 @@ fun PairScreen(
 
                     IsyaButton(
                         text     = if (state.loading) "Connecting…" else "CONNECT",
-                        onClick  = { vm.pair(onPaired) },
+                        onClick  = { vm.pair(deviceId, onPaired) },
                         loading  = state.loading,
                         variant  = IsyaButtonVariant.PRIMARY_GOLD,
                         modifier = Modifier.fillMaxWidth(),
