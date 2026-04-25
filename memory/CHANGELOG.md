@@ -3,6 +3,44 @@
 (PRD.md is the static source of truth; this file is the running log of
 what landed and when. Newest entries on top.)
 
+## 2026-02 — SQL schema extracted, unification path unblocked
+
+User clarified that the `.bak` files in `SQL_Database.7z` are real MSSQL
+backups (they were — the earlier `.bak` we got mistaken for SQL backups
+were renamed EXEs). Re-extracted the 6 backups: `Account.bak` (11 MB),
+`AccountLog.bak`, `OperatorTool.bak`, `StatisticsData.bak`,
+`World00_Character.bak` (6 MB), `World00_GameLog.bak`.
+
+**TUSER schema reverse-engineered** by parsing `Account.bak`'s embedded
+stored-procedure text. Documented in
+`Services/Elle.Service.Fiesta/_re_artifacts/SQL_SCHEMA.md`. Key facts:
+
+- **Plaintext passwords** in `tUser.sUserPW` (NVARCHAR(20)). The game
+  doesn't hash. The PHP we received earlier was a 3-user stub, NOT
+  production auth.
+- Production auth is `usp_User_loginWeb` against the `Account` MSSQL DB,
+  comparing `sUserID + sUserPW` directly with `bIsDelete = 0` filter.
+- 84 unique stored procedures recovered (`TUSER_*`, `TCHARACTER_*`,
+  `TITEM_*`, `WEB_*`).
+- Two parallel naming styles for the same physical row:
+  - Legacy: `SUSERID`, `SUSERPW`, `JF`, `QX`, `BISDELETE`
+  - Web/modern: `nUserNo`, `sUserID`, `sUserPW`, `sUserName`, `bIsBlock`,
+    `nAuthID`, `bIsDelete`
+
+**Implications for Elle.Service.HTTP** — the user-DB unification ask is
+now fully unblocked. The recommended path (see SQL_SCHEMA.md):
+- Add ODBC-driven auth to `POST /api/auth/pair` querying `Account.dbo.tUser`.
+- Issue JWTs with `sub = nUserNo` (int identity, stable across renames).
+- Replace `ElleCore.dbo.PairedDevices` with a thin
+  `ElleCore.dbo.UserPairing` table FK-linked on `nUserNo`.
+- Same `(sUserID, sUserPW)` pair the user types into Elle is what
+  `SVC_FIESTA` will use to log into the game — one credential set, one
+  identity (`nUserNo`), unified across phone, web, and in-game presence.
+
+**Smoke test still green** (5/5 pass under `-Wall -Wextra -Werror`).
+
+---
+
 ## 2026-02 — Server topology nailed down via JHR_ServerInfo.txt
 
 User shared the canonical server config (`JHR_ServerInfo.txt`, plus
