@@ -4,15 +4,15 @@
 Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 **Tech**: Pure C++, MASM (Assembly DLLs), Lua (behavioral) — Windows Services.
 **No** Python / Node for backend. Android companion in Kotlin.
-**Architecture**: 19 Windows Services over IOCP Named Pipes, SQL Server backing.
+**Architecture**: 21 Windows Services over IOCP Named Pipes, SQL Server backing.
 **NO-STUB policy**: nothing mocked, no fake 200s, no hollow patterns.
 **Runs exclusively on user's local Windows PC** — no E2E in cloud.
 
 ## What Exists
-- **19 Windows Services**: Heartbeat, Cognitive, Emotional, Memory, GoalEngine,
+- **21 Windows Services**: Heartbeat, Cognitive, Emotional, Memory, GoalEngine,
   Action, SelfPrompt, WorldModel, Dream, Solitude, Bonding, InnerLife,
   Continuity, XChromosome, Family, Consent, QueueWorker, HTTP, Identity,
-  plus Lua.Behavioral.
+  **Fiesta (headless MMO client, NEW Feb 2026)**, plus Lua.Behavioral.
 - Shared core: ElleTypes, ElleSQLConn (split-ready), ElleQueueIPC,
   ElleIdentityCore, ElleConfig, ElleLLM, ElleJsonExtract, ElleSelfSurprise.
 - MASM DLLs for Crypto, FileIO, Math, System, Utils.

@@ -21,6 +21,7 @@
     { "name": "ElleContinuity",  "display": "Elle-Ann Continuity",   "exe": "Elle.Service.Continuity.exe",   "depends": ["ElleHeartbeat", "ElleMemory", "ElleIdentity"],                     "start": "auto" },
     { "name": "ElleLuaBehavioral", "display": "Elle-Ann Lua Behavioral","exe": "Elle.Lua.Behavioral.exe",      "depends": ["ElleHeartbeat", "ElleEmotional"],                                  "start": "auto" },
     { "name": "ElleCognitive",   "display": "Elle-Ann Cognitive",    "exe": "Elle.Service.Cognitive.exe",    "depends": ["ElleHeartbeat", "ElleMemory", "ElleEmotional", "ElleIdentity"],    "start": "auto" },
-    { "name": "ElleHTTPServer",  "display": "Elle-Ann HTTP API",     "exe": "Elle.Service.HTTP.exe",         "depends": ["ElleHeartbeat", "ElleCognitive"],                                  "start": "auto" }
+    { "name": "ElleHTTPServer",  "display": "Elle-Ann HTTP API",     "exe": "Elle.Service.HTTP.exe",         "depends": ["ElleHeartbeat", "ElleCognitive"],                                  "start": "auto" },
+    { "name": "ElleFiesta",      "display": "Elle-Ann Fiesta Client","exe": "Elle.Service.Fiesta.exe",       "depends": ["ElleHeartbeat", "ElleCognitive"],                                  "start": "manual" }
   ]
 }
