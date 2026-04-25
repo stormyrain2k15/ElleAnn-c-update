@@ -1081,3 +1081,20 @@ exact Fiesta sprites verbatim.
 | flowingBorder      | false   | Animate the border with the hue cycle     |
 | decoratedCorners   | false   | Paint silver corner notches               |
 | fiestaBackground   | true    | Use the striped blue background           |
+
+## Session Feb-2026 (continued) — v2.1: IsyaSprite atlas slicer
+
+### Implemented
+- `IsyaSprite(atlas, x, y, w, h, ...)` composable in
+  `ui/components/IsyaSprite.kt` — renders a sub-region of any drawable
+  resource via `BitmapPainter(srcOffset, srcSize)`. Caches the
+  underlying ImageBitmap, clamps UV coords to atlas bounds.
+- Convenience overload `IsyaSprite(region: SpriteRegion, ...)`.
+- `IsyaSpriteCatalog.kt`: named `SpriteRegion` constants (BTN_OK_*,
+  BAR_HP_*, SLOT_EMPTY/HIGHLIGHT, CORNER_*, DOT_*) for the 4 bundled
+  Fiesta atlases. Coordinates are placeholders; one-line update per
+  sprite as you confirm each location.
+
+### Validation
+- Brace/paren balance: 0 imbalanced.
+- Repacked: `/tmp/ElleAnn_Android_v2.1.zip` (728 KB).
