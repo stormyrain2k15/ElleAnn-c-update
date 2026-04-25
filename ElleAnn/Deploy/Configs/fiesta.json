@@ -13,6 +13,9 @@
     "password":         "",
     "auto_login":       false,
 
+    "_user_no_note": "Optional. When > 0, SVC_FIESTA persists GameSessionState rows keyed on this nUserNo (matches the game's tUser.nUserNo). Set this to the same nUserNo Elle.Service.HTTP linked the device to during /api/auth/pair, and ElleCore.dbo.GameSessionState becomes a survives-restart record of where Elle was in the game world.",
+    "user_no":          0,
+
     "_protocol_version_note": "NC_MAP_LOGIN_REQ carries a u32 protocol-version. Mischief 6.11.2015 expects 0; bump only if a newer client capture shows otherwise. The 'NO-APEX VERSION' WM log is an internal guild-data load failure on the SERVER side, NOT a client-rejection — ignore.",
     "protocol_version": 0,
 

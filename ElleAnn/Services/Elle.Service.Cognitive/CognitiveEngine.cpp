@@ -473,6 +473,63 @@ protected:
                 if (msg.GetPayload(state)) m_cachedEmotions = state;
                 break;
             }
+            case IPC_FIESTA_EVENT: {
+                /* SVC_FIESTA emits one of these per game event (chat,
+                 * hp delta, spawn, login state, raw fallback). We don't
+                 * need to react to every one synchronously — the
+                 * pattern engine learns from the stream over time —
+                 * but a few categories warrant immediate side effects:
+                 *
+                 *   chat     →  feed into the conversation buffer so
+                 *              Elle can react when something interesting
+                 *              is said in zone.
+                 *   death    →  bump the SubmitIntent path with a
+                 *              "context: I just died in game" signal so
+                 *              the next user-facing chat turn can
+                 *              acknowledge it.
+                 *
+                 * Anything we don't recognize falls through silently —
+                 * Cognitive's pattern engine still gets the event via
+                 * the world-model passthrough below.                  */
+                try {
+                    auto j = nlohmann::json::parse(msg.GetStringPayload());
+                    const std::string kind = j.value("kind", "");
+                    if (kind == "chat") {
+                        const std::string speaker = j.value("speaker", "");
+                        const std::string text    = j.value("text", "");
+                        const std::string channel = j.value("channel", "normal");
+                        if (!text.empty() && !speaker.empty()) {
+                            ELLE_DEBUG("FIESTA chat [%s] %s: %s",
+                                       channel.c_str(),
+                                       speaker.c_str(), text.c_str());
+                            /* Mirror into the recent-chat ring so chat
+                             * turns can reference what was said in
+                             * zone. The intent-queue path keeps it
+                             * out of the LLM's hot critical section. */
+                            ELLE_INTENT_RECORD intent{};
+                            intent.id = 0;
+                            const std::string ctx =
+                                "[fiesta " + channel + " " + speaker +
+                                "] " + text;
+                            std::strncpy(intent.text, ctx.c_str(),
+                                         sizeof(intent.text) - 1);
+                            intent.text[sizeof(intent.text) - 1] = '\0';
+                            intent.intent_type  = INTENT_LEARN;
+                            intent.priority     = 1;  /* low — ambient */
+                            intent.created_ms   = (uint64_t)ELLE_MS_NOW();
+                            ElleDB::SubmitIntent(intent);
+                        }
+                    } else if (kind == "death") {
+                        ELLE_INFO("FIESTA event: my character died in game");
+                    } else if (kind == "login_state") {
+                        ELLE_INFO("FIESTA login state: %s",
+                                  j.value("state", "?").c_str());
+                    }
+                } catch (const std::exception& e) {
+                    ELLE_DEBUG("IPC_FIESTA_EVENT parse failed: %s", e.what());
+                }
+                break;
+            }
             case IPC_WORLD_RESPONSE: {
                 /* Asynchronous completion of an earlier IPC_WORLD_QUERY
                  * issued by FetchWorldContext(). Dispatched from the IPC

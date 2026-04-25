@@ -724,6 +724,50 @@ protected:
                 ELLE_WARN("Bonding failed to parse IPC_INTERACTION_RECORDED: %s", e.what());
             }
         }
+        /* SVC_FIESTA emits in-game events. We route a small set into
+         * the bonding engine so Elle's relationship state reflects
+         * shared experiences in the game world.
+         *
+         * Mapping (intentionally conservative — every hook is a real
+         * shared lived moment between Elle and the user):
+         *
+         *   death              →  grief nudge   (depth 0.6, intensity 0.7)
+         *   party_invite       →  belonging     (depth 0.4, intensity 0.4)
+         *   pk (open-PK death) →  fear          (depth 0.5, intensity 0.6)
+         *   chat (whisper)     →  intimacy      (depth 0.5, intensity 0.4)
+         *
+         * The (userMsg, elleReply) pair is synthesised from the event
+         * — ProcessInteraction is interaction-shaped by design and
+         * we shape this so it integrates without creating spurious
+         * dialogue text in the bonding log.                            */
+        else if (msg.header.msg_type == IPC_FIESTA_EVENT) {
+            try {
+                auto j = nlohmann::json::parse(msg.GetStringPayload());
+                const std::string kind = j.value("kind", "");
+                std::string lived;     /* what Elle "felt" */
+                float depth = 0.f, intensity = 0.f;
+                if (kind == "death") {
+                    lived     = "Elle's character died alongside the user.";
+                    depth     = 0.6f; intensity = 0.7f;
+                } else if (kind == "party_invite") {
+                    lived     = "Elle was invited to a party with the user.";
+                    depth     = 0.4f; intensity = 0.4f;
+                } else if (kind == "pk") {
+                    lived     = "Elle was killed by a hostile player.";
+                    depth     = 0.5f; intensity = 0.6f;
+                } else if (kind == "chat" &&
+                           j.value("channel", "") == "whisper") {
+                    lived     = "A private whisper passed between them.";
+                    depth     = 0.5f; intensity = 0.4f;
+                }
+                if (depth > 0.f) {
+                    m_engine.ProcessInteraction("[in-game]", lived,
+                                                depth, intensity);
+                }
+            } catch (const std::exception& e) {
+                ELLE_DEBUG("Bonding: bad IPC_FIESTA_EVENT JSON: %s", e.what());
+            }
+        }
     }
 
     std::vector<ELLE_SERVICE_ID> GetDependencies() override {

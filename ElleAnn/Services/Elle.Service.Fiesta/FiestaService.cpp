@@ -42,6 +42,7 @@
 #include "../../Shared/ElleServiceBase.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleLogger.h"
+#include "../../Shared/ElleUserContinuity.h"
 #include "../../Shared/json.hpp"
 
 #include "FiestaClient.h"
@@ -97,6 +98,7 @@ protected:
         m_username   = cfg.GetString("fiesta.username", "");
         m_password   = cfg.GetString("fiesta.password", "");
         m_autoLogin  = cfg.GetBool("fiesta.auto_login", false);
+        m_nUserNo    = (int64_t)cfg.GetInt("fiesta.user_no", 0);
 
         m_client.SetProtocolVersion(
             (uint32_t)cfg.GetInt("fiesta.protocol_version", 0));
@@ -266,13 +268,42 @@ private:
          * stream. Sending to a service that isn't connected is a no-op
          * inside ElleIPCHub::Send — safe and cheap.                    */
         const ELLE_SERVICE_ID subscribers[] = {
-            SVC_COGNITIVE, SVC_HTTP_SERVER
+            SVC_COGNITIVE, SVC_HTTP_SERVER, SVC_BONDING
         };
         for (auto target : subscribers) {
             auto m = ElleIPCMessage::Create(IPC_FIESTA_EVENT,
                                             SVC_FIESTA, target);
             m.SetStringPayload(jsonPayload);
             GetIPCHub().Send(target, m);
+        }
+
+        /* Fork a side-effect into ElleCore.dbo.GameSessionState so a
+         * service restart can resume gracefully. We only persist the
+         * coarse "where am I, who am I, how alive am I" snapshot —
+         * not every chat or hp tick, which would thrash the DB.       */
+        if (m_nUserNo > 0) {
+            try {
+                auto j = nlohmann::json::parse(jsonPayload);
+                const std::string kind = j.value("kind", "");
+                if (kind == "char_selected") {
+                    ElleDB::GameSessionStateRow row;
+                    row.nUserNo         = m_nUserNo;
+                    row.char_index      = j.value("char_index", -1);
+                    row.char_name       = j.value("char_name",  std::string(""));
+                    row.zone_id         = j.value("zone_id",    -1);
+                    row.zone_name       = j.value("zone_name",  std::string(""));
+                    row.last_hp         = j.value("hp",         0);
+                    row.last_hp_max     = j.value("hp_max",     0);
+                    row.last_session_ms = (uint64_t)ELLE_MS_NOW();
+                    ElleDB::UpsertGameSession(row);
+                } else if (kind == "disconnect") {
+                    ElleDB::MarkGameSessionDisconnected(
+                        m_nUserNo, j.value("reason", std::string("unknown")));
+                }
+            } catch (...) {
+                /* Best-effort; never crash the IPC broadcast on a
+                 * malformed event. */
+            }
         }
     }
 
@@ -299,6 +330,12 @@ private:
     std::string m_username;
     std::string m_password;
     bool        m_autoLogin = false;
+
+    /* nUserNo bound to this Fiesta session (from fiesta.user_no in
+     * config, or 0 = unbound). When > 0, FiestaService persists
+     * GameSessionState rows keyed on it so service restart can
+     * resume gracefully and Cognitive can reason about continuity. */
+    int64_t     m_nUserNo   = 0;
 
     /* Reconnect backoff state — driven entirely from OnTick. */
     uint64_t m_backoffMs     = 0;

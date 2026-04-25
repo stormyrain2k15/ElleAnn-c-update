@@ -3,6 +3,95 @@
 (PRD.md is the static source of truth; this file is the running log of
 what landed and when. Newest entries on top.)
 
+## 2026-02 — All enhancements landed (game-DB unification, Cognitive↔Fiesta, Bonding↔Fiesta, GameSessionState, UserContinuity)
+
+User said "go ahead with all enhancements" — five P0/P1/future items
+landed in one pass. All additive, all opt-in, all guarded by config so
+existing installs are untouched until they choose to enable them.
+
+### 1. Elle ↔ game user-DB unification (P0, your earlier ask)
+
+- **`Shared/ElleGameAccountDB.h/.cpp`** — secondary ODBC pool
+  (`ElleGameAccountPool`) bound to a separate DSN. Tiny surface:
+  `Initialize`, `Shutdown`, `Query`, `QueryParams`. Read-mostly.
+- **`ElleGameAuth::AuthenticateUser`** — verifies `(sUserID, sUserPW)`
+  against `Account.dbo.tUser` directly using parameterized SQL
+  (mirrors `usp_User_loginWeb` semantics). Filters `bIsDelete=0` and
+  `bIsBlock=0`. **Never logs the password.**
+- **`ElleGameAuth::GetUserById(nUserNo)`** — read-only enrichment
+  hook for JWT-gated endpoints that need the identity behind a
+  validated token.
+- **`POST /api/auth/pair`** now accepts a second mode: `{device_id,
+  device_name, game_user, game_pass}`. When provided, the legacy
+  6-digit pair-code requirement is replaced by game-DB auth. Both
+  modes coexist cleanly. The minted JWT keeps `sub = device_id` for
+  signature stability; the bound `nUserNo` lives in
+  `PairedDevices.nUserNo` (new column) for revocation + audit.
+- **`SQL/ElleAnn_GameUnification.sql`** — idempotent delta:
+  - `ALTER PairedDevices ADD nUserNo INT NULL` (+ filtered index).
+  - `CREATE TABLE UserContinuity` keyed on `nUserNo`.
+  - `CREATE TABLE GameSessionState` keyed on `nUserNo`.
+- **HTTPServer.cpp::OnStart** — initialises the game-DB pool when
+  `http_server.game_db_dsn` is set; logs status. Empty DSN ⇒
+  feature off, no behaviour change. Pool is shut down in OnStop.
+
+### 2. Relationship-memory anchor — `ElleCore.dbo.UserContinuity`
+
+- **`Shared/ElleUserContinuity.h/.cpp`** — DAO with five entry
+  points: `TouchUserContinuityOnPair`, `UpdateUserBond`,
+  `AppendUserNote`, `GetUserContinuity`, plus three for
+  GameSessionState (Upsert / MarkDisconnected / Get).
+- **`TouchUserContinuityOnPair`** uses `MERGE` so the first-met
+  timestamp is set exactly once and the row pre-exists for every
+  subsequent bond/note/session update.
+- **`AppendUserNote`** truncates from the FRONT (oldest) when the
+  cap (4 KB) would be exceeded, so the most recent observations
+  always survive.
+
+### 3. Cognitive ↔ Fiesta (`IPC_FIESTA_EVENT` consumer)
+
+- **`Cognitive::OnMessage`** — new case decodes `IPC_FIESTA_EVENT`
+  JSON. `chat` events are mirrored into the intent queue as
+  `INTENT_LEARN` ambient observations (priority 1). `death` and
+  `login_state` get logged. Other kinds fall through silently for
+  the pattern engine.
+
+### 4. Bonding ↔ Fiesta (emotional reactions to in-game events)
+
+- **`Bonding::OnMessage`** — second `if` branch maps four event
+  kinds to `ProcessInteraction(userMsg, elleReply, depth, intensity)`
+  calls so Elle's relationship state evolves from shared lived game
+  moments:
+  - `death`        → grief nudge   (depth 0.6, intensity 0.7)
+  - `party_invite` → belonging      (depth 0.4, intensity 0.4)
+  - `pk`           → fear           (depth 0.5, intensity 0.6)
+  - `chat:whisper` → intimacy       (depth 0.5, intensity 0.4)
+- **`FiestaService::BroadcastEvent`** — added `SVC_BONDING` to the
+  IPC_FIESTA_EVENT subscriber list.
+
+### 5. GameSessionState persistence (P2 future → done)
+
+- **`FiestaService::BroadcastEvent`** — sidecar persist-step:
+  `char_selected` → `UpsertGameSession`; `disconnect` →
+  `MarkGameSessionDisconnected`. Best-effort, never crashes on
+  malformed JSON. Only fires when `fiesta.user_no > 0`.
+- **`fiesta.json`** — added `user_no` config field documenting the
+  link to `tUser.nUserNo`.
+
+### Build wiring
+
+- **`Shared/ElleCore.Shared.vcxproj`** updated with the four new
+  files (`ElleGameAccountDB.cpp/.h`, `ElleUserContinuity.cpp/.h`).
+
+### Smoke test status (Linux container, `-Wall -Wextra -Werror`)
+
+- ✅ All 5 portable Fiesta tests still pass (cipher, framing,
+  encrypt-and-parse round-trip, opcode `static_assert`s).
+- ⏳ Windows MSBuild verification must run on your local PC — the
+  shared headers (`windows.h`, ODBC) require it.
+
+---
+
 ## 2026-02 — SQL schema extracted, unification path unblocked
 
 User clarified that the `.bak` files in `SQL_Database.7z` are real MSSQL

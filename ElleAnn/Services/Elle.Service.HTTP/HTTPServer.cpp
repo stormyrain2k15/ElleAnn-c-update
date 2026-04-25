@@ -20,6 +20,8 @@
 #include "../../Shared/json.hpp"
 #include "../../Shared/ElleCrypto.h"
 #include "../../Shared/ElleQR.h"
+#include "../../Shared/ElleGameAccountDB.h"
+#include "../../Shared/ElleUserContinuity.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -1181,10 +1183,38 @@ protected:
                       "is configured — every mutating request will be rejected "
                       "with 503. Set one in elle_master_config.json.");
         }
+
+        /* Optional game-DB integration. When `http_server.game_db_dsn` is
+         * set, Elle accepts the game's own (sUserID, sUserPW) on the
+         * /api/auth/pair endpoint instead of (or alongside) the legacy
+         * 6-digit pairing code. Empty DSN = feature off, no other change.
+         * The pool is intentionally tiny (4 conns) since pairing is rare.  */
+        const std::string game_dsn = ElleConfig::Instance().GetString(
+            "http_server.game_db_dsn", "");
+        if (!game_dsn.empty()) {
+            const uint32_t game_pool_size = (uint32_t)
+                ElleConfig::Instance().GetInt("http_server.game_db_pool_size", 4);
+            if (ElleGameAccountPool::Instance().Initialize(game_dsn,
+                                                           game_pool_size)) {
+                ELLE_INFO("game-DB auth path: ENABLED (pool=%u)",
+                          game_pool_size);
+            } else {
+                ELLE_WARN("game-DB auth path: requested but Initialize() "
+                          "failed — falling back to pair-code only");
+            }
+        } else {
+            ELLE_INFO("game-DB auth path: disabled (http_server.game_db_dsn unset)");
+        }
+
         return true;
     }
 
     void OnStop() override {
+        /* Phase 0: tear down the game-DB connection pool BEFORE we
+         * close listen socket so any in-flight pair request finishes
+         * cleanly (the AUTH_PUBLIC handler is short — handler joins
+         * happen in Phase 3 anyway).                                  */
+        ElleGameAccountPool::Instance().Shutdown();
         /* Phase 1: stop producers.                                         */
         m_shuttingDown.store(true);
         if (m_listenSocket != INVALID_SOCKET) {
@@ -2245,8 +2275,30 @@ private:
 
         m_router.Register("POST", "/api/auth/pair",
             [this](const HTTPRequest& req) -> HTTPResponse {
-                /* Parse body. Fail-closed on any malformed field.          */
+                /* Parse body. Fail-closed on any malformed field.
+                 *
+                 * TWO PAIRING MODES (both supported):
+                 *
+                 *   1. Pair-code mode (legacy)
+                 *        body: { code, device_id, device_name }
+                 *        admin issues a 6-digit code via /api/auth/pair-code,
+                 *        the companion device redeems it. JWT sub = device_id.
+                 *
+                 *   2. Game-account mode (new — Feb 2026)
+                 *        body: { device_id, device_name, game_user, game_pass }
+                 *        device authenticates with the same Mischief account
+                 *        credentials it uses for the in-game client. We
+                 *        validate against the game's `Account.dbo.tUser`
+                 *        directly (read-only) and link the device to the
+                 *        resulting `nUserNo`. JWT sub = device_id, but the
+                 *        bound nUserNo is persisted in PairedDevices and
+                 *        UserContinuity for relationship continuity.
+                 *
+                 * If both `code` and `game_user` arrive, game-account mode
+                 * wins (it's the stronger proof). If neither arrives, we
+                 * keep the original pair-code requirement.                */
                 std::string code, device_name, device_id;
+                std::string game_user, game_pass;
                 try {
                     auto j = json::parse(req.body);
                     if (j.contains("code")        && j["code"].is_string())
@@ -2255,20 +2307,14 @@ private:
                         device_name = j["device_name"].get<std::string>();
                     if (j.contains("device_id")   && j["device_id"].is_string())
                         device_id = j["device_id"].get<std::string>();
+                    if (j.contains("game_user")   && j["game_user"].is_string())
+                        game_user = j["game_user"].get<std::string>();
+                    if (j.contains("game_pass")   && j["game_pass"].is_string())
+                        game_pass = j["game_pass"].get<std::string>();
                 } catch (const json::exception&) {
                     return HTTPResponse::Err(400, "malformed JSON body");
                 }
 
-                if (code.size() != 6) {
-                    return HTTPResponse::Err(400, "code must be 6 digits");
-                }
-                /* Accept only ASCII digits. Guards against unicode lookalikes
-                 * that would otherwise bypass the timing-safe compare.      */
-                for (char c : code) {
-                    if (c < '0' || c > '9') {
-                        return HTTPResponse::Err(400, "code must be 6 digits");
-                    }
-                }
                 if (device_id.empty() || device_id.size() > 128) {
                     return HTTPResponse::Err(400, "device_id required (<=128 chars)");
                 }
@@ -2277,35 +2323,74 @@ private:
                 }
 
                 uint64_t now = (uint64_t)ELLE_MS_NOW();
+                int64_t  bound_user_no = 0;
+                std::string bound_user_id_cached;
+                std::string bound_user_name_cached;
+                bool game_auth_used = false;
 
-                /* Timing-safe code lookup: iterate ALL outstanding codes
-                 * and compare constant-time. Lookup time is independent
-                 * of which code matched (no map.find shortcut) so an
-                 * attacker can't learn about the set of valid codes by
-                 * timing the response. The map stays small (admin
-                 * issues < 10 codes/minute in practice) so the O(n)
-                 * scan is still microseconds.                           */
-                bool matched = false;
-                {
-                    std::lock_guard<std::mutex> lk(m_pairingMutex);
-                    PairingGcLocked(now);
-                    for (auto& [stored, rec] : m_pairingCodes) {
-                        if (rec.consumed) continue;
-                        if (rec.expires_ms <= now) continue;
-                        if (stored.size() != code.size()) continue;
-                        if (ElleCrypto::ConstantTimeEquals(stored.data(),
-                                                             code.data(),
-                                                             stored.size())) {
-                            /* Consume exactly once, even under concurrent
-                             * redeem attempts.                           */
-                            rec.consumed = true;
-                            matched = true;
-                            break;
+                /* ── MODE A: game-account auth ─────────────────────── */
+                if (!game_user.empty() && !game_pass.empty()) {
+                    if (!ElleGameAccountPool::Instance().IsAvailable()) {
+                        return HTTPResponse::Err(503,
+                            "game-account auth not configured "
+                            "(set http_server.game_db_dsn)");
+                    }
+                    ElleGameAuth::UserIdentity id;
+                    if (!ElleGameAuth::AuthenticateUser(game_user, game_pass, id)) {
+                        /* NEVER include the password in any log line. */
+                        ELLE_INFO("game-auth: refused user=\"%s\"", game_user.c_str());
+                        return HTTPResponse::Err(401, "game credentials refused");
+                    }
+                    bound_user_no          = id.nUserNo;
+                    bound_user_id_cached   = id.sUserID;
+                    bound_user_name_cached = id.sUserName;
+                    game_auth_used         = true;
+                    ELLE_INFO("game-auth: user=\"%s\" nUserNo=%lld → device=%s",
+                              id.sUserID.c_str(), (long long)id.nUserNo,
+                              device_id.c_str());
+
+                /* ── MODE B: pair-code (existing flow) ─────────────── */
+                } else {
+                    if (code.size() != 6) {
+                        return HTTPResponse::Err(400, "code must be 6 digits");
+                    }
+                    /* Accept only ASCII digits. Guards against unicode lookalikes
+                     * that would otherwise bypass the timing-safe compare.      */
+                    for (char c : code) {
+                        if (c < '0' || c > '9') {
+                            return HTTPResponse::Err(400, "code must be 6 digits");
                         }
                     }
-                }
-                if (!matched) {
-                    return HTTPResponse::Err(401, "invalid or expired code");
+
+                    /* Timing-safe code lookup: iterate ALL outstanding codes
+                     * and compare constant-time. Lookup time is independent
+                     * of which code matched (no map.find shortcut) so an
+                     * attacker can't learn about the set of valid codes by
+                     * timing the response. The map stays small (admin
+                     * issues < 10 codes/minute in practice) so the O(n)
+                     * scan is still microseconds.                           */
+                    bool matched = false;
+                    {
+                        std::lock_guard<std::mutex> lk(m_pairingMutex);
+                        PairingGcLocked(now);
+                        for (auto& [stored, rec] : m_pairingCodes) {
+                            if (rec.consumed) continue;
+                            if (rec.expires_ms <= now) continue;
+                            if (stored.size() != code.size()) continue;
+                            if (ElleCrypto::ConstantTimeEquals(stored.data(),
+                                                                 code.data(),
+                                                                 stored.size())) {
+                                /* Consume exactly once, even under concurrent
+                                 * redeem attempts.                           */
+                                rec.consumed = true;
+                                matched = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!matched) {
+                        return HTTPResponse::Err(401, "invalid or expired code");
+                    }
                 }
 
                 const auto& http = ElleConfig::Instance().GetHTTP();
@@ -2344,15 +2429,43 @@ private:
                     return HTTPResponse::Err(500, "failed to persist paired device");
                 }
 
-                ELLE_INFO("Device paired: name=\"%s\" id=%s exp=%llu",
-                          device_name.c_str(), device_id.c_str(),
-                          (unsigned long long)exp_ms);
+                /* Game-account mode: link the device row to the user we
+                 * just authenticated, and bump UserContinuity so Elle
+                 * remembers this user across pairings / devices /
+                 * reinstalls. The schema delta in
+                 * SQL/ElleAnn_GameUnification.sql added the nUserNo
+                 * column + the UserContinuity table.                    */
+                if (game_auth_used && bound_user_no > 0) {
+                    auto& pool = ElleSQLPool::Instance();
+                    auto upd = pool.QueryParams(
+                        "UPDATE ElleCore.dbo.PairedDevices "
+                        "   SET nUserNo = ? WHERE device_id = ?;",
+                        { std::to_string(bound_user_no), device_id });
+                    if (!upd.success) {
+                        ELLE_WARN("paired-device nUserNo link failed: %s",
+                                  upd.error.c_str());
+                    }
+                    ElleDB::TouchUserContinuityOnPair(
+                        bound_user_no, bound_user_id_cached,
+                        bound_user_name_cached);
+                }
 
-                return HTTPResponse::OK({
+                ELLE_INFO("Device paired: name=\"%s\" id=%s exp=%llu mode=%s nUserNo=%lld",
+                          device_name.c_str(), device_id.c_str(),
+                          (unsigned long long)exp_ms,
+                          game_auth_used ? "game" : "code",
+                          (long long)bound_user_no);
+
+                json resp = {
                     {"jwt",          jwt},
                     {"expires_ms",   (int64_t)exp_ms},
                     {"paired_at_ms", (int64_t)now}
-                });
+                };
+                if (game_auth_used) {
+                    resp["nUserNo"]   = bound_user_no;
+                    resp["sUserName"] = bound_user_name_cached;
+                }
+                return HTTPResponse::OK(resp);
             }, AUTH_PUBLIC);
 
         /* ==================================================================

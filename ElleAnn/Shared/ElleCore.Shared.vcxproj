@@ -57,6 +57,8 @@
     <ClCompile Include="ElleDB_Queues.cpp" />
     <ClCompile Include="ElleDB_Domain.cpp" />
     <ClCompile Include="ElleDB_Content.cpp" />
+    <ClCompile Include="ElleGameAccountDB.cpp" />
+    <ClCompile Include="ElleUserContinuity.cpp" />
     <ClCompile Include="ElleTypes.cpp" />
   </ItemGroup>
 
@@ -73,6 +75,8 @@
     <ClInclude Include="ElleQueueIPC.h" />
     <ClInclude Include="ElleSelfSurprise.h" />
     <ClInclude Include="ElleSQLConn.h" />
+    <ClInclude Include="ElleGameAccountDB.h" />
+    <ClInclude Include="ElleUserContinuity.h" />
     <ClInclude Include="ElleTypes.h" />
     <ClInclude Include="ElleWait.h" />
     <ClInclude Include="json.hpp" />
