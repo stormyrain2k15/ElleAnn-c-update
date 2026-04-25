@@ -1,7 +1,27 @@
 /*══════════════════════════════════════════════════════════════════════════════
  * FiestaPacket.h — Packet structure and opcode registry.
  *
- *   Wire format (consistent across the login + world stages):
+ *   ────────────────────────────────────────────────────────────────────
+ *   ENGINE IDENTIFICATION (Feb 2026, confirmed via client RE artifacts)
+ *   ────────────────────────────────────────────────────────────────────
+ *   This is **ShineEngine**. Confirmed by the symbol/error strings in
+ *   the user-supplied IDA dumps:
+ *
+ *     ShineObjectClass::ShinePlayer::sp_NC_MAP_LOGIN_REQ
+ *     ShineObjectClass::ShinePlayer::sp_NC_MISC_SEED_REQ
+ *     ShineObjectClass::ShinePlayer::sp_NC_MAP_LOGINCOMPLETE_CMD
+ *     ProtocolPacket::pp_SendPacket / pp_SetPacketLen
+ *     PROTOCOLFUNCTIONTEMPLETE<T>::pft_Store
+ *     CProtocolAnalysis::LogWriteAllNetCommand
+ *
+ *   Network commands are named NC_<SUBSYSTEM>_<NAME>_<TYPE> where
+ *   TYPE ∈ {REQ, ACK, CMD, CMDD}. 518 distinct NC_* identifiers were
+ *   recovered from the client and are catalogued in
+ *   `shine_nc_symbols.txt` next to this file.
+ *
+ *   ────────────────────────────────────────────────────────────────────
+ *   WIRE FORMAT (consistent across login + world stages):
+ *   ────────────────────────────────────────────────────────────────────
  *
  *       [u8 sizeFlag]              0x00..0xFE → length is 1 byte (sizeFlag)
  *                                  0xFF       → length is the next u16 LE
@@ -9,18 +29,23 @@
  *       [u16 LE  opcode]           Opcode dispatched to handlers
  *       [bytes]  payload           Opcode-specific body
  *
- *   This Variable-length-prefix framing is the conceptual layout used
- *   by every FiestaPS-derived server; the bytes are interpreted
- *   identically by login + world. Payload (and opcode) are XOR-stream
- *   encrypted by [FiestaCipher] AFTER the size prefix is read.
+ *   The size-prefix byte stays cleartext; the cipher boundary begins
+ *   AT the opcode byte. Payload (and opcode) are XOR-stream encrypted
+ *   per direction. Cipher key is the 32-byte SEED delivered by the
+ *   server in NC_MISC_SEED_ACK after the client sends NC_MISC_SEED_REQ.
  *
- *   Opcode hex values below are placeholders pulled from the public
- *   private-server documentation and should be confirmed against the
- *   target server build before relying on them — they are stable
- *   across most JFOL/CN revisions but NOT guaranteed.
- *
- *   This file is a clean original write of the framing/opcode shape;
- *   it does not embed third-party server source.
+ *   ────────────────────────────────────────────────────────────────────
+ *   OPCODE HEX VALUES — STATUS
+ *   ────────────────────────────────────────────────────────────────────
+ *   The constants below are the documented JFOL/CN community-mapping
+ *   placeholders we shipped before client RE landed. Now that we have
+ *   the symbol surface, we know the NAMES are correct (NC_MAP_LOGIN_REQ
+ *   etc) but the HEX values still need to be confirmed from one of:
+ *     1. The client PDB (xrefs to pft_Store give (opcode, handler) pairs)
+ *     2. The server's `Protocol/NC.h` (or equivalent) header — this
+ *        file maps every NC_* name to its hex value definitively.
+ *   When either lands, replace the values below in one pass — no other
+ *   file in this folder hardcodes opcode hex values.
  *══════════════════════════════════════════════════════════════════════════════*/
 #pragma once
 #ifndef ELLE_FIESTA_PACKET_H
