@@ -38,6 +38,19 @@
  *     OnTick polls the client state — if we're DISCONNECTED while
  *     auto-login is enabled, reconnect with exponential backoff.
  *══════════════════════════════════════════════════════════════════════════════*/
+/* CRITICAL: winsock2.h MUST be included before windows.h (which
+ * ElleTypes.h pulls in). Without this ordering, MSVC emits
+ * `C4005: macro redefinition` (which the project's /WX flag turns
+ * into a hard error) because <windows.h> transitively includes the
+ * legacy <winsock.h>. WIN32_LEAN_AND_MEAN is set in the same gate
+ * and redundantly in FiestaConnection.h with an #ifndef guard so
+ * a second consumer can't trip the same warning.                    */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include "../../Shared/ElleTypes.h"
 #include "../../Shared/ElleServiceBase.h"
 #include "../../Shared/ElleConfig.h"

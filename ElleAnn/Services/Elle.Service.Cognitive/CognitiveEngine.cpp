@@ -511,12 +511,12 @@ protected:
                             const std::string ctx =
                                 "[fiesta " + channel + " " + speaker +
                                 "] " + text;
-                            std::strncpy(intent.text, ctx.c_str(),
-                                         sizeof(intent.text) - 1);
-                            intent.text[sizeof(intent.text) - 1] = '\0';
-                            intent.intent_type  = INTENT_LEARN;
-                            intent.priority     = 1;  /* low — ambient */
-                            intent.created_ms   = (uint64_t)ELLE_MS_NOW();
+                            strncpy_s(intent.description, ctx.c_str(),
+                                      ELLE_MAX_MSG - 1);
+                            intent.type       = INTENT_LEARN;
+                            intent.urgency    = 0.2f;   /* low — ambient */
+                            intent.confidence = 0.6f;
+                            intent.created_ms = (uint64_t)ELLE_MS_NOW();
                             ElleDB::SubmitIntent(intent);
                         }
                     } else if (kind == "death") {
