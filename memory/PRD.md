@@ -877,3 +877,41 @@ test 7/7.**
   admin can hit it with a browser tab and screenshot/point the phone.
 - Android build + wire-up validation — requires Android Studio + a
   physical or emulated device on the LAN.
+## Session Feb-2026 (continued) — v1.7 audit fixes + Gradle wrapper
+
+### P1 audit items resolved
+- **ApiExplorer blocking I/O**: `DevScreens.kt::ApiExplorerScreen` now
+  wraps the OkHttp `execute()` in `withContext(Dispatchers.IO)` so the
+  Compose Main dispatcher is no longer blocked while a request flies.
+  The string body is read inside the IO scope; only the resulting
+  `String` crosses back to Main.
+- **PairedDevices admin route**: both call sites in DevScreens
+  (`getPairedDevices()` initial load + post-revoke refresh) now use
+  `container.api(admin = true).getPairedDevices()` so the admin key
+  header reaches the gate. Previously they used `container.extendedApi`
+  which had no admin header → 403 risk.
+- **WebSocket connect hardening**: added `@Volatile isConnecting` flag,
+  guard now blocks duplicate `connect()` calls during a pending
+  handshake. `onFailure` and `onClosed` clear the dead `webSocket`
+  reference and reset `isConnecting=false`. `disconnect()` zeroes
+  the connecting flag too.
+- **ConnectionNotReadyScreen**: new
+  `ui/common/ConnectionNotReadyScreen.kt` replaces the silent
+  `return@composable` blanks in `ElleNavHost.kt` for the three routes
+  that depend on the WebSocket (Elle home, Observatory, X-Chronicle).
+  Shows a spinner + "live connection not ready" message + Retry button
+  wired to `containerExtended.reconnectWebSocketIfNeeded()`.
+
+### Gradle wrapper
+- Added `Android/gradlew` (sh), `Android/gradlew.bat`,
+  `Android/gradle/wrapper/gradle-wrapper.jar`, and
+  `Android/gradle/wrapper/gradle-wrapper.properties` (Gradle 8.7).
+  The project now builds reproducibly on a fresh clone with
+  `./gradlew assembleDebug` — no system Gradle install required.
+- Added `Android/gradle.properties` (AndroidX, parallel build, caching).
+
+### Apache port
+- Confirmed `AppContainerExtended.apachePort = 8080`. The companion
+  app talks to the Apache reverse-proxy stripe at
+  `http://<host>:8080/` for the 10 Apache-only endpoints, and to the
+  Elle.Service.HTTP REST surface at the user-supplied paired port.

@@ -1,15 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    network_security_config — allow cleartext HTTP to user-specified
-    private IPs. The companion app talks to a desktop server on the
-    user's LAN; there is no cloud endpoint, no TLS termination, and
-    the pairing handshake provides the trust fabric.
+    Network security config for ElleAnn.
+
+    IMPORTANT — why cleartext is permitted globally here:
+
+    Android's <domain-config> is HOSTNAME-ORIENTED. It matches specific hostnames
+    or subdomains — it is NOT CIDR-range-aware. "192.168.0.0" as a domain entry
+    only matches the literal string "192.168.0.0", not any subnet range.
+    The previous version of this file was conceptually correct in intent but
+    technically wrong in implementation. This version is honest.
+
+    Because the ElleAnn server IP is user-defined at pair time and is always on a
+    private LAN (never reachable from the internet), we permit cleartext globally.
+    This is the standard approach for closed LAN companion apps where:
+      1. The server is always on a local network under user control
+      2. The app makes zero external internet requests
+      3. TLS on a LAN IP without a CA cert creates worse UX than cleartext
+
+    If TLS is added to the Elle server in a future build, remove this base-config
+    and add a <domain-config> pointing to the paired IP with certificate pinning.
+
+    Apache (port 8080, Named Pipes SQL) and REST (port 8000) are both covered.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
 </network-security-config>

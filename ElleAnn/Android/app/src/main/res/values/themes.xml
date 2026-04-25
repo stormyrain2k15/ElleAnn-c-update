@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base theme. Actual colours come from Compose MaterialTheme at
-         runtime; this XML is only needed because the Android framework
-         requires an Activity theme before Compose takes over. -->
-    <style name="Theme.ElleAnn" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="android:statusBarColor" tools:targetApi="l">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+<resources>
+    <!-- Base Material3 application theme — Compose handles all visual styling.
+         This theme only exists to satisfy the Activity window background and
+         status bar colour prior to Compose rendering. -->
+    <style name="Theme.ElleAnn" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/elle_night</item>
+        <item name="android:statusBarColor">@color/elle_night</item>
+        <item name="android:navigationBarColor">@color/elle_night</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

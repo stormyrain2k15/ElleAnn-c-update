@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Isya Night background — matches IsyaNight in Kotlin -->
+    <color name="elle_night">#0A1628</color>
+    <!-- Isya Gold accent -->
+    <color name="elle_gold">#D4A843</color>
+    <!-- Isya Magic teal -->
+    <color name="elle_magic">#2ECBD4</color>
+</resources>

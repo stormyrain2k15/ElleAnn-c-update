@@ -1,14 +1,12 @@
-/*══════════════════════════════════════════════════════════════════════════════
- * settings.gradle.kts — ElleAnn Android companion
- *
- *   Gradle settings for the Android companion app. Uses the Gradle
- *   version catalog (libs.versions.toml) for centralised dependency
- *   version management — keeps Compose BOM, Kotlin, and Android Gradle
- *   Plugin versions in one place for easy bump.
- *══════════════════════════════════════════════════════════════════════════════*/
 pluginManagement {
     repositories {
-        google()
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
         mavenCentral()
         gradlePluginPortal()
     }

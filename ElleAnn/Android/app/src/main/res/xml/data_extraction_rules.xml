@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Data extraction rules — excludes encrypted prefs from cloud backup/data extraction.
+    The JWT, admin key, and Dev PIN hash must NEVER leave the device.
+-->
 <data-extraction-rules>
     <cloud-backup>
-        <exclude domain="sharedpref" path="elle_auth.xml"/>
+        <!-- Never back up the encrypted preferences — contains JWT + admin key + dev PIN -->
+        <exclude domain="sharedpref" path="elle_secure_prefs.xml" />
     </cloud-backup>
     <device-transfer>
-        <exclude domain="sharedpref" path="elle_auth.xml"/>
+        <exclude domain="sharedpref" path="elle_secure_prefs.xml" />
     </device-transfer>
 </data-extraction-rules>

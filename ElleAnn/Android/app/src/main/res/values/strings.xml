@@ -1,4 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Elle-Ann</string>
+    <string name="app_name">ElleAnn</string>
+    <string name="pair_title">Connect to Elle</string>
+    <string name="nav_elle">Elle</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_memory">Memory</string>
+    <string name="nav_world">World</string>
+    <string name="nav_dev">Dev</string>
+    <string name="settings">Settings</string>
+    <string name="loading">Loading…</string>
+    <string name="retry">Retry</string>
+    <string name="error_not_paired">Not connected to Elle</string>
+    <string name="error_network">Network error — check connection</string>
+    <string name="colorcode_mode_off">ColorCode: Off</string>
+    <string name="colorcode_mode_grammar">ColorCode: Grammar</string>
+    <string name="colorcode_mode_semantic">ColorCode: Semantic</string>
+    <string name="colorcode_mode_cycling">ColorCode: Cycling</string>
+    <string name="tts_speak">Speak text</string>
+    <string name="tts_stop">Stop speaking</string>
+    <string name="video_call_start">Start video call</string>
+    <string name="video_call_end">End call</string>
+    <string name="memory_space">Memory Space</string>
+    <string name="memory_3d">3D Memory Space</string>
+    <string name="dev_access">Dev Access</string>
+    <string name="dev_pin_prompt">Enter Dev PIN</string>
+    <string name="admin_key_label">x-admin-key</string>
+    <string name="pair_scan_hint">Scan ellepair:// QR code or enter server details manually</string>
 </resources>
