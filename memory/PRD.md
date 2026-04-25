@@ -1098,3 +1098,29 @@ exact Fiesta sprites verbatim.
 ### Validation
 - Brace/paren balance: 0 imbalanced.
 - Repacked: `/tmp/ElleAnn_Android_v2.1.zip` (728 KB).
+
+## Session Feb-2026 (continued) — v2.2: procedural Fiesta sprites + slicer kept generic
+
+### Changes
+- Removed bundled `elle_textures_atlas{,_med,_small,_xs}.png` drawables.
+- `IsyaSpriteCatalog.kt` reduced to a single generic `SpriteRegion`
+  data class — no bundled drawables, no atlas enum.
+- `IsyaSprite.kt` keeps the slicer composable; the convenience
+  overload now takes `SpriteRegion(@DrawableRes drawableId, x, y, w, h)`
+  so callers can point it at any drawable they own.
+- New `IsyaProceduralSprites.kt`:
+  - `IsyaPortraitFrame` — silver-bevelled rect with optional corner
+    notches and inner blue glow for HP/MP avatars.
+  - `IsyaRoundSlot` — silver ring + inner radial glow for inventory
+    or skill slots; takes a content slot for the icon.
+  - `IsyaArcaneOrnament` — concentric gold rings + 8 spokes + glowing
+    core, scales to any size.
+  - `IsyaStatusBlocks` — compact red/blue HP/MP block grid driven
+    by a `List<StatusRow>`.
+
+### Validation
+- Brace/paren balance: 0 imbalanced.
+
+### Delivery
+- Repo: `/app/ElleAnn/Android/`
+- Zip: `/tmp/ElleAnn_Android_v2.2.zip` (396 KB)
