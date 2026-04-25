@@ -1,102 +1,123 @@
 # Elle.Service.Fiesta — ShineEngine Intel & TODO
 
-## Engine identification (confirmed Feb 2026)
+## Engine identification (Feb 2026, multi-source confirmed)
 
-The target server is a **ShineEngine** build (the engine under Fiesta
-Online / Isya / JFOL / CN-Fiesta). Confirmation vectors from the
-user-supplied client RE artifacts (`/app/.fiesta_re/*.txt`):
+The target server is a **ShineEngine** build (Fiesta Online / Isya / JFOL / CN-Fiesta).
+Confirmation comes from three independent artifacts:
 
-- Class names in error strings: `ShineObjectClass::ShinePlayer`,
-  `ProtocolPacket::pp_SendPacket`, `PROTOCOLFUNCTIONTEMPLETE<T>::pft_Store`,
-  `CProtocolAnalysis::LogWriteAllNetCommand`.
-- Network commands follow the canonical `NC_<SUBSYSTEM>_<NAME>_<TYPE>`
-  convention where `TYPE ∈ {REQ, ACK, CMD, CMDD}`.
-- 518 unique `NC_*` identifiers leaked through error format strings —
-  full list in `shine_nc_symbols.txt`.
+1. **Client RE dumps** (`/app/.fiesta_re/{Functions,Imports,Strings,Names,commands}.txt`)
+   leak class names: `ShineObjectClass::ShinePlayer`, `ProtocolPacket::pp_SendPacket`,
+   `PROTOCOLFUNCTIONTEMPLETE<T>::pft_Store`, `CProtocolAnalysis`.
+2. **Server PDB** (`/app/.fiesta_re/server/5ZoneServer2.pdb`, MSF7, MSVC ~2008)
+   leaks **2 126 unique `NC_*` handler symbols** including the demangled MSVC
+   forms `?sp_NC_MISC_SEED_REQ@ShinePlayer@ShineObjectClass@@QAEXPATNETCOMMAND@@HG@Z`.
+3. **WorldManager IDA-export** (`4WorldManagerServer2.h`) supplies CRT / Win32
+   typedefs (PROTOCOL types not in the export).
 
-## Cipher / handshake (partial confirmation)
+## Wire-format facts now considered ground truth
 
-- Symbols `sp_NC_MISC_SEED_REQ` and `sp_NC_MISC_SEED_REQ : No PacketEncrypt`
-  confirm the engine uses a **SEED-based** XOR stream cipher: the client
-  sends `NC_MISC_SEED_REQ`, server replies with the 32-byte seed, both
-  sides flip the cipher on for all subsequent traffic.
-- The size-prefix byte stays cleartext (else the receiver couldn't read
-  it before knowing the key).
-- The exact stream model (per-packet reset vs running offset across
-  packets) is **NOT** yet confirmed — `FiestaCipher.h` currently uses
-  the running-offset model. If the PDB or a packet capture proves
-  per-packet reset, flip `m_inIdx`/`m_outIdx` to reset on each call to
-  `DecryptIn`/`EncryptOut` (one-line change).
+| Fact | Source |
+|---|---|
+| Engine = ShineEngine | client + server symbol prefix `Shine*` |
+| Opcode is `unsigned short` (u16, LE) | `pft_Store` signature `(NETCOMMAND*, int, unsigned short opcode)` |
+| Packet C-type is `NETCOMMAND` | every handler param `PATNETCOMMAND@@` (PDB) |
+| 3-tier length prefix (PACKET_SIZE / SIZE1 / SIZE2) | server PDB has `CSendPacket::PACKET_SIZE`, `PACKET_SIZE1`, `PACKET_SIZE2` |
+| Cipher = `class PacketEncrypt` (not raw XOR primitive) | server PDB: `so_PacketEncryptClass`, `so_PacketEncrypt`, `so_EncSeedSet` |
+| Seed delivered server→client | `Send_NC_MISC_SEED_ACK@ClientSession` |
+| Naming = `NC_<SUBSYSTEM>_<NAME>_<REQ\|ACK\|CMD\|CMDD>` | every leaked symbol |
+| Network stack = raw WS2_32 | client imports list: `socket/connect/recv/send`, no TLS |
 
-## Subsystem coverage of leaked NC_* symbols
+## Client-facing opcode surface (filtered)
+
+Out of 2 126 server-side `NC_*` symbols, **235** are registered against
+`ShinePlayer` — i.e. the player-protocol session — which is exactly the surface
+our headless client must speak. Distribution:
+
+| Count | Subsystem | Notes |
+|------:|-----------|-------|
+| 37 | NC_ACT      | movement (walk/run/jump), chat, NPC click, gather, emoticon |
+| 33 | NC_ITEM     | inventory (pickup/drop/use), account storage |
+| 23 | NC_MINIHOUSE| player housing |
+| 18 | NC_GAMBLE   | slot machine / RNG |
+| 15 | NC_GUILD    | guild ops |
+| 14 | NC_BAT      | combat (attack, damage, hp/mp) |
+| 13 | NC_CHAR     | char data, level, free-stat |
+| 10 | NC_TRADE    | player trade |
+| 10 | NC_MAP      | login, zone change |
+|  9 | NC_DICE     | dice minigame |
+|  8 | NC_AUCTION  | auction house |
+|  7 | NC_QUEST    | quest tracking |
+|  7 | NC_MISC     | SEED handshake, ping, server params |
+|  6 | NC_BOOTH    | personal-shop booth |
+|  4 | NC_SOULSTONE| soulstone |
+|  4 | NC_SKILL    | skill cast / cooldown |
+|  3 | NC_USER     | account-level |
+|  +14 small | scenario / holy / WT / party / menu / log / KQ / itemdb / instance / CT / charsave / briefinfo |
+
+By type: **181 REQs** (client→server), **41 CMDs** (server pushes), **13 ACKs** (server replies).
+
+The complete lists are saved next to this file:
+
+| File                                  | What it contains                                  |
+|---------------------------------------|---------------------------------------------------|
+| `shine_nc_symbols.txt`                | 518 `NC_*` from client RE                         |
+| `shine_nc_symbols_server.txt`         | 2 126 `NC_*` from server PDB                      |
+| `shine_nc_symbols_client_facing.txt`  | 507 intersection (both sides reference)           |
+| `shine_nc_symbols_shineplayer.txt`    | 235 player-session opcodes (definitive client surface) |
+
+## Cipher / handshake — provisional state machine
 
 ```
-  82  NC_ITEMDB     — item database / catalog operations
-  55  NC_CHAR       — character data, stats, level, wedding, PK toggle
-  39  NC_GUILD      — guild membership, ranks, wars
-  37  NC_ACT        — actions / animations
-  31  NC_ITEM       — inventory pickup/drop/use, account storage
-  29  NC_GAMBLE     — slot machine / dice / RNG events
-  24  NC_QUEST      — quest tracking / rewards
-  22  NC_MINIHOUSE  — player housing
-  17  NC_AUCTION    — auction house
-  16  NC_MISC       — SEED handshake, ping, server params, hide/show
-  15  NC_BAT        — combat (Battle): attacks, damage, hp/mp
-  14  NC_DICE       — dice rolling minigame
-  13  NC_CHARSAVE   — character save persistence
-  12  NC_MAP        — login/logout, zone transfer
-  11  NC_SKILL      — skill cast, cooldown
-  11  NC_RAID       — raid/dungeon
-  11  NC_PARTY      — party invite/leave/info
-  10  NC_TRADE      — player-to-player trading
-   8  NC_USER       — account-level commands
-   8  NC_KQ         — Kingdom Quest
-   7  NC_MID        — middleware
-   7  NC_CT         — CharTitle?
-   6  NC_BOOTH      — personal shop / merchant booth
-   5  NC_WT         — world tournament?
-   5  NC_HOLY       — holy event
+ client                                              server
+   |                                                   |
+   |---- TCP connect ------------------------------>   |
+   |                                                   | (cleartext)
+   |   <-------- NC_MISC_SEED_ACK { 32-byte seed } ----|  PacketEncrypt enabled
+   |   PacketEncrypt enabled (both directions)         |
+   |---- NC_MAP_LOGIN_REQ {user, pass} ------------>   |
+   |   <------------ NC_MAP_LOGIN_ACK -----------------|
+   |---- NC_CHAR_LOGIN_REQ -------------------------->   ...
 ```
 
-## What we still need to ship a real, online client
+**Open question**: cipher stream model. `class PacketEncrypt` could either
+(a) reset its state per packet, or (b) maintain running offsets across the
+session. Our current `FiestaCipher.h` assumes (b). Confirming this requires
+either disassembling `5ZoneServer2.exe` (the .text of `PacketEncrypt::Encrypt`
+will show the increment logic) OR a Wireshark capture of two adjacent same-opcode
+packets — if the bytes differ, model is (b); if identical, model is (a).
 
-### CRITICAL — to populate hex opcode values
-Either of:
-1. **Client `*.pdb`** — xrefs to `pft_Store(opcode, handler)` give the
-   complete `(NC_name → hex)` map.
-2. **Server `Protocol/NC.h`** (or equivalent) — the source of truth
-   defining every `NC_*` constant by hex value. Server is in your
-   possession; this file is typically under
-   `Source\Server\Protocol\` or `\Common\NC.h`.
+## What's still needed to ship hex opcode values
 
-Either source unblocks: combat, inventory, party, guild, trade, quest,
-auction — i.e., real gameplay.
+The **hex opcode values** are stored as immediate operands in `pft_Store` calls
+inside the .text section of the server EXE. PDBs hold names + RVAs but *not*
+the inline immediates the compiler embedded in the call sites.
 
-### NICE TO HAVE
-- A 2–3 packet capture from your live login flow (Wireshark, dump
-  raw bytes). Confirms cipher stream model (per-packet vs running)
-  and validates our framing in vivo.
-- Server-side login schema (account table) to confirm if password is
-  hashed before sending or done server-side post-receive.
+| Need                       | Why                                                          | Outcome                          |
+|----------------------------|--------------------------------------------------------------|----------------------------------|
+| `5ZoneServer2.exe` (the matching EXE for the PDB above) | Disassemble the `pft_Store(opcode, &handler)` call sites — every immediate `push 0xNNNN` paired with the next-line handler push gives one (NC_name, hex) pair. | All 235 client-facing opcode hex values recoverable in one pass |
+| `5ZoneServer2.exe` is enough alone | The EXE has the full opcode table baked in; PDB is the lookup that turns RVA → name | — |
+| (alternative) Wireshark login capture | A 30-second pcap of "connect → login → enter world" gives us 5–10 high-confidence opcode bytes to bootstrap a partial map | Validates framing + cipher model in vivo |
+
+`5ZoneServer2.pdb` alone is **not** sufficient to get hex values — but combined
+with the EXE it's the complete picture.
 
 ## Files in this folder
 
 | File                              | Purpose                                        |
 |-----------------------------------|------------------------------------------------|
 | `FiestaCipher.h`                  | XOR stream cipher (per-direction indices)      |
-| `FiestaPacket.h`                  | Wire framing + opcode constants                |
+| `FiestaPacket.h`                  | Wire framing + opcode constants (placeholders) |
 | `FiestaConnection.h`              | TCP socket + recv-thread framer                |
 | `FiestaClient.h/.cpp`             | Stateful headless client                       |
 | `FiestaService.cpp`               | SCM service entry, IPC bridge                  |
 | `Elle.Service.Fiesta.vcxproj`     | MSBuild project                                |
-| `shine_nc_symbols.txt`            | 518 leaked `NC_*` identifiers (RE artifact)    |
+| `shine_nc_symbols*.txt`           | RE artifacts (catalogued above)                |
 | `README.md`                       | This file                                      |
 
 ## How Cognitive uses this
 
-`SVC_FIESTA` is a sensor + actuator pair on Elle's IPC fabric. She
-sees: chat, hp/mp deltas, entity spawns, login state. She emits:
-move/attack/chat/pickup/use_item commands. The packet stream that
-`FiestaPacket.h` doesn't decode yet shows up as `{"kind":"raw",...}`
-events — Cognitive's pattern engine can learn from those and you can
-upgrade the decoder one opcode at a time.
+`SVC_FIESTA` is a sensor + actuator pair on Elle's IPC fabric. She sees: chat,
+hp/mp deltas, entity spawns, login state. She emits: move/attack/chat/pickup
+/use_item commands. Anything we don't have a high-level decoder for yet shows
+up as a `{"kind":"raw",...}` event — Cognitive's pattern engine can learn from
+those, and you can upgrade the decoder one opcode at a time as captures arrive.
