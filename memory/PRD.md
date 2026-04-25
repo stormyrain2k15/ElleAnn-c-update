@@ -1036,3 +1036,48 @@ existing `IsyaButton` API; no other call sites need to change.
 ### Validation
 - Brace/paren balance checker: 0 imbalanced across all Kotlin files.
 - Repacked: `/tmp/ElleAnn_Android_v1.9.zip` (387 KB).
+
+## Session Feb-2026 (continued) — v2.0: Fiesta two-tone striped blue panel + corner ornaments + texture atlases
+
+### Fiesta two-tone striped blue panel background
+New `IsyaFiestaPanelBackground` composable, calibrated against the
+user-supplied inventory reference screenshot (analysed to within ±5
+RGB units):
+- Base fill `#0D1B44` (deep midnight blue floor)
+- Streak crest `#3C5FA8`, trough `#040C28`
+- ~18% panel-width period, ~12° tilt from vertical
+- Deterministic film-grain speckle pass (~3% alpha) for static noise
+
+`IsyaPanel` now defaults to this background (`fiestaBackground = true`)
+and falls back to the legacy `IsyaDusk` solid fill on opt-out for
+specialty panels that need a clean canvas.
+
+### Corner ornaments (your requested improvement)
+New `IsyaCornerOrnaments` overlay paints small silver-gradient
+triangular notches at all four panel corners. Opt in via
+`IsyaPanel(decoratedCorners = true)` — off by default to avoid
+cluttering dense screens.
+
+### Texture atlases bundled
+The 4 user-supplied TGA atlases (decoded → PNG) shipped as drawables
+for any code path that wants to sample real Fiesta sprites:
+- `R.drawable.elle_textures_atlas`        (512×512, large frame set)
+- `R.drawable.elle_textures_atlas_med`    (256×256, medium icons + bars)
+- `R.drawable.elle_textures_atlas_small`  (128×128, button frames)
+- `R.drawable.elle_textures_atlas_xs`     (32×32,  tiny status dots)
+
+Today's panel rendering is fully procedural (Compose Canvas) — these
+atlases are available for any future screen that wants to layer in the
+exact Fiesta sprites verbatim.
+
+### Validation
+- Brace/paren balance: 0 imbalanced across all Kotlin files.
+- Repacked: `/tmp/ElleAnn_Android_v2.0.zip` (725 KB; +340 KB vs v1.9
+  is the texture atlases).
+
+### Knobs introduced on `IsyaPanel`
+| Param              | Default | What it does                              |
+|--------------------|---------|-------------------------------------------|
+| flowingBorder      | false   | Animate the border with the hue cycle     |
+| decoratedCorners   | false   | Paint silver corner notches               |
+| fiestaBackground   | true    | Use the striped blue background           |

@@ -35,6 +35,15 @@ fun IsyaPanel(
      * reference). Set true to opt into the animated Silver→Gold→Teal
      * cycling border for active/highlighted panels. */
     flowingBorder: Boolean = false,
+    /* Set true to overlay small silver triangular corner notches —
+     * the Fiesta-style ornamental detail. Off by default to keep
+     * dense screens uncluttered.                                    */
+    decoratedCorners: Boolean = false,
+    /* Set false to keep the legacy solid-IsyaDusk background instead
+     * of the new Fiesta two-tone striped blue. Off-by-default would
+     * mean every existing panel suddenly changes; we default-true
+     * because the user shipped the Fiesta look as the new baseline. */
+    fiestaBackground: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     IsyaAnimatedBorderBox(
@@ -44,51 +53,68 @@ fun IsyaPanel(
         glowWidth    = 6.dp,
         animated     = flowingBorder,
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(IsyaDusk, RoundedCornerShape(12.dp)),
-        ) {
-            // Header strip
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(
-                        IsyaHeader,
-                        RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp),
-                    )
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (headerIcon != null) {
-                    Icon(headerIcon, null, tint = IsyaMagic, modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(
-                    text       = title,
-                    style      = MaterialTheme.typography.titleSmall,
-                    color      = IsyaCream,
-                    fontWeight = FontWeight.Medium,
-                    modifier   = Modifier.weight(1f),
+        Box(modifier = Modifier.fillMaxWidth()) {
+            // Background layer — Fiesta two-tone striped blue, or the
+            // legacy IsyaDusk solid fill if the caller opts out.
+            if (fiestaBackground) {
+                IsyaFiestaPanelBackground(cornerRadius = 12.dp)
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(IsyaDusk, RoundedCornerShape(12.dp))
                 )
-                if (onClose != null) {
-                    IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
-                        Icon(
-                            imageVector        = androidx.compose.material.icons.Icons.Rounded.Close,
-                            contentDescription = "Close",
-                            tint               = IsyaMuted,
-                            modifier           = Modifier.size(16.dp),
+            }
+
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // Header strip
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            IsyaHeader.copy(alpha = 0.85f),
+                            RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp),
                         )
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (headerIcon != null) {
+                        Icon(headerIcon, null, tint = IsyaMagic, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(
+                        text       = title,
+                        style      = MaterialTheme.typography.titleSmall,
+                        color      = IsyaCream,
+                        fontWeight = FontWeight.Medium,
+                        modifier   = Modifier.weight(1f),
+                    )
+                    if (onClose != null) {
+                        IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
+                            Icon(
+                                imageVector        = androidx.compose.material.icons.Icons.Rounded.Close,
+                                contentDescription = "Close",
+                                tint               = IsyaMuted,
+                                modifier           = Modifier.size(16.dp),
+                            )
+                        }
                     }
                 }
+                // Teal accent underline on header
+                Box(modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(IsyaMagic.copy(alpha = 0.3f)))
+                // Content
+                Column(modifier = Modifier.padding(16.dp), content = content)
             }
-            // Teal accent underline on header
-            Box(modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(IsyaMagic.copy(alpha = 0.3f)))
-            // Content
-            Column(modifier = Modifier.padding(16.dp), content = content)
+
+            // Optional ornamental corner notches — sit ON TOP of the
+            // bevel so they read as part of the frame rather than the
+            // content surface.
+            if (decoratedCorners) {
+                IsyaCornerOrnaments(notchSize = 8.dp)
+            }
         }
     }
 }
