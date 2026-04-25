@@ -313,9 +313,12 @@ private:
                     ElleDB::MarkGameSessionDisconnected(
                         m_nUserNo, j.value("reason", std::string("unknown")));
                 }
-            } catch (...) {
-                /* Best-effort; never crash the IPC broadcast on a
-                 * malformed event. */
+            } catch (const std::exception& e) {
+                /* Best-effort persistence; never crash the IPC
+                 * broadcast on a malformed event. JSON parse errors
+                 * are the only realistic source here.                */
+                ELLE_DEBUG("FiestaService: GameSession persist skipped: %s",
+                           e.what());
             }
         }
     }

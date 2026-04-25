@@ -34,11 +34,18 @@ static std::string JsonEsc(const std::string& s) {
             case '\r': out += "\\r";  break;
             case '\t': out += "\\t";  break;
             default:
-                if ((unsigned char)c < 0x20)
-                    out += "\\u00" + std::string(((unsigned char)c < 0x10) ? "0" : "") +
-                           std::string(1, "0123456789abcdef"[(unsigned char)c]);
-                else
+                if ((unsigned char)c < 0x20) {
+                    /* Two-digit hex escape \u00HL where H = high nibble,
+                     * L = low nibble. The hex lookup uses 4-bit masked
+                     * indices so we never read past the 16-char table.   */
+                    static const char hexdig[] = "0123456789abcdef";
+                    const unsigned u = (unsigned char)c;
+                    out += "\\u00";
+                    out += hexdig[(u >> 4) & 0xF];
+                    out += hexdig[u & 0xF];
+                } else {
                     out += c;
+                }
         }
     }
     return out;
@@ -73,7 +80,7 @@ bool Client::Connect(const std::string& loginHost, uint16_t loginPort,
         HandlePacket(pkt);
     });
     m_conn.SetOnDisconnect([this](const std::string& why) {
-        EmitEvent(std::string(R"({"kind":"disconnected","reason":")") +
+        EmitEvent(std::string("{\"kind\":\"disconnected\",\"reason\":\"") +
                   JsonEsc(why) + "\"}");
         SetState(State::DISCONNECTED);
         StopHeartbeat();
@@ -108,7 +115,7 @@ void Client::SetState(State s) {
     }
     if (previous != s) {
         std::ostringstream o;
-        o << R"({"kind":"login_state","state":")"
+        o << "{\"kind\":\"login_state\",\"state\":\""
           << StateName(s) << "\"}";
         EmitEvent(o.str());
     }
@@ -175,7 +182,7 @@ bool Client::SelectWorld(uint32_t /*worldId*/) {
     /* No-op on ShineEngine — world selection happens before TCP
      * connect (you connect to a specific zone server). Surface a
      * benign event so Cognitive knows the call was acknowledged.   */
-    EmitEvent(R"({"kind":"select_world_skipped","reason":"shineengine single-zone"})");
+    EmitEvent("{\"kind\":\"select_world_skipped\",\"reason\":\"shineengine single-zone\"}");
     return true;
 }
 
@@ -273,7 +280,7 @@ void Client::HandlePacket(const InPacket& pkt) {
                 m_conn.MutableCipher().SetEnabled(true);
             }
             std::ostringstream o;
-            o << R"({"kind":"seed_received","len":)" << keyLen << "}";
+            o << "{\"kind\":\"seed_received\",\"len\":" << keyLen << "}";
             EmitEvent(o.str());
 
             /* Auto-progress: send the login request now that we can
@@ -293,7 +300,7 @@ void Client::HandlePacket(const InPacket& pkt) {
             /* Server may echo this back with a result code on some
              * builds — surface as login_state for Cognitive.         */
             std::ostringstream o;
-            o << R"({"kind":"login_state","state":"acknowledged"})";
+            o << "{\"kind\":\"login_state\",\"state\":\"acknowledged\"}";
             EmitEvent(o.str());
             break;
         }
@@ -303,7 +310,7 @@ void Client::HandlePacket(const InPacket& pkt) {
              * sequence. Forward as raw — Cognitive learns the layout
              * from repeated captures. */
             std::ostringstream o;
-            o << R"({"kind":"brief_info","payload_hex":")"
+            o << "{\"kind\":\"brief_info\",\"payload_hex\":\""
               << ToHex(pkt.payload) << "\"}";
             EmitEvent(o.str());
             break;
@@ -317,9 +324,9 @@ void Client::HandlePacket(const InPacket& pkt) {
             std::string speaker, text;
             r.Str(speaker); r.Str(text);
             std::ostringstream o;
-            o << R"({"kind":"chat","channel":")" << channel
-              << R"(","speaker":")" << JsonEsc(speaker)
-              << R"(","text":")" << JsonEsc(text) << "\"}";
+            o << "{\"kind\":\"chat\",\"channel\":\"" << channel
+              << "\",\"speaker\":\"" << JsonEsc(speaker)
+              << "\",\"text\":\"" << JsonEsc(text) << "\"}";
             EmitEvent(o.str());
             break;
         }
@@ -328,10 +335,10 @@ void Client::HandlePacket(const InPacket& pkt) {
             /* Anything we don't have a high-level decoder for goes
              * out as a raw event. Cognitive can pattern-match.       */
             std::ostringstream o;
-            o << R"({"kind":"raw","direction":"in","opcode":")"
+            o << "{\"kind\":\"raw\",\"direction\":\"in\",\"opcode\":\""
               << "0x" << std::hex << pkt.opcode << std::dec
-              << R"(","len":)" << pkt.payload.size()
-              << R"(,"hex":")" << ToHex(pkt.payload) << "\"}";
+              << "\",\"len\":" << pkt.payload.size()
+              << ",\"hex\":\"" << ToHex(pkt.payload) << "\"}";
             EmitEvent(o.str());
             break;
         }
