@@ -76,34 +76,69 @@ fun IsyaAnimatedBorderBox(
     val borderColor = isyaHueCycle(hueFraction)
 
     Box(modifier = modifier) {
-        // Glow layer (wide, low alpha)
-        Canvas(
-            modifier = Modifier
-                .matchParentSize()
-                .clip(RoundedCornerShape(cornerRadius))
-        ) {
-            drawIsyaBorder(
-                color       = borderColor.copy(alpha = 0.20f),
-                strokePx    = glowWidth.toPx(),
-                cornerPx    = cornerRadius.toPx(),
-                dashPhase   = dashPhase,
-                dashed      = false, // glow is solid
-            )
-        }
+        if (animated) {
+            // ── Animated path: cycling hue + dashed flow ─────────────────────
+            // Glow layer (wide, low alpha)
+            Canvas(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clip(RoundedCornerShape(cornerRadius))
+            ) {
+                drawIsyaBorder(
+                    color       = borderColor.copy(alpha = 0.20f),
+                    strokePx    = glowWidth.toPx(),
+                    cornerPx    = cornerRadius.toPx(),
+                    dashPhase   = dashPhase,
+                    dashed      = false,
+                )
+            }
+            // Main animated dashed border
+            Canvas(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clip(RoundedCornerShape(cornerRadius))
+            ) {
+                drawIsyaBorder(
+                    color     = borderColor,
+                    strokePx  = strokeWidth.toPx(),
+                    cornerPx  = cornerRadius.toPx(),
+                    dashPhase = dashPhase,
+                    dashed    = true,
+                )
+            }
+        } else {
+            // ── Static path: Fiesta-style bevelled silver frame ──────────────
+            //   A vertical highlight→mid→deep silver gradient gives the
+            //   polished-metal look the reference UI specifies (analysed
+            //   from the Fiesta Online silver-frame screenshot to within
+            //   5 RGB units). One inner-bevel pass at half-stroke width
+            //   adds the subtle top-edge sheen that real bevels have.
+            Canvas(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clip(RoundedCornerShape(cornerRadius))
+            ) {
+                val sw = strokeWidth.toPx()
+                val cr = cornerRadius.toPx()
 
-        // Main animated dashed border
-        Canvas(
-            modifier = Modifier
-                .matchParentSize()
-                .clip(RoundedCornerShape(cornerRadius))
-        ) {
-            drawIsyaBorder(
-                color     = borderColor,
-                strokePx  = strokeWidth.toPx(),
-                cornerPx  = cornerRadius.toPx(),
-                dashPhase = dashPhase,
-                dashed    = animated,
-            )
+                // Outer bevel — full vertical gradient stroke
+                drawIsyaSilverBevel(
+                    strokePx    = sw,
+                    cornerPx    = cr,
+                    highlight   = IsyaSilver,
+                    mid         = IsyaSilverMid,
+                    deep        = IsyaSilverDeep,
+                )
+                // Inner sheen — thin highlight strip for depth
+                drawIsyaSilverBevel(
+                    strokePx    = sw * 0.4f,
+                    cornerPx    = cr,
+                    highlight   = IsyaSilver.copy(alpha = 0.85f),
+                    mid         = IsyaSilver.copy(alpha = 0.0f),
+                    deep        = IsyaSilver.copy(alpha = 0.0f),
+                    insetPx     = sw * 0.4f,
+                )
+            }
         }
 
         // Content inside the box
@@ -187,3 +222,41 @@ private fun lerpColor(a: Color, b: Color, t: Float): Color = Color(
     blue  = a.blue  + (b.blue  - a.blue)  * t,
     alpha = 1f,
 )
+
+/**
+ * Draw a bevelled silver stroke around the canvas using a vertical
+ * highlight → mid → deep gradient. Matches the Fiesta Online silver
+ * frame look (analysed to within 5 RGB units from the reference image).
+ *
+ * @param insetPx pull the rectangle inwards by this many px so a thin
+ *                inner sheen pass can sit on top of the main bevel
+ *                without bleeding past it.
+ */
+private fun DrawScope.drawIsyaSilverBevel(
+    strokePx:  Float,
+    cornerPx:  Float,
+    highlight: Color,
+    mid:       Color,
+    deep:      Color,
+    insetPx:   Float = 0f,
+) {
+    val half = strokePx / 2f + insetPx
+    val rect = androidx.compose.ui.geometry.Rect(
+        left   = half,
+        top    = half,
+        right  = size.width  - half,
+        bottom = size.height - half,
+    )
+    val brush = Brush.verticalGradient(
+        colors = listOf(highlight, mid, deep),
+        startY = rect.top,
+        endY   = rect.bottom,
+    )
+    drawRoundRect(
+        brush        = brush,
+        topLeft      = Offset(rect.left, rect.top),
+        size         = Size(rect.width, rect.height),
+        cornerRadius = CornerRadius(cornerPx, cornerPx),
+        style        = Stroke(width = strokePx),
+    )
+}

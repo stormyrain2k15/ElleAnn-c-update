@@ -3,6 +3,7 @@ package com.elleann.android.ui.components
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,14 +24,17 @@ import androidx.compose.ui.unit.dp
 import com.elleann.android.R
 import com.elleann.android.ui.theme.*
 
-// ─── IsyaPanel — uses native Canvas animated border + Fiesta corner ornaments ─
+// ─── IsyaPanel — Fiesta-style silver bevel by default + Fiesta corner ornaments
 @Composable
 fun IsyaPanel(
     title: String,
     modifier: Modifier = Modifier,
     headerIcon: ImageVector? = null,
     onClose: (() -> Unit)? = null,
-    flowingBorder: Boolean = true,
+    /* Default is the static silver bevel (matches the Fiesta UI
+     * reference). Set true to opt into the animated Silver→Gold→Teal
+     * cycling border for active/highlighted panels. */
+    flowingBorder: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     IsyaAnimatedBorderBox(
@@ -90,7 +94,16 @@ fun IsyaPanel(
 }
 
 // ─── IsyaButton ──────────────────────────────────────────────────────────────
-enum class IsyaButtonVariant { PRIMARY_GOLD, SECONDARY_TEAL, DANGER, GHOST }
+enum class IsyaButtonVariant {
+    PRIMARY_GOLD,
+    SECONDARY_TEAL,
+    /** Fiesta-style silver-bevel button with cool blue inner glow. Use
+     *  this for the canonical confirm action — matches the OK button
+     *  in the reference UI. */
+    SILVER_BLUE,
+    DANGER,
+    GHOST,
+}
 
 @Composable
 fun IsyaButton(
@@ -105,10 +118,21 @@ fun IsyaButton(
     val (bgBrush, textColor) = when (variant) {
         IsyaButtonVariant.PRIMARY_GOLD   -> Brush.horizontalGradient(listOf(IsyaGoldMid, IsyaGoldDeep)) to IsyaCream
         IsyaButtonVariant.SECONDARY_TEAL -> Brush.horizontalGradient(listOf(IsyaMagicMid, IsyaMagicDeep)) to IsyaCream
+        IsyaButtonVariant.SILVER_BLUE    -> Brush.verticalGradient(
+            listOf(
+                IsyaSilverButtonBlue.copy(alpha = 0.95f),
+                IsyaSilverButtonBlue.copy(alpha = 0.55f),
+                IsyaSilverButtonBlue.copy(alpha = 0.35f),
+            )
+        ) to IsyaSilver
         IsyaButtonVariant.DANGER         -> Brush.horizontalGradient(listOf(Color(0xFFA01A1A), Color(0xFF6A0A0A))) to IsyaCream
         IsyaButtonVariant.GHOST          -> Brush.horizontalGradient(listOf(Color.Transparent, Color.Transparent)) to IsyaGold
     }
-    val borderColor = if (variant == IsyaButtonVariant.GHOST) IsyaGold else null
+    val borderColor = when (variant) {
+        IsyaButtonVariant.GHOST       -> IsyaGold
+        IsyaButtonVariant.SILVER_BLUE -> IsyaSilverMid
+        else                          -> null
+    }
 
     Button(
         onClick  = onClick,
@@ -128,9 +152,19 @@ fun IsyaButton(
                 .fillMaxSize()
                 .background(bgBrush, RoundedCornerShape(8.dp))
                 .let { m ->
-                    if (borderColor != null)
-                        m.then(Modifier.clip(RoundedCornerShape(8.dp)))
-                    else m
+                    if (borderColor != null) {
+                        m.then(
+                            Modifier
+                                .border(
+                                    width  = 1.dp,
+                                    brush  = Brush.verticalGradient(
+                                        listOf(IsyaSilver, borderColor, IsyaSilverDeep),
+                                    ),
+                                    shape  = RoundedCornerShape(8.dp),
+                                )
+                                .clip(RoundedCornerShape(8.dp))
+                        )
+                    } else m
                 },
             contentAlignment = Alignment.Center,
         ) {

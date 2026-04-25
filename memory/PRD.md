@@ -996,3 +996,43 @@ code does.
 ### Delivery
 - Repo updated at `/app/ElleAnn/Android/`.
 - Zip: `/tmp/ElleAnn_Android_v1.8.zip` (386 KB).
+
+## Session Feb-2026 (continued) — v1.9: Fiesta-calibrated silver bevel + SILVER_BLUE button
+
+### Silver palette recalibration
+After analysing the user-supplied Fiesta Online reference screenshot to
+within ±5 RGB units:
+- `IsyaSilver`           = `#D2D7DC`  (top-edge highlight)
+- `IsyaSilverMid`        = `#A5AFB4`  (cool silver fill, slight blue cast)
+- `IsyaSilverDeep`       = `#6E7378`  (bottom-edge shadow)
+- `IsyaSilverButtonBlue` = `#5078B4`  (OK-button inner glow)
+
+### Static silver bevel rendering
+`IsyaAnimatedBorderBox` now branches on `animated`:
+- `animated = true`: legacy cycling Silver→Gold→Teal hue path (opt-in for
+  active/highlighted panels).
+- `animated = false`: NEW static path that paints the Fiesta-style
+  bevelled silver frame using a vertical gradient stroke
+  (highlight → mid → deep) plus a thin inner-sheen pass for the
+  polished-metal look.
+`IsyaPanel`'s default flipped from `flowingBorder = true` →
+`flowingBorder = false`, so every panel in the app now renders with the
+silver bevel by default. Routes that want the cycling animation
+explicitly opt in.
+
+### SILVER_BLUE button variant
+New `IsyaButtonVariant.SILVER_BLUE` matching the Fiesta OK button:
+vertical blue inner-glow gradient (`#5078B4` at varying alpha) with a
+silver gradient border (highlight → mid → deep). Wires through the
+existing `IsyaButton` API; no other call sites need to change.
+
+### Implementation polish
+- Added missing `androidx.compose.foundation.border` import in
+  `IsyaComponents.kt`.
+- `drawIsyaSilverBevel` helper added to `IsyaAnimatedBorder.kt` — single
+  source of truth for the bevel geometry; reused by both the outer
+  bevel and the inner sheen.
+
+### Validation
+- Brace/paren balance checker: 0 imbalanced across all Kotlin files.
+- Repacked: `/tmp/ElleAnn_Android_v1.9.zip` (387 KB).

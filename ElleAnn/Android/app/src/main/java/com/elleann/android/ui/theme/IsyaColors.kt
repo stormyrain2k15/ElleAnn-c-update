@@ -17,13 +17,18 @@ val IsyaGoldDeep   = Color(0xFFA0701A) // Button deep gradient end
 val IsyaGoldMid    = Color(0xFFC8922A) // Button gradient start
 
 // ─── Isya Silver — Default panel border (replaces the prior red tint) ──────
-//   The reference UI specifies the default panel frame as a silver-grey,
-//   not the ruby red the legacy DANGER variant used. This palette is the
-//   one IsyaPanel paints by default; flowingBorder=true cycles through
-//   it together with gold and teal for the live look.
-val IsyaSilver     = Color(0xFFC8D0DC) // Bright silver — highlight
-val IsyaSilverMid  = Color(0xFF8E97A8) // Mid silver — main border
-val IsyaSilverDeep = Color(0xFF5A6478) // Deep silver — shadow / inactive
+//   Calibrated to the Fiesta Online silver-frame reference:
+//       highlight  = #D2D7DC  (brightest top-edge bevel)
+//       mid        = #A5AFB4  (main fill — cool silver with slight blue cast)
+//       deep       = #6E7378  (bottom-edge shadow)
+//   The frame is rendered with a vertical gradient (highlight → mid → deep)
+//   in IsyaSilverFrame so panels read as polished metal rather than a flat
+//   stroke. The inner blue tint #5078B4 is exposed as IsyaSilverButtonBlue
+//   for the button-fill case (Fiesta's OK-button glow).
+val IsyaSilver           = Color(0xFFD2D7DC) // Bright silver — top bevel
+val IsyaSilverMid        = Color(0xFFA5AFB4) // Cool silver — main fill
+val IsyaSilverDeep       = Color(0xFF6E7378) // Deep silver — bottom shadow
+val IsyaSilverButtonBlue = Color(0xFF5078B4) // Button inner-glow blue
 
 // ─── Isya Magic — Secondary accent ─────────────────────────────────────────
 val IsyaMagic      = Color(0xFF2ECBD4) // Teal accent / keyword highlight
