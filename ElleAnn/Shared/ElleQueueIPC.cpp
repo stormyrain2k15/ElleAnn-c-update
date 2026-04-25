@@ -15,7 +15,7 @@ static const char* g_serviceNames[] = {
     "GoalEngine", "WorldModel", "LuaBehavioral",
     /* Phase 2+ services — ORDER MUST match ELLE_SERVICE_ID enum exactly. */
     "Bonding", "Continuity", "InnerLife", "Solitude",
-    "Family", "XChromosome", "Consent"
+    "Family", "XChromosome", "Consent", "Fiesta"
 };
 static_assert(sizeof(g_serviceNames) / sizeof(g_serviceNames[0]) == (size_t)ELLE_SERVICE_COUNT,
               "g_serviceNames size must equal ELLE_SERVICE_COUNT — "

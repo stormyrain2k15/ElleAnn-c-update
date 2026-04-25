@@ -1,0 +1,197 @@
+/*══════════════════════════════════════════════════════════════════════════════
+ * FiestaConnection.h — TCP socket + receive framer for one game session.
+ *
+ *   Single TCP connection (login OR world). Reads bytes off the wire,
+ *   feeds them into a sliding buffer, and emits complete decrypted
+ *   packets to the [OnPacket] callback. Outbound: takes (opcode,
+ *   payload), builds the size-prefixed frame, encrypts, sends.
+ *
+ *   Threading:
+ *     - One dedicated receive thread (blocking recv into buffer).
+ *     - Any thread may call Send() — guarded by m_sendMx.
+ *
+ *   The connection is non-IOCP because Fiesta sessions are single-
+ *   socket, low-throughput (~1 KB/s), and a simple thread-per-conn
+ *   keeps the code linear. The HTTP service uses IOCP because it
+ *   handles concurrent inbound clients; here we have one outbound.
+ *══════════════════════════════════════════════════════════════════════════════*/
+#pragma once
+#ifndef ELLE_FIESTA_CONNECTION_H
+#define ELLE_FIESTA_CONNECTION_H
+
+#include "FiestaCipher.h"
+#include "FiestaPacket.h"
+
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+namespace Fiesta {
+
+/** Single decoded inbound packet handed to the consumer. */
+struct InPacket {
+    uint16_t              opcode = 0;
+    std::vector<uint8_t>  payload;       /* decrypted, opcode-stripped   */
+};
+
+class Connection {
+public:
+    using PacketCallback     = std::function<void(const InPacket&)>;
+    using DisconnectCallback = std::function<void(const std::string& why)>;
+
+    Connection() {
+        WSADATA d;
+        WSAStartup(MAKEWORD(2, 2), &d);
+    }
+
+    ~Connection() {
+        Disconnect("destructor");
+        WSACleanup();
+    }
+
+    /** Synchronous connect + start the receive thread on success.     */
+    bool Connect(const std::string& host, uint16_t port) {
+        Disconnect("re-connect");
+
+        m_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (m_sock == INVALID_SOCKET) return false;
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port   = htons(port);
+        if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+            /* Try DNS — Fiesta servers are usually IP-literal but the
+             * private-server world uses hostnames too.                */
+            addrinfo hints{}; addrinfo* res = nullptr;
+            hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
+            const std::string portStr = std::to_string(port);
+            if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0) {
+                closesocket(m_sock);
+                m_sock = INVALID_SOCKET;
+                return false;
+            }
+            std::memcpy(&addr, res->ai_addr, sizeof(sockaddr_in));
+            freeaddrinfo(res);
+        }
+        if (connect(m_sock, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+            closesocket(m_sock);
+            m_sock = INVALID_SOCKET;
+            return false;
+        }
+
+        m_running = true;
+        m_recvThread = std::thread([this] { RecvLoop(); });
+        return true;
+    }
+
+    void Disconnect(const std::string& why = "client disconnect") {
+        bool wasRunning = m_running.exchange(false);
+        if (m_sock != INVALID_SOCKET) {
+            shutdown(m_sock, SD_BOTH);
+            closesocket(m_sock);
+            m_sock = INVALID_SOCKET;
+        }
+        if (m_recvThread.joinable() &&
+            m_recvThread.get_id() != std::this_thread::get_id()) {
+            m_recvThread.join();
+        }
+        if (wasRunning && m_onDisconnect) m_onDisconnect(why);
+    }
+
+    bool Send(uint16_t opcode, const std::vector<uint8_t>& payload) {
+        std::lock_guard<std::mutex> lk(m_sendMx);
+        if (m_sock == INVALID_SOCKET) return false;
+
+        std::vector<uint8_t> wire = BuildPacket(opcode, payload);
+        /* Encrypt opcode + payload (everything AFTER the size prefix). */
+        const size_t headerLen = (wire[0] == 0xFF) ? 3 : 1;
+        m_cipher.EncryptOut(wire.data() + headerLen, wire.size() - headerLen);
+
+        const char* p   = (const char*)wire.data();
+        size_t      rem = wire.size();
+        while (rem > 0) {
+            int n = send(m_sock, p, (int)rem, 0);
+            if (n <= 0) {
+                Disconnect("send failed");
+                return false;
+            }
+            p   += n;
+            rem -= (size_t)n;
+        }
+        return true;
+    }
+
+    Cipher& MutableCipher() { return m_cipher; }
+
+    void SetOnPacket(PacketCallback cb)         { m_onPacket = std::move(cb); }
+    void SetOnDisconnect(DisconnectCallback cb) { m_onDisconnect = std::move(cb); }
+
+    bool IsConnected() const { return m_sock != INVALID_SOCKET && m_running.load(); }
+
+private:
+    void RecvLoop() {
+        std::vector<uint8_t> buf;
+        buf.reserve(4096);
+        uint8_t chunk[2048];
+
+        while (m_running) {
+            int n = recv(m_sock, (char*)chunk, sizeof(chunk), 0);
+            if (n <= 0) {
+                if (m_running) Disconnect("recv eof / error");
+                return;
+            }
+            buf.insert(buf.end(), chunk, chunk + n);
+
+            /* Drain as many complete packets as the buffer holds.  */
+            while (true) {
+                if (buf.empty()) break;
+
+                size_t headerLen = 1;
+                size_t bodyLen   = buf[0];
+                if (bodyLen == 0xFF) {
+                    if (buf.size() < 3) break;
+                    bodyLen = (size_t)buf[1] | ((size_t)buf[2] << 8);
+                    headerLen = 3;
+                }
+                if (buf.size() < headerLen + bodyLen) break;
+                if (bodyLen < 2) {
+                    /* Malformed — drop the byte and try to resync.    */
+                    buf.erase(buf.begin(), buf.begin() + 1);
+                    continue;
+                }
+
+                /* Copy out the body, decrypt, dispatch.               */
+                std::vector<uint8_t> body(buf.begin() + headerLen,
+                                          buf.begin() + headerLen + bodyLen);
+                m_cipher.DecryptIn(body);
+
+                InPacket pkt;
+                pkt.opcode  = (uint16_t)(body[0] | (body[1] << 8));
+                pkt.payload.assign(body.begin() + 2, body.end());
+
+                if (m_onPacket) m_onPacket(pkt);
+
+                buf.erase(buf.begin(), buf.begin() + headerLen + bodyLen);
+            }
+        }
+    }
+
+    SOCKET                  m_sock = INVALID_SOCKET;
+    std::atomic<bool>       m_running{false};
+    std::thread             m_recvThread;
+    std::mutex              m_sendMx;
+    Cipher                  m_cipher;
+    PacketCallback          m_onPacket;
+    DisconnectCallback      m_onDisconnect;
+};
+
+}  /* namespace Fiesta */
+#endif

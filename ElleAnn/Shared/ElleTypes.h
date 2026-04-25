@@ -395,6 +395,14 @@ typedef enum ELLE_SERVICE_ID {
                                *       its own port.                      */
     SVC_X_CHROMOSOME,         /* 18 */
     SVC_CONSENT,              /* 19 — reserved slot */
+    SVC_FIESTA,               /* 20 — Headless Fiesta-protocol game client.
+                               *      Connects to a Fiesta-style MMO server,
+                               *      runs the auth → world → in-game state
+                               *      machine, surfaces both high-level
+                               *      events (chat, entity move, hp change)
+                               *      AND raw decoded packets for Cognitive
+                               *      to consume. Receives commands (move,
+                               *      attack, chat, pickup, …) over IPC. */
     ELLE_SERVICE_COUNT
 } ELLE_SERVICE_ID;
 
@@ -403,7 +411,7 @@ typedef enum ELLE_SERVICE_ID {
  * g_serviceNames[] in ElleTypes.cpp / the Heartbeat state array / the
  * GetPipeName() switch, this static_assert pins the contract. Bump the
  * expected count here ONLY in the same commit that updates all three.   */
-static_assert((int)ELLE_SERVICE_COUNT == 20,
+static_assert((int)ELLE_SERVICE_COUNT == 21,
               "ELLE_SERVICE_COUNT changed — update g_serviceNames[], "
               "Heartbeat service state arrays, and GetPipeName() switch "
               "in lockstep before bumping this assert.");
@@ -557,7 +565,47 @@ typedef enum ELLE_IPC_MSG_TYPE {
      *       "mental_model":"..."}, ...
      *    ]}                                                             */
     IPC_WORLD_QUERY,
-    IPC_WORLD_RESPONSE
+    IPC_WORLD_RESPONSE,
+
+    /*──────────────────────────────────────────────────────────────────────
+     * FIESTA HEADLESS GAME-CLIENT BRIDGE
+     *
+     *   IPC_FIESTA_COMMAND  (Cognitive → SVC_FIESTA)
+     *     Drives the headless game client. Payload is a JSON envelope
+     *     describing the action Elle wants taken in the game world, e.g.:
+     *
+     *       {"op":"login",      "username":"...","password":"..."}
+     *       {"op":"select_world","world_id":1}
+     *       {"op":"select_char", "char_index":0}
+     *       {"op":"chat",        "channel":"normal","text":"hello"}
+     *       {"op":"move",        "x":1234.0,"y":56.7,"z":89.0}
+     *       {"op":"attack",      "target_id":42}
+     *       {"op":"pickup",      "item_id":17}
+     *       {"op":"use_item",    "slot":3}
+     *       {"op":"raw",         "opcode":"0x2010","hex":"0102030405"}
+     *
+     *   IPC_FIESTA_EVENT    (SVC_FIESTA → subscribers)
+     *     Payload is a JSON envelope describing an observed game event.
+     *     Two flavours coexist on the same channel:
+     *
+     *       (a) High-level decoded event:
+     *           {"kind":"chat","speaker":"Foo","channel":"normal",
+     *            "text":"hi"}
+     *           {"kind":"entity_spawn","id":17,"type":"npc",
+     *            "name":"Goblin","x":...,"y":...}
+     *           {"kind":"hp_changed","entity_id":1,"pct":0.74}
+     *           {"kind":"login_state","state":"in_game"}
+     *
+     *       (b) Raw debug packet (for Cognitive's rule-engine layer):
+     *           {"kind":"raw","direction":"in",
+     *            "opcode":"0x2014","len":42,"hex":"..."}
+     *
+     *   The high-level/raw distinction is encoded in the "kind" field
+     *   so subscribers can filter trivially. Payload is JSON (string)
+     *   to match the WORLD_QUERY pattern — flexible, extensible, never
+     *   pinned to a specific protocol revision.                       */
+    IPC_FIESTA_COMMAND,
+    IPC_FIESTA_EVENT
 } ELLE_IPC_MSG_TYPE;
 
 #define ELLE_IPC_FLAG_URGENT      0x0001
