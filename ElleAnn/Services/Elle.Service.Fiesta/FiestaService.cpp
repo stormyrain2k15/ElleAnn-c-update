@@ -98,6 +98,9 @@ protected:
         m_password   = cfg.GetString("fiesta.password", "");
         m_autoLogin  = cfg.GetBool("fiesta.auto_login", false);
 
+        m_client.SetProtocolVersion(
+            (uint32_t)cfg.GetInt("fiesta.protocol_version", 0));
+
         m_client.SetOnEvent([this](const Fiesta::GameEvent& e) {
             BroadcastEvent(e.kindJson);
         });

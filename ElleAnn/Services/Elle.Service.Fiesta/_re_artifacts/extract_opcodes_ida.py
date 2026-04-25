@@ -1,8 +1,14 @@
 """
 extract_opcodes.py — IDA Pro 7.x / 8.x / IDAFREE script.
 
+CRITICAL — load the PATCHED CodeCave EXE the .udd file references:
+   5ZoneServer2-Localhost-Port80-NoService-CodeCave-1.exe
+…NOT the bare `5ZoneServer2.exe`. The .udd's RVAs were captured
+against the CodeCave-modified binary, so loading the un-patched
+EXE gives you symbols that point at offsets shifted by the cave.
+
 Run inside IDA after auto-analysis finishes loading
-`5ZoneServer2.exe` together with `5ZoneServer2.pdb`. Dumps every
+the patched EXE together with `5ZoneServer2.pdb`. Dumps every
 ShinePlayer pft_Store call site's (NC_name, hex_opcode) pair to
 `/tmp/shine_opcodes.tsv`, ready to paste into FiestaPacket.h::Op.
 

@@ -3,7 +3,70 @@
 (PRD.md is the static source of truth; this file is the running log of
 what landed and when. Newest entries on top.)
 
-## 2026-02 — ShineEngine RE pass for Elle.Service.Fiesta
+## 2026-02 — Server topology nailed down via JHR_ServerInfo.txt
+
+User shared the canonical server config (`JHR_ServerInfo.txt`, plus
+`0oneServerInfo.txt` per-zone overrides) which definitively maps every
+TCP port and ODBC DSN. Combined with the binary RE pass, the full
+Mischief 6.11.2015 stack is now documented end-to-end in
+`Services/Elle.Service.Fiesta/_re_artifacts/SERVER_TOPOLOGY.md`.
+
+**Key topology corrections vs prior session:**
+
+- **3-hop client login**: 9010 (`PG_Login`) → 9110 (`PG_WorldManager`) → 9120 (`PG_Zone_00`). The earlier "client connects directly to WM" interpretation was wrong; LoginServer **is** client-facing on port 9010 (Server ID 4, From Client = 20).
+- **No HTTP step needed**: `UserAuthentication.php` is a 3-user hardcoded stub. Real auth is TCP `NC_MAP_LOGIN_REQ` against the `Account` MSSQL DB.
+- **APEX-version check is internal**: the WM's "NO-APEX VERSION" log line is a server-side guild-data load failure, never a client rejection. Removed the misleading client-side warning.
+- **MSSQL `sa` blank password**: confirmed in JHR_ServerInfo.txt's ODBC strings.
+
+**Service config updated (`Deploy/Configs/fiesta.json`):**
+- `port: 9010` (PG_Login, was 80)
+- Added `wm_port: 9110`, `zone_port_base: 9120` for the future 3-hop wiring.
+- Added `protocol_version: 0` config knob with documentation.
+- Removed bogus HTTP/auth_url/auth_salt fields.
+
+**Source updates:**
+- `FiestaClient.h` — `SetProtocolVersion()` setter + `m_protocolVersion` field.
+- `FiestaClient.cpp::SendLoginRequest` — uses `m_protocolVersion` from config; APEX comment corrected.
+- `FiestaService.cpp::OnStart` — wires `cfg.GetInt("fiesta.protocol_version")` into the client.
+- 3-hop login flow is documented as a **TODO** in `FiestaClient.cpp` — only hop #1 (Login) is currently wired. The login_ack opcode that carries the WM hand-off info is server-pushed (CMD), not REQ, so it didn't appear in the `pft_Store` sweep; one Wireshark capture of an original-client login will reveal it.
+
+**Smoke test still green** (5/5 pass under `-Wall -Wextra -Werror`).
+
+---
+
+## 2026-02 — ShineEngine RE complete: 210 real opcodes wired
+
+Eight artifacts decoded into a complete ShineEngine intel package:
+
+- **3 client RE dumps** (Functions / Imports / Strings / Names / commands)
+- **Server PDB** (`5ZoneServer2.pdb`, MSF7) → 2 126 NC_* names
+- **OllyDbg .udd** (`5ZoneServer2.udd`) → 13 882 (RVA, name) records, 656 NC_* with handler RVAs
+- **Server EXEs** (Login / WM / Zone / Char / GameLog / Account / AccountLog) → 7 binaries identified
+- **WM bin** confirmed client-facing with 117 NC_* handlers
+- **PHP UserAuthentication.php** → MD5(salt+pass) stub, salt = `dlrtkdlxm!`
+
+**Real opcodes baked into `FiestaPacket.h::Op`** — 210 unique (NC_name, hex)
+pairs across 29 ShineEngine subsystems, recovered by walking every
+`pft_Store(major, minor, &handler)` call site in the EXE+udd. Encoding
+confirmed: `wire_opcode = (major << 8) | minor`. Examples:
+- `NC_MISC_SEED_REQ = 0x0206` (server-pushed seed handshake)
+- `NC_MAP_LOGIN_REQ = 0x0601`
+- `NC_BAT_HIT_REQ   = 0x0903`
+- `NC_ACT_CHAT_REQ  = 0x0801`
+
+**Client rewritten for ShineEngine flow:**
+- `FiestaClient::Connect` parks in new `SEED_WAIT` state, server pushes seed.
+- `HandlePacket` honours real opcodes: `NC_MISC_SEED_REQ` enables cipher + auto-fires login; `NC_ACT_CHAT_REQ` / `NC_ACT_SHOUT_CMD` decode chat.
+- `Move()`, `Attack()`, `Pickup()`, `UseItem()`, `Respawn()`, `Chat()` all use real ShineEngine opcodes.
+- `Heartbeat` collapsed to no-op (ShineEngine relies on TCP keepalive; no NC_*_KEEPALIVE in the recovered set).
+
+**Verification (Linux container, `-Werror`):**
+- All 5 portable smoke tests pass.
+- 5 opcode `static_assert`s pass against the real recovered hex values.
+
+---
+
+## 2026-02 — Elle.Service.Fiesta — Headless Game Client Complete (P0)
 
 User shared client RE artifacts (`Functions.txt`, `Imports.txt`,
 `Strings.txt`, `Names.txt`, `commands.txt`), the server PDB

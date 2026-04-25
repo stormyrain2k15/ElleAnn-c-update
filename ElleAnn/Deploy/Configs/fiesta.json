@@ -2,15 +2,21 @@
   "_comment": "Fiesta headless game-client configuration. Loaded by SVC_FIESTA via ElleConfig dot-path keys (fiesta.host, fiesta.port, ...). Drop this file into Deploy/Configs/ alongside the other service configs and the master ElleAnn config will merge it. Sensitive credentials should NOT be committed; populate username/password in your local copy only.",
 
   "fiesta": {
+    "_topology_note": "ShineEngine Mischief 6.11.2015 build, ports per JHR_ServerInfo.txt. Client speaks to 3 TCP servers in sequence: PG_Login (9010, auth) → PG_WorldManager (9110, char list, zone select) → PG_Zone_00 (9120, gameplay). All run on 127.0.0.1 in this build. Cipher seed (NC_MISC_SEED_ACK) is renewed at each hand-off. Initial connect target = PG_Login.",
+
     "host":             "127.0.0.1",
     "port":             9010,
+    "wm_port":          9110,
+    "zone_port_base":   9120,
+
     "username":         "",
     "password":         "",
     "auto_login":       false,
 
-    "reconnect_min_ms": 5000,
-    "reconnect_max_ms": 60000,
+    "_protocol_version_note": "NC_MAP_LOGIN_REQ carries a u32 protocol-version. Mischief 6.11.2015 expects 0; bump only if a newer client capture shows otherwise. The 'NO-APEX VERSION' WM log is an internal guild-data load failure on the SERVER side, NOT a client-rejection — ignore.",
+    "protocol_version": 0,
 
-    "_protocol_notes": "Standard FiestaPS framing: u8 sizeFlag (0xFF → next u16 LE is real length), u16 LE opcode, payload. Stream cipher is XOR against a 32-byte session key delivered in the LOGIN_REPLY tail. Override opcodes in FiestaPacket.h::Op if your target server build diverges from the documented JFOL/CN map."
+    "reconnect_min_ms": 5000,
+    "reconnect_max_ms": 60000
   }
 }

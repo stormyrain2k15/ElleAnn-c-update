@@ -37,8 +37,9 @@ namespace Fiesta {
 enum class State {
     DISCONNECTED,
     LOGIN_CONNECTING,
-    LOGIN_AUTH,
-    WORLD_LIST,
+    SEED_WAIT,        /* TCP open, waiting for server-pushed NC_MISC_SEED_ACK   */
+    LOGIN_AUTH,       /* seed received, NC_MAP_LOGIN_REQ sent, awaiting char data */
+    WORLD_LIST,       /* (legacy two-step protocols only — unused on ShineEngine) */
     WORLD_HANDOFF,
     WORLD_CONNECTING,
     WORLD_CHAR_LIST,
@@ -49,6 +50,7 @@ inline const char* StateName(State s) {
     switch (s) {
         case State::DISCONNECTED:      return "disconnected";
         case State::LOGIN_CONNECTING:  return "login_connecting";
+        case State::SEED_WAIT:         return "seed_wait";
         case State::LOGIN_AUTH:        return "login_auth";
         case State::WORLD_LIST:        return "world_list";
         case State::WORLD_HANDOFF:     return "world_handoff";
@@ -90,6 +92,12 @@ public:
     bool SelectWorld(uint32_t worldId);
     bool SelectChar(uint32_t charIndex);
 
+    /* Override the u32 protocol-version field carried by
+     * NC_MAP_LOGIN_REQ. Default 0; if your WM drops with a version
+     * mismatch, capture the original client's login packet and set
+     * this to the value seen on the wire.                            */
+    void SetProtocolVersion(uint32_t v) { m_protocolVersion = v; }
+
     /* ── In-game actions ──────────────────────────────────────────── */
     bool Move(float x, float y, float z);
     bool Attack(uint32_t targetId);
@@ -119,6 +127,7 @@ private:
     std::string            m_worldHost;
     uint16_t               m_worldPort = 0;
     uint32_t               m_charId    = 0;
+    uint32_t               m_protocolVersion = 0;
     std::atomic<bool>      m_heartbeat{false};
     std::thread            m_hbThread;
     EventCallback          m_onEvent;

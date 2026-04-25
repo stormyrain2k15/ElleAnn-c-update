@@ -83,13 +83,14 @@ bool Client::Connect(const std::string& loginHost, uint16_t loginPort,
         SetState(State::DISCONNECTED);
         return false;
     }
-    /* Login server in most Fiesta builds starts in cleartext; the
-     * server emits a session-key handshake packet which flips the
-     * cipher on. The default Cipher state is enabled-but-zero-key,
-     * which behaves as no-op until Reset() is called.                */
+    /* ShineEngine flow: TCP starts cleartext. The server pushes
+     * NC_MISC_SEED_ACK first, carrying the 32-byte seed. Our handler
+     * for that opcode flips the cipher on and then auto-fires
+     * SendLoginRequest() with the credentials we cached above. So we
+     * just park in SEED_WAIT here and wait for the seed to arrive. */
     m_conn.MutableCipher().SetEnabled(false);
-
-    return SendLoginRequest(user, pass);
+    SetState(State::SEED_WAIT);
+    return true;
 }
 
 void Client::Disconnect(const std::string& why) {
@@ -120,48 +121,110 @@ void Client::EmitEvent(const std::string& kindJson) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
- * Outbound action methods
+ * Outbound action methods — ShineEngine NC_* opcodes.
+ *
+ *   Login flow per JHR_ServerInfo.txt (Mischief 6.11.2015 ports):
+ *     hop #1 connect 9010 PG_Login  →  SEED  →  NC_MAP_LOGIN_REQ
+ *                                        ↓
+ *                              login_ack delivers WM IP+port
+ *                                        ↓
+ *     hop #2 connect 9110 PG_WM     →  SEED  →  char list, char select
+ *                                        ↓
+ *                                 WM delivers Zone IP+port
+ *                                        ↓
+ *     hop #3 connect 9120 PG_Zone   →  SEED  →  NC_MAP_LOGINCOMPLETE_CMD
+ *                                        ↓
+ *                                     IN_GAME
+ *
+ *   STATUS: only hop #1 is wired in this revision. The login_ack
+ *   opcode that carries the WM hand-off info is not yet in our
+ *   recovered handler set (it's a server-pushed CMD, not a client-
+ *   sent REQ, so it didn't appear in the pft_Store sweep). One
+ *   Wireshark capture of an original-client login will reveal the
+ *   exact opcode and payload layout — at that point, the WM and
+ *   Zone hops drop in by reusing m_conn.Connect() / SetEnabled(false)
+ *   from this same Client object, in the spirit of the legacy
+ *   World handoff that lived here in earlier revisions.
  *──────────────────────────────────────────────────────────────────────────────*/
 bool Client::SendLoginRequest(const std::string& user, const std::string& pass) {
+    /* NC_MAP_LOGIN_REQ payload (Mischief 6.11.2015 build):
+     *   ASCII string  username   (length-prefixed via Writer::Str —
+     *                              this is the `requestid` returned
+     *                              by UserAuthentication.php's XML,
+     *                              NOT the plaintext User field)
+     *   ASCII string  password   (kept for protocol parity; many
+     *                              builds ignore this field once the
+     *                              HTTP-auth requestid validates)
+     *   u32           protocol-version (0 by default; override via
+     *                              fiesta.protocol_version if the WM
+     *                              rejects with "version mismatch")
+     *
+     * The Mischief WM's "SERVER IS NO-APEX VERSION" log is an internal
+     * guild-data load failure on the SERVER side — it never rejects
+     * client packets based on that flag, so we don't need to set it
+     * in the wire payload either way.                              */
     Writer w;
     w.Str(user);
     w.Str(pass);
+    w.U32(m_protocolVersion);
     SetState(State::LOGIN_AUTH);
-    return m_conn.Send(Op::LOGIN_REQ, w.Data());
+    return m_conn.Send(Op::NC_MAP_LOGIN_REQ, w.Data());
 }
 
-bool Client::SelectWorld(uint32_t worldId) {
-    if (GetState() != State::WORLD_LIST) return false;
-    Writer w; w.U32(worldId);
-    return m_conn.Send(Op::WORLD_SELECT_REQ, w.Data());
+bool Client::SelectWorld(uint32_t /*worldId*/) {
+    /* No-op on ShineEngine — world selection happens before TCP
+     * connect (you connect to a specific zone server). Surface a
+     * benign event so Cognitive knows the call was acknowledged.   */
+    EmitEvent(R"({"kind":"select_world_skipped","reason":"shineengine single-zone"})");
+    return true;
 }
 
 bool Client::SelectChar(uint32_t charIndex) {
-    if (GetState() != State::WORLD_CHAR_LIST) return false;
-    Writer w; w.U32(charIndex);
+    /* Once the server has pushed all char data after login, the
+     * client confirms readiness with NC_MAP_LOGINCOMPLETE_CMD. The
+     * char_index is a server-assigned slot; we forward it as the
+     * sole payload — most server builds only care that the CMD
+     * arrived.                                                     */
+    Writer w;
+    w.U32(charIndex);
     m_charId = charIndex;
-    return m_conn.Send(Op::CHAR_SELECT_REQ, w.Data());
+    return m_conn.Send(Op::NC_MAP_LOGINCOMPLETE_CMD, w.Data());
 }
 
 bool Client::Move(float x, float y, float z) {
     if (GetState() != State::IN_GAME) return false;
+    /* NC_ACT_RUN_REQ is the canonical "I'm moving with run-speed"
+     * client request. ShineEngine clients alternate between
+     * NC_ACT_WALK_REQ (0x0803) and NC_ACT_RUN_REQ (0x0805) by
+     * speed; for an autonomous agent run is the right default.    */
     Writer w; w.F32(x); w.F32(y); w.F32(z);
-    return m_conn.Send(Op::MOVE_REQ, w.Data());
+    return m_conn.Send(Op::NC_ACT_RUN_REQ, w.Data());
 }
 
 bool Client::Attack(uint32_t targetId) {
     if (GetState() != State::IN_GAME) return false;
+    /* NC_BAT_HIT_REQ — single basic-attack request. The client is
+     * expected to first NC_BAT_TARGETTING_REQ (0x0901) the target,
+     * then issue HIT_REQs at attack-speed cadence. We collapse the
+     * common case here and target+hit in one call.                */
+    {
+        Writer t; t.U32(targetId);
+        m_conn.Send(Op::NC_BAT_TARGETTING_REQ, t.Data());
+    }
     Writer w; w.U32(targetId);
-    return m_conn.Send(Op::ATTACK_REQ, w.Data());
+    return m_conn.Send(Op::NC_BAT_HIT_REQ, w.Data());
 }
 
 bool Client::Chat(const std::string& channel, const std::string& text) {
     if (GetState() != State::IN_GAME) return false;
-    uint16_t op = Op::CHAT_NORMAL;
-    if      (channel == "whisper") op = Op::CHAT_WHISPER;
-    else if (channel == "party")   op = Op::CHAT_PARTY;
-    else if (channel == "guild")   op = Op::CHAT_GUILD;
-    else if (channel == "shout")   op = Op::CHAT_SHOUT;
+    /* Channel-to-opcode mapping for ShineEngine:
+     *   normal/say  → NC_ACT_CHAT_REQ  (per-tile broadcast)
+     *   shout       → NC_ACT_SHOUT_CMD (zone-wide)
+     * Whisper/party/guild are routed through a different subsystem
+     * (NC_CHAT_*) which is not in the ShinePlayer-handler set;
+     * forward them as raw NC_ACT_CHAT_REQ until those are wired.   */
+    uint16_t op = Op::NC_ACT_CHAT_REQ;
+    if (channel == "shout") op = Op::NC_ACT_SHOUT_CMD;
     Writer w; w.Str(text);
     return m_conn.Send(op, w.Data());
 }
@@ -169,18 +232,23 @@ bool Client::Chat(const std::string& channel, const std::string& text) {
 bool Client::Pickup(uint32_t itemId) {
     if (GetState() != State::IN_GAME) return false;
     Writer w; w.U32(itemId);
-    return m_conn.Send(Op::ITEM_PICKUP_REQ, w.Data());
+    return m_conn.Send(Op::NC_ITEM_PICKUP_REQ, w.Data());
 }
 
 bool Client::UseItem(uint32_t slot) {
     if (GetState() != State::IN_GAME) return false;
     Writer w; w.U32(slot);
-    return m_conn.Send(Op::ITEM_USE_REQ, w.Data());
+    return m_conn.Send(Op::NC_ITEM_USE_REQ, w.Data());
 }
 
 bool Client::Respawn() {
+    /* ShineEngine has two distinct "I'm dead, send me back" flows:
+     *   NC_CHAR_REVIVE_REQ        — full revive (graveyard / town)
+     *   NC_SKILL_REPLYREVIVE_CMD  — accept a priest/ress offer
+     * We default to the safe one (REVIVE_REQ); a future refinement
+     * can decide based on whether a ress offer is pending.         */
     Writer w;
-    return m_conn.Send(Op::RESPAWN_REQ, w.Data());
+    return m_conn.Send(Op::NC_CHAR_REVIVE_REQ, w.Data());
 }
 
 bool Client::SendRaw(uint16_t opcode, const std::vector<uint8_t>& payload) {
@@ -188,112 +256,63 @@ bool Client::SendRaw(uint16_t opcode, const std::vector<uint8_t>& payload) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
- * Inbound packet handler
+ * Inbound packet handler — ShineEngine NC_* opcodes.
  *──────────────────────────────────────────────────────────────────────────────*/
 void Client::HandlePacket(const InPacket& pkt) {
     switch (pkt.opcode) {
 
-        case Op::LOGIN_REPLY: {
-            /* Layout (typical): u8 result, [u32 accountId], [key bytes]. */
-            Reader r(pkt.payload.data(), pkt.payload.size());
-            uint8_t result = 0; r.U8(result);
-            if (result != 0) {
-                EmitEvent(R"({"kind":"login_failed"})");
-                Disconnect("login refused");
-                return;
-            }
-            /* Many builds include a session key here that future
-             * packets must be XOR'd against. Pull up to 32 bytes —
-             * the Cipher reset zero-pads any shortfall.            */
-            uint8_t key[32]{};
+        case Op::NC_MISC_SEED_REQ: {
+            /* ShineEngine actually flips the convention on its head:
+             * the SERVER pushes 0x0206 to the client immediately after
+             * connect, carrying the seed bytes. The opcode name kept
+             * its "_REQ" suffix from a long-defunct earlier flow.    */
             const size_t keyLen =
-                (r.Remaining() > 32) ? 32 : r.Remaining();
+                (pkt.payload.size() > 32) ? 32 : pkt.payload.size();
             if (keyLen > 0) {
-                r.Bytes(key, keyLen);
-                m_conn.MutableCipher().Reset(key, keyLen);
+                m_conn.MutableCipher().Reset(pkt.payload.data(), keyLen);
                 m_conn.MutableCipher().SetEnabled(true);
             }
-            SetState(State::WORLD_LIST);
-            /* Ask for the world list immediately. */
-            Writer w;
-            m_conn.Send(Op::WORLD_LIST_REQ, w.Data());
+            std::ostringstream o;
+            o << R"({"kind":"seed_received","len":)" << keyLen << "}";
+            EmitEvent(o.str());
+
+            /* Auto-progress: send the login request now that we can
+             * actually encrypt it.                                   */
+            if (GetState() == State::SEED_WAIT) {
+                std::string u, p;
+                {
+                    std::lock_guard<std::mutex> lk(m_mx);
+                    u = m_pendingUser; p = m_pendingPass;
+                }
+                SendLoginRequest(u, p);
+            }
             break;
         }
 
-        case Op::WORLD_LIST_REPLY: {
-            /* Surface the raw world list to Cognitive — the brain
-             * picks one and sends back a SelectWorld() command.    */
+        case Op::NC_MAP_LOGIN_REQ: {
+            /* Server may echo this back with a result code on some
+             * builds — surface as login_state for Cognitive.         */
             std::ostringstream o;
-            o << R"({"kind":"world_list","payload_hex":")"
+            o << R"({"kind":"login_state","state":"acknowledged"})";
+            EmitEvent(o.str());
+            break;
+        }
+
+        case Op::NC_BRIEFINFO_INFORM_CMD: {
+            /* Server-pushed brief player info during the login
+             * sequence. Forward as raw — Cognitive learns the layout
+             * from repeated captures. */
+            std::ostringstream o;
+            o << R"({"kind":"brief_info","payload_hex":")"
               << ToHex(pkt.payload) << "\"}";
             EmitEvent(o.str());
             break;
         }
 
-        case Op::WORLD_SELECT_REPLY: {
-            /* Layout (typical): u8 result, str host, u16 port. */
-            Reader r(pkt.payload.data(), pkt.payload.size());
-            uint8_t result = 0; r.U8(result);
-            if (result != 0) {
-                EmitEvent(R"({"kind":"world_select_failed"})");
-                return;
-            }
-            std::string host; r.Str(host);
-            uint16_t port = 0; r.U16(port);
-            {
-                std::lock_guard<std::mutex> lk(m_mx);
-                m_worldHost = host;
-                m_worldPort = port;
-            }
-            SetState(State::WORLD_HANDOFF);
-
-            /* Tear down the login socket and open the world socket. */
-            m_conn.Disconnect("world handoff");
-            SetState(State::WORLD_CONNECTING);
-            if (!m_conn.Connect(host, port)) {
-                Disconnect("world connect failed");
-                return;
-            }
-            /* Cipher resets per-session. */
-            m_conn.MutableCipher().SetEnabled(false);
-
-            /* Ask for character list. */
-            Writer w;
-            m_conn.Send(Op::CHAR_LIST_REQ, w.Data());
-            SetState(State::WORLD_CHAR_LIST);
-            break;
-        }
-
-        case Op::CHAR_LIST_REPLY: {
-            std::ostringstream o;
-            o << R"({"kind":"char_list","payload_hex":")"
-              << ToHex(pkt.payload) << "\"}";
-            EmitEvent(o.str());
-            break;
-        }
-
-        case Op::CHAR_SELECT_REPLY: {
-            Reader r(pkt.payload.data(), pkt.payload.size());
-            uint8_t result = 0; r.U8(result);
-            if (result == 0) {
-                SetState(State::IN_GAME);
-                StartHeartbeat();
-            } else {
-                EmitEvent(R"({"kind":"char_select_failed"})");
-            }
-            break;
-        }
-
-        case Op::CHAT_NORMAL:
-        case Op::CHAT_SHOUT:
-        case Op::CHAT_WHISPER:
-        case Op::CHAT_PARTY:
-        case Op::CHAT_GUILD: {
+        case Op::NC_ACT_CHAT_REQ:
+        case Op::NC_ACT_SHOUT_CMD: {
             const char* channel =
-                (pkt.opcode == Op::CHAT_WHISPER) ? "whisper" :
-                (pkt.opcode == Op::CHAT_PARTY)   ? "party"   :
-                (pkt.opcode == Op::CHAT_GUILD)   ? "guild"   :
-                (pkt.opcode == Op::CHAT_SHOUT)   ? "shout"   : "normal";
+                (pkt.opcode == Op::NC_ACT_SHOUT_CMD) ? "shout" : "normal";
             Reader r(pkt.payload.data(), pkt.payload.size());
             std::string speaker, text;
             r.Str(speaker); r.Str(text);
@@ -302,41 +321,6 @@ void Client::HandlePacket(const InPacket& pkt) {
               << R"(","speaker":")" << JsonEsc(speaker)
               << R"(","text":")" << JsonEsc(text) << "\"}";
             EmitEvent(o.str());
-            break;
-        }
-
-        case Op::HP_UPDATE: {
-            Reader r(pkt.payload.data(), pkt.payload.size());
-            uint32_t entityId = 0; uint32_t cur = 0; uint32_t max = 0;
-            r.U32(entityId); r.U32(cur); r.U32(max);
-            float pct = (max > 0) ? ((float)cur / (float)max) : 0.f;
-            std::ostringstream o;
-            o << R"({"kind":"hp_changed","entity_id":)" << entityId
-              << R"(,"cur":)" << cur << R"(,"max":)" << max
-              << R"(,"pct":)" << pct << "}";
-            EmitEvent(o.str());
-            break;
-        }
-
-        case Op::DEATH_NOTIFY: {
-            Reader r(pkt.payload.data(), pkt.payload.size());
-            uint32_t entityId = 0; r.U32(entityId);
-            std::ostringstream o;
-            o << R"({"kind":"death","entity_id":)" << entityId << "}";
-            EmitEvent(o.str());
-            break;
-        }
-
-        case Op::ENTITY_SPAWN: {
-            std::ostringstream o;
-            o << R"({"kind":"entity_spawn","payload_hex":")"
-              << ToHex(pkt.payload) << "\"}";
-            EmitEvent(o.str());
-            break;
-        }
-
-        case Op::HEARTBEAT_REPLY: {
-            /* Quiet — heartbeat is admin noise, no event needed.    */
             break;
         }
 
@@ -355,21 +339,14 @@ void Client::HandlePacket(const InPacket& pkt) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
- * Heartbeat loop
+ * Heartbeat loop — ShineEngine has no application-level keepalive.
+ * The server uses TCP keepalive at the OS layer plus implicit
+ * traffic; there is no NC_*_KEEPALIVE in the recovered handler set.
+ * StartHeartbeat()/StopHeartbeat() stay as no-ops to keep the call
+ * sites in Connect/Disconnect compiling cleanly.
  *──────────────────────────────────────────────────────────────────────────────*/
 void Client::StartHeartbeat() {
-    StopHeartbeat();
-    m_heartbeat = true;
-    m_hbThread = std::thread([this] {
-        while (m_heartbeat.load()) {
-            for (int i = 0; i < 30 && m_heartbeat.load(); i++) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            if (!m_heartbeat.load()) break;
-            Writer w;
-            m_conn.Send(Op::HEARTBEAT_REQ, w.Data());
-        }
-    });
+    /* deliberately empty — see comment above */
 }
 
 void Client::StopHeartbeat() {

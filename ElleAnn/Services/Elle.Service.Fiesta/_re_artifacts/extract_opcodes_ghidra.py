@@ -1,6 +1,12 @@
 """
 extract_opcodes.py — Ghidra script (Python 2 / Jython).
 
+CRITICAL — load the PATCHED CodeCave EXE the .udd file references:
+   5ZoneServer2-Localhost-Port80-NoService-CodeCave-1.exe
+…NOT the bare `5ZoneServer2.exe`. The .udd's RVAs were captured
+against the CodeCave-modified binary, so loading the un-patched
+EXE gives you symbols that point at offsets shifted by the cave.
+
 Equivalent of extract_opcodes_ida.py for Ghidra users — Ghidra is
 free, so this is the recommended path if you don't already own IDA.
 
