@@ -3,6 +3,69 @@
 (PRD.md is the static source of truth; this file is the running log of
 what landed and when. Newest entries on top.)
 
+## 2026-02 — ShineEngine RE pass for Elle.Service.Fiesta
+
+User shared client RE artifacts (`Functions.txt`, `Imports.txt`,
+`Strings.txt`, `Names.txt`, `commands.txt`), the server PDB
+(`5ZoneServer2.pdb`), the server EXE (`5ZoneServer2.exe`), the server
+config (`Zone.ini` — RunSpeed=117, WalkSpeed=33), `ZoneServerInfo.txt`
+(Mischief 6.11.2015 build, server tag `PG_Zone_0`), and `Fiesta.dll`
+(client security-check bypass).
+
+**Engine identified**: ShineEngine (Fiesta Online / Isya / CN-Fiesta).
+Confirmed via three independent vectors — client RTTI strings, server
+PDB demangled symbols, and class-name patterns (`ShineObjectClass::ShinePlayer`,
+`ProtocolPacket::pp_SendPacket`, `PROTOCOLFUNCTIONTEMPLETE<T>::pft_Store`).
+
+**Catalogue extracted** to `Services/Elle.Service.Fiesta/`:
+- `shine_nc_symbols.txt` — 518 `NC_*` from client.
+- `shine_nc_symbols_server.txt` — 2 126 `NC_*` from server PDB.
+- `shine_nc_symbols_client_facing.txt` — 507 intersection.
+- `shine_nc_symbols_shineplayer.txt` — **235** opcodes registered
+  against `ShinePlayer` — the precise client surface (181 REQ + 41 CMD
+  + 13 ACK across 28 subsystems: ACT, ITEM, MINIHOUSE, GAMBLE, GUILD,
+  BAT, CHAR, TRADE, MAP, etc.).
+
+**Wire format upgraded to ground truth** (was: documented JFOL/CN
+guesses; now: confirmed from PDB):
+- u16 LE opcode (was assumed; PDB `pft_Store(NETCOMMAND*, int, unsigned short)` confirms).
+- 3-tier length prefix `u8 / 0xFF + u16` (server PDB: `CSendPacket::PACKET_SIZE`,
+  `PACKET_SIZE1`, `PACKET_SIZE2`).
+- Cipher class `PacketEncrypt` (server PDB: `so_PacketEncryptClass`,
+  `so_PacketEncrypt`, `so_EncSeedSet`).
+- Seed delivered server→client via `NC_MISC_SEED_ACK` (PDB:
+  `Send_NC_MISC_SEED_ACK@ClientSession`).
+
+**Hex opcode values still pending** — they live as immediate operands in
+the EXE's `.text` section; recovering them needs IDA-Pro / Ghidra-grade
+type-aware analysis. The 2008-vintage PDB's TPI stream confuses
+`llvm-pdbutil 14` and `pdbparse 1.5`. Two ready-to-run extraction scripts
+delivered:
+- `_re_artifacts/extract_opcodes_ida.py` (IDA 7.x+)
+- `_re_artifacts/extract_opcodes_ghidra.py` (Ghidra, free)
+
+Both walk every `pft_Store` specialization, decode the three preceding
+`push imm` instructions, and emit a TSV of `(opcode, NC_handler_name)`
+pairs ready to paste into `FiestaPacket.h::Op`.
+
+**Doc & header updates** in `Services/Elle.Service.Fiesta/`:
+- `README.md` — fully rewritten, multi-source intel + handshake state
+  diagram + "what's still needed" + extraction-script paths.
+- `FiestaPacket.h` — header docstring rewritten to flag ShineEngine
+  identification, accurate wire-format facts, and the
+  status-of-opcode-values caveat.
+
+**Smoke test still green** under `-Wall -Wextra -Werror`:
+```
+[ok] cipher roundtrip
+[ok] cipher disabled passthrough
+[ok] writer/reader primitives
+[ok] build packet (short + long framing)
+[ok] full encrypt-and-parse round trip
+```
+
+---
+
 ## 2026-02 — Elle.Service.Fiesta — Headless Game Client Complete (P0)
 
 Service count: **20 → 21** (`SVC_FIESTA = 20`). New end-to-end MMO bridge

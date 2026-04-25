@@ -92,14 +92,28 @@ The **hex opcode values** are stored as immediate operands in `pft_Store` calls
 inside the .text section of the server EXE. PDBs hold names + RVAs but *not*
 the inline immediates the compiler embedded in the call sites.
 
-| Need                       | Why                                                          | Outcome                          |
-|----------------------------|--------------------------------------------------------------|----------------------------------|
-| `5ZoneServer2.exe` (the matching EXE for the PDB above) | Disassemble the `pft_Store(opcode, &handler)` call sites — every immediate `push 0xNNNN` paired with the next-line handler push gives one (NC_name, hex) pair. | All 235 client-facing opcode hex values recoverable in one pass |
-| `5ZoneServer2.exe` is enough alone | The EXE has the full opcode table baked in; PDB is the lookup that turns RVA → name | — |
-| (alternative) Wireshark login capture | A 30-second pcap of "connect → login → enter world" gives us 5–10 high-confidence opcode bytes to bootstrap a partial map | Validates framing + cipher model in vivo |
+We have all the inputs (`5ZoneServer2.exe` + `5ZoneServer2.pdb`), but the
+2008-vintage PDB's TPI stream confuses the Linux PDB parsers (`llvm-pdbutil 14`,
+`pdbparse 1.5` both fail). Cleanest fix: run one of the included scripts in a
+proper RE tool that handles old PDBs natively — both finish in well under a
+minute and write a TSV ready to paste into `FiestaPacket.h::Op`:
 
-`5ZoneServer2.pdb` alone is **not** sufficient to get hex values — but combined
-with the EXE it's the complete picture.
+| Script (in `_re_artifacts/`)        | Tool          | Cost  |
+|-------------------------------------|---------------|-------|
+| `extract_opcodes_ida.py`            | IDA Pro 7.x+  | $$$   |
+| `extract_opcodes_ghidra.py`         | Ghidra        | free  |
+
+Both walk every `pft_Store` specialization, decode the three preceding
+`push imm` instructions, and emit `(opcode, NC_handler_name)` pairs. After
+you run one of them, drop `/tmp/shine_opcodes.tsv` into a new chat turn and
+I'll wire the values into `FiestaPacket.h::Op` in one pass.
+
+### Alternative: 30-second pcap
+
+If you'd rather not crank up Ghidra: a Wireshark capture of "connect → login →
+enter world" gives 5–10 confirmed opcodes plus *definitively* answers the
+cipher stream-model question (per-packet reset vs running offset). Save it as
+a `.pcap` and upload — I'll dissect it byte-for-byte.
 
 ## Files in this folder
 
@@ -112,6 +126,10 @@ with the EXE it's the complete picture.
 | `FiestaService.cpp`               | SCM service entry, IPC bridge                  |
 | `Elle.Service.Fiesta.vcxproj`     | MSBuild project                                |
 | `shine_nc_symbols*.txt`           | RE artifacts (catalogued above)                |
+| `_re_artifacts/Zone.ini`          | Server config — RunSpeed=117, WalkSpeed=33     |
+| `_re_artifacts/ZoneServerInfo.txt`| Server info — Mischief 6.11.2015 build, "PG_Zone_0" |
+| `_re_artifacts/extract_opcodes_ida.py`    | IDA Pro script — dumps (opcode, name) pairs |
+| `_re_artifacts/extract_opcodes_ghidra.py` | Ghidra equivalent (free)                |
 | `README.md`                       | This file                                      |
 
 ## How Cognitive uses this
