@@ -1,0 +1,1355 @@
+[
+  {
+    "name": "NETPACKET",
+    "sizeof": 2,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netcmd",
+        "type": "NETCOMMAND",
+        "type_id": "2df2"
+      },
+      {
+        "offset": 2,
+        "name": "data",
+        "type": "unsigned char[0]   /* 0 bytes */",
+        "type_id": "2ded"
+      }
+    ]
+  },
+  {
+    "name": "NETPACKETHEADER",
+    "sizeof": 2,
+    "members": []
+  },
+  {
+    "name": "NETPACKETZONEHEADER",
+    "sizeof": 6,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_BRIEFINFO_ABSTATE_CHANGE_LIST_CMD",
+    "sizeof": 3,
+    "members": [
+      {
+        "offset": 3,
+        "name": "infoList",
+        "type": "ABSTATE_INFORMATION[?] /* 0 bytes */",
+        "type_id": "2eff"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_BRIEFINFO_CHANGEDECORATE_CMD",
+    "sizeof": 5,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_BRIEFINFO_CHANGEUPGRADE_CMD",
+    "sizeof": 6,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_BRIEFINFO_CHANGEWEAPON_CMD",
+    "sizeof": 9,
+    "members": [
+      {
+        "offset": 0,
+        "name": "upgradeinfo",
+        "type": "PROTO_NC_BRIEFINFO_CHANGEUPGRADE_CMD",
+        "type_id": "4c01"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_BRIEFINFO_UNEQUIP_CMD",
+    "sizeof": 3,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_CHARSAVE_ITEMACTIONCOOLTIME_ACK",
+    "sizeof": 2,
+    "members": [
+      {
+        "offset": 2,
+        "name": "group",
+        "type": "ActionCooltime[?] /* 0 bytes */",
+        "type_id": "2fa2"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_ABSTATE_CMD",
+    "sizeof": 6,
+    "members": [
+      {
+        "offset": 6,
+        "name": "abstate",
+        "type": "ABSTATEREADBLOCK[?] /* 0 bytes */",
+        "type_id": "2e64"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_ARENA_CMD",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_CHAR_BASE_CMD",
+    "sizeof": 105,
+    "members": [
+      {
+        "offset": 4,
+        "name": "charid",
+        "type": "Name5",
+        "type_id": "11cc"
+      },
+      {
+        "offset": 66,
+        "name": "logininfo",
+        "type": "PROTO_NC_CHAR_BASE_CMD::LoginLocation",
+        "type_id": "2905"
+      },
+      {
+        "offset": 87,
+        "name": "statdistribute",
+        "type": "CHARSTATDISTSTR",
+        "type_id": "2906"
+      },
+      {
+        "offset": 101,
+        "name": "flags",
+        "type": "PROTO_NC_CHAR_BASE_CMD::<unnamed-type-flags>",
+        "type_id": "2907"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_BASE_CMD::<unnamed-type-flags>::<unnamed-type-str>",
+    "sizeof": 4,
+    "members": [
+      {
+        "offset": 0,
+        "name": "skillempower_can_reset",
+        "type": "<LF_BITFIELD:0x2917>",
+        "type_id": "2917"
+      },
+      {
+        "offset": 0,
+        "name": "restunion",
+        "type": "<LF_BITFIELD:0x2918>",
+        "type_id": "2918"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_BASE_CMD::LoginLocation",
+    "sizeof": 21,
+    "members": [
+      {
+        "offset": 0,
+        "name": "currentmap",
+        "type": "Name3",
+        "type_id": "11a5"
+      },
+      {
+        "offset": 12,
+        "name": "currentcoord",
+        "type": "SHINE_COORD_TYPE",
+        "type_id": "291b"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_CHARGEDBUFF_CMD",
+    "sizeof": 2,
+    "members": [
+      {
+        "offset": 2,
+        "name": "ChargedBuff",
+        "type": "PROTO_CHARGEDBUFF_INFO[?] /* 0 bytes */",
+        "type_id": "28d9"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_CHESTINFO_CMD",
+    "sizeof": 2,
+    "members": [
+      {
+        "offset": 2,
+        "name": "location",
+        "type": "unsigned short[0]   /* 0 bytes */",
+        "type_id": "28f6"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_EMBLEM_CMD",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_CHAR_FRIEND_CMD",
+    "sizeof": 2,
+    "members": [
+      {
+        "offset": 2,
+        "name": "friend_array",
+        "type": "PROTO_NC_CHAR_FRIEND_CMD_INFO[?] /* 0 bytes */",
+        "type_id": "3bc8"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_FRIEND_CMD_INFO",
+    "sizeof": 25,
+    "members": [
+      {
+        "offset": 4,
+        "name": "charid",
+        "type": "Name5",
+        "type_id": "11cc"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_GUILD_CMD",
+    "sizeof": 4,
+    "members": [
+      {
+        "offset": 4,
+        "name": "Guild",
+        "type": "GUILD_CLIENT[?] /* 0 bytes */",
+        "type_id": "289d"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_HOUSE_CMD",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_CHAR_MASPUP_CMD",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_CHAR_NEWBIE_GUIDE_VIEW_LIST_CMD",
+    "sizeof": 1,
+    "members": [
+      {
+        "offset": 1,
+        "name": "nGuideViewList",
+        "type": "unsigned char[0]   /* 0 bytes */",
+        "type_id": "2ded"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_OPTION_GAME",
+    "sizeof": 64,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Data",
+        "type": "unsigned char[64]   /* 64 bytes */",
+        "type_id": "389e"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_OPTION_KEYMAPPING",
+    "sizeof": 308,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Data",
+        "type": "unsigned char[308]   /* 308 bytes */",
+        "type_id": "389b"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_OPTION_SHORTCUTDATA",
+    "sizeof": 1024,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Data",
+        "type": "unsigned char[1024]   /* 1024 bytes */",
+        "type_id": "1292"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_OPTION_SHORTCUTSIZE",
+    "sizeof": 24,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Data",
+        "type": "unsigned char[24]   /* 24 bytes */",
+        "type_id": "2bf5"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_OPTION_SOUND",
+    "sizeof": 1,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Data",
+        "type": "unsigned char[1]   /* 1 bytes */",
+        "type_id": "122d"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_OPTION_VIDEO",
+    "sizeof": 60,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Data",
+        "type": "unsigned char[60]   /* 60 bytes */",
+        "type_id": "2833"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_OPTION_WINDOWPOS",
+    "sizeof": 392,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Data",
+        "type": "unsigned char[392]   /* 392 bytes */",
+        "type_id": "301c"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_PET_CMD",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_CHAR_QUEST_DOING_CMD",
+    "sizeof": 6,
+    "members": [
+      {
+        "offset": 6,
+        "name": "QuestDoingArray",
+        "type": "PLAYER_QUEST_INFO[?] /* 0 bytes */",
+        "type_id": "2ac4"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_QUEST_READ_CMD",
+    "sizeof": 6,
+    "members": [
+      {
+        "offset": 6,
+        "name": "QuestReadIDArray",
+        "type": "unsigned short[0]   /* 0 bytes */",
+        "type_id": "28f6"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_QUEST_REPEAT_CMD",
+    "sizeof": 6,
+    "members": [
+      {
+        "offset": 6,
+        "name": "QuestRepeatArray",
+        "type": "PLAYER_QUEST_INFO[?] /* 0 bytes */",
+        "type_id": "2ac4"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_SEAWAR_CMD",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_CHAR_SINGLE_OPTION_CMD",
+    "sizeof": 15,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_CHAR_SKILL_CMD",
+    "sizeof": 9,
+    "members": [
+      {
+        "offset": 4,
+        "name": "PartMark",
+        "type": "PARTMARK",
+        "type_id": "3bd4"
+      },
+      {
+        "offset": 9,
+        "name": "skill",
+        "type": "PROTO_SKILLREADBLOCK[?] /* 0 bytes */",
+        "type_id": "3bd5"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_SKILL_PASSIVE_CMD",
+    "sizeof": 2,
+    "members": [
+      {
+        "offset": 2,
+        "name": "passive",
+        "type": "unsigned short[0]   /* 0 bytes */",
+        "type_id": "28f6"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_WEDDINGDATA_ACK",
+    "sizeof": 43,
+    "members": [
+      {
+        "offset": 0,
+        "name": "header",
+        "type": "NETPACKETZONEHEADER",
+        "type_id": "2489"
+      },
+      {
+        "offset": 8,
+        "name": "Status",
+        "type": "PROTO_NC_CHAR_WEDDINGDATA_ACK::<unnamed-type-Status>",
+        "type_id": "3b65"
+      },
+      {
+        "offset": 9,
+        "name": "When",
+        "type": "ShineDateTime",
+        "type_id": "10a4"
+      },
+      {
+        "offset": 13,
+        "name": "SubWhen",
+        "type": "ShineDateTime",
+        "type_id": "10a4"
+      },
+      {
+        "offset": 13,
+        "name": "ApplicationLimit",
+        "type": "ShineDateTime",
+        "type_id": "10a4"
+      },
+      {
+        "offset": 13,
+        "name": "DelayLimit",
+        "type": "ShineDateTime",
+        "type_id": "10a4"
+      },
+      {
+        "offset": 13,
+        "name": "DivorceLimit",
+        "type": "ShineDateTime",
+        "type_id": "10a4"
+      },
+      {
+        "offset": 13,
+        "name": "NewlyLimit",
+        "type": "ShineDateTime",
+        "type_id": "10a4"
+      },
+      {
+        "offset": 17,
+        "name": "Partner",
+        "type": "PROTO_NC_CHAR_WEDDINGDATA_ACK::<unnamed-type-Partner>",
+        "type_id": "3b66"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_WEDDINGDATA_ACK::<unnamed-type-Partner>",
+    "sizeof": 24,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Name",
+        "type": "Name5",
+        "type_id": "11cc"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_WEDDINGDATA_ACK::<unnamed-type-Status>",
+    "sizeof": 1,
+    "members": [
+      {
+        "offset": 0,
+        "name": "Main",
+        "type": "<LF_BITFIELD:0x10b6>",
+        "type_id": "10b6"
+      },
+      {
+        "offset": 0,
+        "name": "Sub",
+        "type": "<LF_BITFIELD:0x10b7>",
+        "type_id": "10b7"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_WEDDING_PARTNER_INFO_ACK",
+    "sizeof": 14,
+    "members": [
+      {
+        "offset": 0,
+        "name": "header",
+        "type": "NETPACKETZONEHEADER",
+        "type_id": "2489"
+      },
+      {
+        "offset": 6,
+        "name": "PartnerInfo",
+        "type": "PROTO_NC_CHAR_WEDDING_PARTNER_INFO_ACK::<unnamed-type-PartnerInfo>",
+        "type_id": "39c9"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAR_WEDDING_PARTNER_INFO_ACK::<unnamed-type-PartnerInfo>",
+    "sizeof": 8,
+    "members": [
+      {
+        "offset": 2,
+        "name": "LastConnect",
+        "type": "ShineDateTime",
+        "type_id": "10a4"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_CHAT_RESTRICT_DB_LIST_CMD",
+    "sizeof": 2,
+    "members": [
+      {
+        "offset": 2,
+        "name": "ChatRestrictData",
+        "type": "PROTO_CHAT_RESTRICT_DB_INFO[?] /* 0 bytes */",
+        "type_id": "2e79"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_DATA_SEND1<PROTO_NC_MISC_CONNECTFROMWHERE_DB_ACK>",
+    "sizeof": 12,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_DATA_SEND1<PROTO_NC_MISC_EVENT_DONE_MUNSANG_ACC2WM>",
+    "sizeof": 18,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_GUILD_TOURNAMENT_DB_REWARD_CREATE_REQ",
+    "sizeof": 12,
+    "members": [
+      {
+        "offset": 12,
+        "name": "ItemOpt",
+        "type": "PROTO_NC_GUILD_TOURNAMENT_DB_REWARD_CREATE_REQ::ITEM_OPT[?] /* 0 bytes */",
+        "type_id": "257b"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_GUILD_TOURNAMENT_DB_REWARD_CREATE_REQ::ITEM_OPT",
+    "sizeof": 33,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_ITEMDB_CHARGED_LIST_ACK",
+    "sizeof": 11,
+    "members": [
+      {
+        "offset": 0,
+        "name": "packheader",
+        "type": "NETPACKETZONEHEADER",
+        "type_id": "2489"
+      },
+      {
+        "offset": 11,
+        "name": "ChargedItemInfoList",
+        "type": "PROTO_CHARGED_ITEM_INFO[?] /* 0 bytes */",
+        "type_id": "248b"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_ITEM_BUY_REQ",
+    "sizeof": 6,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_ITEM_DROP_REQ",
+    "sizeof": 14,
+    "members": [
+      {
+        "offset": 0,
+        "name": "slot",
+        "type": "ITEM_INVEN",
+        "type_id": "4542"
+      },
+      {
+        "offset": 6,
+        "name": "loc",
+        "type": "SHINE_XY_TYPE",
+        "type_id": "242c"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_ITEM_SELL_REQ",
+    "sizeof": 5,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_MISC_CONNECTER_REQ",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_MISC_CONNECTFROMWHERE_ACK",
+    "sizeof": 7,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketzoneheader",
+        "type": "NETPACKETZONEHEADER",
+        "type_id": "2489"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_CONNECTFROMWHERE_DB_ACK",
+    "sizeof": 9,
+    "members": [
+      {
+        "offset": 2,
+        "name": "ToZoneAck",
+        "type": "PROTO_NC_MISC_CONNECTFROMWHERE_ACK",
+        "type_id": "40ac"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_CONNECTFROMWHERE_DB_REQ",
+    "sizeof": 12,
+    "members": [
+      {
+        "offset": 2,
+        "name": "FromZoneReq",
+        "type": "PROTO_NC_MISC_CONNECTFROMWHERE_REQ",
+        "type_id": "3f8d"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_CONNECTFROMWHERE_REQ",
+    "sizeof": 10,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketzoneheader",
+        "type": "NETPACKETZONEHEADER",
+        "type_id": "2489"
+      },
+      {
+        "offset": 6,
+        "name": "connectip",
+        "type": "unsigned char[4]   /* 4 bytes */",
+        "type_id": "2492"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_EVENT_DONE_MUNSANG_ACC2WM",
+    "sizeof": 15,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_MISC_EVENT_DONE_MUNSANG_WM2ACC",
+    "sizeof": 13,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_MISC_EVENT_HIT3_ADD_CASH",
+    "sizeof": 28,
+    "members": [
+      {
+        "offset": 0,
+        "name": "UserID",
+        "type": "unsigned char[20]   /* 20 bytes */",
+        "type_id": "28bc"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_HEARTBEAT_ACK_SEND",
+    "sizeof": 3,
+    "members": [
+      {
+        "offset": 1,
+        "name": "netcmd",
+        "type": "NETCOMMAND",
+        "type_id": "2df2"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_ITEMSHOP_URL_DB_ACK",
+    "sizeof": 8,
+    "members": [
+      {
+        "offset": 8,
+        "name": "sURL",
+        "type": "wchar_t[0]   /* 0 bytes */",
+        "type_id": "252d"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_ITEMSHOP_URL_DB_REQ",
+    "sizeof": 8,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_MISC_S2SCONNECTION_ACK",
+    "sizeof": 3,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_MISC_S2SCONNECTION_RDY_SEND",
+    "sizeof": 3,
+    "members": [
+      {
+        "offset": 1,
+        "name": "netcmd",
+        "type": "NETCOMMAND",
+        "type_id": "2df2"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_S2SCONNECTION_REQ",
+    "sizeof": 7,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_MISC_WEB_DB_KEY_ACK",
+    "sizeof": 40,
+    "members": [
+      {
+        "offset": 8,
+        "name": "WebKey",
+        "type": "unsigned char[32]   /* 32 bytes */",
+        "type_id": "2ca7"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_MISC_WEB_DB_KEY_REQ",
+    "sizeof": 6,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_OPTOOL_CLOSE_SERVER_ACK",
+    "sizeof": 2,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_OPTOOL_CONNECT_BRIF_ACK",
+    "sizeof": 170,
+    "members": [
+      {
+        "offset": 2,
+        "name": "count",
+        "type": "unsigned short[2]   /* 4 bytes */[2]   /* 8 bytes */[21]   /* 168 bytes */",
+        "type_id": "3eb9"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_OPTOOL_CONNECT_BRIF_REQ",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_OPTOOL_MAP_USER_LIST_ACK",
+    "sizeof": 4,
+    "members": [
+      {
+        "offset": 4,
+        "name": "user_info",
+        "type": "NC_OPTOOL_MAP_USER_LIST_INFO[?] /* 0 bytes */",
+        "type_id": "3ea1"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_OPTOOL_MAP_USER_LIST_REQ",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_OPTOOL_S2SCONNECT_LIST_ACK",
+    "sizeof": 4,
+    "members": [
+      {
+        "offset": 4,
+        "name": "connection_info",
+        "type": "SERVER_CONN_INFO[?] /* 0 bytes */",
+        "type_id": "3e9d"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_OPTOOL_S2SCONNECT_LIST_REQ",
+    "sizeof": 1,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_USER_CH_PASSWORD_CHECK_ACK",
+    "sizeof": 287,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "id",
+        "type": "Name256Byte",
+        "type_id": "2eb1"
+      },
+      {
+        "offset": 258,
+        "name": "password",
+        "type": "Name4",
+        "type_id": "1069"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_CH_PASSWORD_CHECK_ACK_SEND",
+    "sizeof": 290,
+    "members": [
+      {
+        "offset": 1,
+        "name": "netcmd",
+        "type": "NETCOMMAND",
+        "type_id": "2df2"
+      },
+      {
+        "offset": 3,
+        "name": "ack",
+        "type": "PROTO_NC_USER_CH_PASSWORD_CHECK_ACK",
+        "type_id": "3f68"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_CH_PASSWORD_CHECK_REQ",
+    "sizeof": 274,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "user",
+        "type": "Name256Byte",
+        "type_id": "2eb1"
+      },
+      {
+        "offset": 258,
+        "name": "password",
+        "type": "Name4",
+        "type_id": "1069"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_GER_PASSWORD_CHECK_ACK",
+    "sizeof": 287,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "id",
+        "type": "Name256Byte",
+        "type_id": "2eb1"
+      },
+      {
+        "offset": 258,
+        "name": "password",
+        "type": "Name4",
+        "type_id": "1069"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_GER_PASSWORD_CHECK_ACK_SEND",
+    "sizeof": 290,
+    "members": [
+      {
+        "offset": 1,
+        "name": "netcmd",
+        "type": "NETCOMMAND",
+        "type_id": "2df2"
+      },
+      {
+        "offset": 3,
+        "name": "ack",
+        "type": "PROTO_NC_USER_GER_PASSWORD_CHECK_ACK",
+        "type_id": "3f0e"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_GER_PASSWORD_CHECK_REQ",
+    "sizeof": 274,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "user",
+        "type": "Name256Byte",
+        "type_id": "2eb1"
+      },
+      {
+        "offset": 258,
+        "name": "password",
+        "type": "Name4",
+        "type_id": "1069"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_JP_PASSWORD_CHECK_ACK",
+    "sizeof": 306,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 8,
+        "name": "sUserName",
+        "type": "wchar_t[24]   /* 24 bytes */",
+        "type_id": "13bd"
+      },
+      {
+        "offset": 32,
+        "name": "sChannel",
+        "type": "wchar_t[254]   /* 254 bytes */",
+        "type_id": "36a6"
+      },
+      {
+        "offset": 286,
+        "name": "sUserIP",
+        "type": "wchar_t[20]   /* 20 bytes */",
+        "type_id": "122c"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_JP_PASSWORD_CHECK_REQ",
+    "sizeof": 336,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "sUserName",
+        "type": "wchar_t[24]   /* 24 bytes */",
+        "type_id": "13bd"
+      },
+      {
+        "offset": 26,
+        "name": "sPassword",
+        "type": "wchar_t[36]   /* 36 bytes */",
+        "type_id": "36a3"
+      },
+      {
+        "offset": 62,
+        "name": "sChannel",
+        "type": "wchar_t[254]   /* 254 bytes */",
+        "type_id": "36a6"
+      },
+      {
+        "offset": 316,
+        "name": "sUserIP",
+        "type": "wchar_t[20]   /* 20 bytes */",
+        "type_id": "122c"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_LOGIN_DB",
+    "sizeof": 9,
+    "members": [
+      {
+        "offset": 5,
+        "name": "ip",
+        "type": "unsigned char[4]   /* 4 bytes */",
+        "type_id": "2492"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_LOGIN_NETMARBLE_DB_REQ",
+    "sizeof": 278,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "UniID",
+        "type": "unsigned char[20]   /* 20 bytes */",
+        "type_id": "28bc"
+      },
+      {
+        "offset": 22,
+        "name": "UserID",
+        "type": "unsigned char[256]   /* 256 bytes */",
+        "type_id": "2db7"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_LOGOUT_DB",
+    "sizeof": 9,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_USER_PASSWORD_CHECK_ACK",
+    "sizeof": 287,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "id",
+        "type": "Name256Byte",
+        "type_id": "2eb1"
+      },
+      {
+        "offset": 258,
+        "name": "password",
+        "type": "Name4",
+        "type_id": "1069"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_PASSWORD_CHECK_ACK_SEND",
+    "sizeof": 290,
+    "members": [
+      {
+        "offset": 1,
+        "name": "netcmd",
+        "type": "NETCOMMAND",
+        "type_id": "2df2"
+      },
+      {
+        "offset": 3,
+        "name": "ack",
+        "type": "PROTO_NC_USER_PASSWORD_CHECK_ACK",
+        "type_id": "409f"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_PASSWORD_CHECK_REQ",
+    "sizeof": 274,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "user",
+        "type": "Name256Byte",
+        "type_id": "2eb1"
+      },
+      {
+        "offset": 258,
+        "name": "password",
+        "type": "Name4",
+        "type_id": "1069"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_RETURN_CHECK_ACK",
+    "sizeof": 11,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_USER_RETURN_CHECK_REQ",
+    "sizeof": 6,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_USER_SET_RETURN_CMD",
+    "sizeof": 4,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_USER_TEENAGER_ACK",
+    "sizeof": 313,
+    "members": [
+      {
+        "offset": 0,
+        "name": "sUserID",
+        "type": "Name256Byte",
+        "type_id": "2eb1"
+      },
+      {
+        "offset": 258,
+        "name": "Data",
+        "type": "PROTO_NC_USER_TEENAGER_CMD",
+        "type_id": "4041"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_TEENAGER_CMD",
+    "sizeof": 55,
+    "members": [
+      {
+        "offset": 0,
+        "name": "sUserKey",
+        "type": "unsigned char[50]   /* 50 bytes */",
+        "type_id": "13df"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_TEENAGER_REQ",
+    "sizeof": 258,
+    "members": [
+      {
+        "offset": 0,
+        "name": "sUserID",
+        "type": "Name256Byte",
+        "type_id": "2eb1"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_TEENAGER_SET_CMD",
+    "sizeof": 54,
+    "members": [
+      {
+        "offset": 0,
+        "name": "sUserKey",
+        "type": "unsigned char[50]   /* 50 bytes */",
+        "type_id": "13df"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_TW_PASSWORD_CHECK_ACK",
+    "sizeof": 8,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_TW_PASSWORD_CHECK_ACK_SEND",
+    "sizeof": 11,
+    "members": [
+      {
+        "offset": 1,
+        "name": "netcmd",
+        "type": "NETCOMMAND",
+        "type_id": "2df2"
+      },
+      {
+        "offset": 3,
+        "name": "ack",
+        "type": "PROTO_NC_USER_TW_PASSWORD_CHECK_ACK",
+        "type_id": "40af"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_TW_PASSWORD_CHECK_REQ",
+    "sizeof": 102,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "sUserName",
+        "type": "wchar_t[36]   /* 36 bytes */",
+        "type_id": "36a3"
+      },
+      {
+        "offset": 38,
+        "name": "sSerial",
+        "type": "wchar_t[36]   /* 36 bytes */",
+        "type_id": "36a3"
+      },
+      {
+        "offset": 74,
+        "name": "sUID",
+        "type": "wchar_t[20]   /* 20 bytes */",
+        "type_id": "122c"
+      },
+      {
+        "offset": 94,
+        "name": "sSID",
+        "type": "wchar_t[8]   /* 8 bytes */",
+        "type_id": "170c"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_US_PASSWORD_CHECK_ACK",
+    "sizeof": 353,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 8,
+        "name": "sUserName",
+        "type": "wchar_t[260]   /* 260 bytes */",
+        "type_id": "2562"
+      },
+      {
+        "offset": 268,
+        "name": "sPassword",
+        "type": "wchar_t[36]   /* 36 bytes */",
+        "type_id": "36a3"
+      },
+      {
+        "offset": 304,
+        "name": "sUserIP",
+        "type": "wchar_t[20]   /* 20 bytes */",
+        "type_id": "122c"
+      },
+      {
+        "offset": 333,
+        "name": "spawnapps",
+        "type": "Name5",
+        "type_id": "11cc"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USER_US_PASSWORD_CHECK_REQ",
+    "sizeof": 338,
+    "members": [
+      {
+        "offset": 0,
+        "name": "netpacketheader",
+        "type": "NETPACKETHEADER",
+        "type_id": "3f0d"
+      },
+      {
+        "offset": 2,
+        "name": "sUserName",
+        "type": "wchar_t[260]   /* 260 bytes */",
+        "type_id": "2562"
+      },
+      {
+        "offset": 262,
+        "name": "sPassword",
+        "type": "wchar_t[36]   /* 36 bytes */",
+        "type_id": "36a3"
+      },
+      {
+        "offset": 298,
+        "name": "sUserIP",
+        "type": "wchar_t[20]   /* 20 bytes */",
+        "type_id": "122c"
+      },
+      {
+        "offset": 318,
+        "name": "spawnapps",
+        "type": "Name5",
+        "type_id": "11cc"
+      }
+    ]
+  },
+  {
+    "name": "PROTO_NC_USP_USER_CHARACTER_DELETE",
+    "sizeof": 9,
+    "members": []
+  },
+  {
+    "name": "PROTO_NC_USP_USER_CHARACTER_INSERT",
+    "sizeof": 50,
+    "members": [
+      {
+        "offset": 9,
+        "name": "sCharName",
+        "type": "wchar_t[40]   /* 40 bytes */",
+        "type_id": "122e"
+      }
+    ]
+  }
+]
