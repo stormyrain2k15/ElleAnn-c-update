@@ -1,0 +1,110 @@
+{
+  "iteration": "fiesta_3hop_login_2026-02-26",
+  "task": "Wire 3-hop ShineEngine login + verified PROTO_NC_* PODs",
+  "sources_unblocked": [
+    "Account.pdb / AccountLog.pdb / Login.pdb (V80, llvm-pdbutil)",
+    "WorldManager.pdb (V80, llvm-pdbutil)",
+    "5ZoneServer2.pdb (V70, custom CodeView reader)",
+    "CN2012 server EXEs paired with PDBs (PE timestamps verified)",
+    "Fiesta.exe client (string-mined, no PDB)"
+  ],
+  "verified_opcodes_total": 2687,
+  "verified_struct_layouts": [
+    [
+      "SHINE_XY_TYPE",
+      8
+    ],
+    [
+      "SHINE_COORD_TYPE",
+      9
+    ],
+    [
+      "NETPACKETZONEHEADER",
+      6
+    ],
+    [
+      "PROTO_NC_MISC_SEED_ACK",
+      2
+    ],
+    [
+      "PROTO_NC_USER_CLIENT_VERSION_CHECK_REQ",
+      64
+    ],
+    [
+      "PROTO_NC_USER_LOGIN_REQ",
+      272
+    ],
+    [
+      "PROTO_NC_USER_WORLDSELECT_REQ",
+      1
+    ],
+    [
+      "PROTO_NC_USER_WORLDSELECT_ACK",
+      83
+    ],
+    [
+      "PROTO_NC_USER_WILLLOGIN_REQ",
+      347
+    ],
+    [
+      "PROTO_NC_ACT_WALK_REQ",
+      16
+    ],
+    [
+      "PROTO_NC_ACT_NPCCLICK_CMD",
+      2
+    ],
+    [
+      "PROTO_NC_BRIEFINFO_INFORM_CMD",
+      6
+    ]
+  ],
+  "cipher_status": {
+    "algorithm": "MSVC rand() LCG",
+    "mul": "0x000343FD (214013)",
+    "add": "0x00269EC3 (2531011)",
+    "mask": "(state >> 16) & 0xFF",
+    "evidence": "CN2012 5ZoneServer2.exe @ 0x1FE4F4: imul ecx, ecx, 0x000343FD",
+    "verdict": "\ud83d\udfe2 PASS \u2014 verified by disassembly + LCG self-test"
+  },
+  "compile": {
+    "cmd": "g++ -std=c++17 -Wall -Wextra -Werror -IElleAnn/Services/Elle.Service.Fiesta backend/tests/fiesta_smoke.cpp -o /tmp/fiesta_smoke",
+    "returncode": 0,
+    "stderr": ""
+  },
+  "tests": [
+    "[ok] cipher roundtrip",
+    "[ok] cipher disabled passthrough",
+    "[ok] cipher LCG matches MSVC rand() (seed=0 \u2192 0x26 0x27)",
+    "[ok] writer/reader primitives",
+    "[ok] u8-prefixed string roundtrip",
+    "[ok] build packet (short + long framing)",
+    "[ok] full encrypt-and-parse round trip",
+    "[ok] PROTO_NC_* sizeof + offsetof match PDB layouts",
+    "[ok] LOGIN_REQ serializes 272B with correct field offsets",
+    "[ok] WALK_REQ serializes 16B with little-endian u32 fields",
+    "[ok] SEED_ACK serializes to exactly 2 bytes (LE u16 seed)",
+    "",
+    "fiesta_smoke: ALL PASS",
+    ""
+  ],
+  "tests_passed": true,
+  "ci_canaries": {
+    "catch_dots_excluded_comments": "pass",
+    "raw_sleep": "pass",
+    "brace_balance_fiesta": "pass",
+    "cppcheck_warnings_only_unused_public_api": "pass"
+  },
+  "artifacts": [
+    "_re_artifacts/OPCODES_FROM_PDB.md",
+    "_re_artifacts/cn2012/INVENTORY.md",
+    "_re_artifacts/pdb/extracted/PDB_OPCODES.json (2687 entries)",
+    "_re_artifacts/pdb/extracted/Zone_protos.md (1123 structs)",
+    "_re_artifacts/pdb/cv_pdb_dump.py (custom V70 reader)"
+  ],
+  "open_items": [
+    "PROTO_NC_BAT_TARGETING_REQ + HIT_REQ payloads not in recovered PDB \u2014 using BIN-sourced (handle:u16) shape",
+    "PROTO_NC_ACT_CHAT_REQ inbound (broadcast) variant: probing best-effort (u16 handle + u8 text); needs PCAP confirmation",
+    "NC_USER_LOGINWORLD_REQ payload \u2014 using WILLLOGIN_REQ-shaped echo (CN2012 accepts)"
+  ]
+}

@@ -113,8 +113,10 @@ protected:
         m_autoLogin  = cfg.GetBool("fiesta.auto_login", false);
         m_nUserNo    = (int64_t)cfg.GetInt("fiesta.user_no", 0);
 
-        m_client.SetProtocolVersion(
-            (uint32_t)cfg.GetInt("fiesta.protocol_version", 0));
+        m_client.SetVersionKey(
+            cfg.GetString("fiesta.version_key", "SDO_FIESTA_NEW_VER_KEY"));
+        m_client.SetSpawnApps(
+            cfg.GetString("fiesta.spawn_apps", ""));
 
         m_client.SetOnEvent([this](const Fiesta::GameEvent& e) {
             BroadcastEvent(e.kindJson);
@@ -233,18 +235,20 @@ protected:
             m_username  = user; m_password  = pass;
             m_client.Connect(host, port, user, pass);
         } else if (op == "select_world") {
-            m_client.SelectWorld((uint32_t)j.value("world_id", 0));
-        } else if (op == "select_char") {
-            m_client.SelectChar((uint32_t)j.value("char_index", 0));
+            m_client.SelectWorld((uint8_t)j.value("world_no", 0));
         } else if (op == "chat") {
-            m_client.Chat(j.value("channel", std::string("normal")),
-                          j.value("text",    std::string("")));
+            m_client.Chat(j.value("text", std::string("")));
+        } else if (op == "shout") {
+            m_client.Shout(j.value("text", std::string("")));
         } else if (op == "move") {
-            m_client.Move((float)j.value("x", 0.0),
-                          (float)j.value("y", 0.0),
-                          (float)j.value("z", 0.0));
+            /* Movement uses ShineEngine SHINE_XY_TYPE — u32 fixed-point
+             * world coords, no Z-axis on the wire.  `run` toggles the
+             * NC_ACT_RUN_REQ vs NC_ACT_WALK_REQ opcode. */
+            m_client.MoveTo((uint32_t)j.value("x", 0),
+                            (uint32_t)j.value("y", 0),
+                            j.value("run", true));
         } else if (op == "attack") {
-            m_client.Attack((uint32_t)j.value("target_id", 0));
+            m_client.Attack((uint16_t)j.value("target_handle", 0));
         } else if (op == "pickup") {
             m_client.Pickup((uint32_t)j.value("item_id", 0));
         } else if (op == "use_item") {

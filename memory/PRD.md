@@ -1124,3 +1124,94 @@ exact Fiesta sprites verbatim.
 ### Delivery
 - Repo: `/app/ElleAnn/Android/`
 - Zip: `/tmp/ElleAnn_Android_v2.2.zip` (396 KB)
+
+
+---
+
+## Fiesta — 3-hop ShineEngine Login (Feb 26, 2026)
+
+### Source intelligence unlocked this session
+- `Login.pdb` / `WorldManager.pdb` / `Account.pdb` / `AccountLog.pdb`
+  (V80, parsed by `llvm-pdbutil-15`).
+- `5ZoneServer2.pdb` (V70, llvm rejects — wrote custom CodeView reader
+  `_re_artifacts/pdb/cv_pdb_dump.py`, 280 LOC, zero deps).
+- CN2012 server EXEs + `Fiesta.exe` client matched by PE timestamps
+  to the Zone PDB.
+
+### Verified bit-exact protocol intel
+- **2 687 opcodes** (PDB enums, zero conflicts cross-PDB).
+- **12 PROTO_NC_* PODs** with `static_assert(sizeof)` guards in
+  `FiestaPacket.h` + runtime `offsetof` checks in `fiesta_smoke.cpp`.
+- **Cipher**: MSVC `rand()` LCG (`mul=0x000343FD`, `add=0x00269EC3`,
+  `(state>>16)&0xFF`) — confirmed at file offset 0x1FE4F4 of
+  `5ZoneServer2.exe`. Self-test verifies first 2 mask bytes for
+  seed=0 match hand-computed reference (0x26 0x27).
+
+### What's wired
+- `FiestaPacket.h` — full opcode table, `#pragma pack(1)` PROTO PODs,
+  `Writer::FixedStr` / `Writer::Str8`, `ToBytes<T>()` template helper.
+- `FiestaCipher.h` — fully rewritten as u16-seeded LCG (was 32-byte
+  XOR placeholder). Per-direction state, `Reset(seed)` API.
+- `FiestaClient.{h,cpp}` — full 3-hop state machine
+  (`LOGIN_CONNECTING → LOGIN_VERSION → LOGIN_AUTH → WORLD_LIST →
+   WM_HANDOFF → WM_AUTH → ZONE_HANDOFF → ZONE_AUTH → IN_GAME`).
+  Each hop uses verified PDB struct layouts; reconnect between hops
+  resets cipher and reopens socket against server-supplied addr+port.
+- `FiestaService.cpp` — IPC dispatch updated for new API
+  (`MoveTo(x:u32, y:u32, run)`, `SelectWorld(u8)`, `Chat`/`Shout`,
+  `SetVersionKey`, `SetSpawnApps`).
+- `CognitiveEngine.cpp` — chat handler now consumes
+  `speaker_handle:u16` (not the old broken `speaker:str`).
+
+### Bugs eliminated (per "Continue with what you were doing" — user)
+- 🔴 Wrong opcode at hop-1: was sending `NC_MAP_LOGIN_REQ` (0x0601,
+  Zone-side) to the Login server. Now sends `NC_USER_LOGIN_REQ`
+  (0x0306) per PDB.
+- 🟠 LOGIN_REQ payload was length-prefixed strings; PDB shows fixed
+  272-byte struct `char[256]+char[16]`.
+- 🟠 SEED_ACK handler treated payload as 32-byte key; PDB shows it's
+  a single u16 seed. The whole cipher class was rebuilt accordingly.
+- 🟠 `Move(x,y,z)` floats: ShineEngine uses u32 fixed-point XY only —
+  no Z axis on the wire.
+- 🟠 CHAT_REQ payload was u16-length-prefixed; PDB shows u8-prefix.
+
+### Known WIP / pending PCAP confirmation
+- `NC_USER_LOGINWORLD_REQ` payload (PDB silent — using WILLLOGIN_REQ
+  shape, accepted by CN2012 zones).
+- `NC_BAT_TARGETING_REQ` / `NC_BAT_HIT_REQ` payloads (BIN-sourced,
+  using `(handle:u16)` shape).
+- Server-broadcast variant of `NC_ACT_CHAT_REQ` (best-effort
+  `[u16 handle][u8 len][text]` probe; flagged 🟡 in source).
+
+### Validation
+- `backend/tests/fiesta_smoke.cpp` — 11 tests, all ✅:
+  cipher roundtrip, cipher disabled passthrough, LCG first-bytes
+  match MSVC rand(), Writer/Reader primitives, u8 string roundtrip,
+  short+long packet framing, encrypt-and-parse roundtrip, sizeof
+  + offsetof of every PROTO_NC_* matches PDB, LOGIN_REQ field
+  positions, WALK_REQ LE serialization, SEED_ACK 2-byte size guard.
+- CI canaries: catch(...) audit pass, raw `Sleep()` audit pass,
+  brace balance unchanged on touched files.
+- Cppcheck: only warning is "unused public API methods" (false
+  positive — they're called via IPC in `FiestaService.cpp`).
+
+### Files touched
+- `ElleAnn/Services/Elle.Service.Fiesta/FiestaPacket.h`     (rewritten)
+- `ElleAnn/Services/Elle.Service.Fiesta/FiestaCipher.h`     (rewritten)
+- `ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.h`     (rewritten)
+- `ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp`   (rewritten)
+- `ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp`  (IPC dispatch)
+- `ElleAnn/Services/Elle.Service.Cognitive/CognitiveEngine.cpp` (chat handler)
+- `backend/tests/fiesta_smoke.cpp`                          (expanded)
+- `_re_artifacts/OPCODES_FROM_PDB.md`                       (updated)
+- `_re_artifacts/cn2012/INVENTORY.md`                       (new)
+- `_re_artifacts/pdb/cv_pdb_dump.py`                        (new)
+- `_re_artifacts/pdb/render_zone_protos.py`                 (new)
+- `_re_artifacts/pdb/parse_pdb_types.py`                    (new)
+
+### Pending (next session)
+- Rebuild on Windows MSBuild — confirm no /WX regressions from the
+  Cipher API rename.
+- PCAPs (still useful for) — confirm chat broadcast frame, Zone
+  combat opcode shapes, NETPACKETHEADER 5-byte tail in WM-bound
+  packets.
