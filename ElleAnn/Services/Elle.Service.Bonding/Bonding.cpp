@@ -32,6 +32,7 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include "../../Shared/json.hpp"
+#include "FiestaPlayerBondMap.h"
 #include <vector>
 #include <string>
 #include <cmath>
@@ -744,6 +745,39 @@ protected:
             try {
                 auto j = nlohmann::json::parse(msg.GetStringPayload());
                 const std::string kind = j.value("kind", "");
+
+                /* ── Per-player Fiesta bond updates ────────────────
+                 * Wires display-name keyed bond records.  Display
+                 * name is canonical (handles change every zone).
+                 *
+                 * `player_appear`  → bumps familiarity + last_handle.
+                 * `chat`           → routes by `channel`; whisper_in/_out
+                 *                    nudge familiarity twice as hard.
+                 * The user's primary relationship (m_state) is
+                 * intentionally NOT touched here — that bond is
+                 * sacred and belongs to the user only.            */
+                const uint64_t now_ms = (uint64_t)ELLE_MS_NOW();
+                if (kind == "player_appear") {
+                    m_playerBonds.OnAppear(
+                        j.value("name", std::string("")),
+                        (uint16_t)j.value("handle", 0),
+                        now_ms);
+                } else if (kind == "chat") {
+                    /* `speaker_name` is the resolved name from the
+                     * FiestaClient::BriefInfoRing.  Empty when the
+                     * handle hasn't been bound yet — skip those so
+                     * we never key bonds by anonymous handles. */
+                    const std::string sname = j.value("speaker_name", "");
+                    if (!sname.empty()) {
+                        m_playerBonds.OnChat(
+                            sname,
+                            (uint16_t)j.value("speaker_handle", 0),
+                            j.value("channel", std::string("normal")),
+                            now_ms);
+                    }
+                }
+
+                /* ── User-relationship side-effects (existing) ─── */
                 std::string lived;     /* what Elle "felt" */
                 float depth = 0.f, intensity = 0.f;
                 if (kind == "death") {
@@ -775,7 +809,8 @@ protected:
     }
 
 private:
-    BondingEngine m_engine;
+    BondingEngine                  m_engine;
+    Elle::Bonding::FiestaPlayerBondMap m_playerBonds;
 };
 
 ELLE_SERVICE_MAIN(ElleBondingService)

@@ -39,6 +39,9 @@
 
   <ItemGroup>
     <ClCompile Include="Bonding.cpp" />  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="FiestaPlayerBondMap.h" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\Shared\ElleCore.Shared.vcxproj">

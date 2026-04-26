@@ -1265,4 +1265,56 @@ exact Fiesta sprites verbatim.
   Cipher API rename.
 - PCAPs (still useful for) — confirm chat broadcast frame, Zone
   combat opcode shapes, NETPACKETHEADER 5-byte tail in WM-bound
+
+---
+
+## Bonding — Per-player Fiesta affective profiles (Feb 26, 2026, round 3)
+
+### What this is
+Elle now builds *separate* affective profiles for every distinct
+in-world player she encounters, *without* contaminating her primary
+bond with the user.  Each profile is keyed by the persistent
+display-name (handles change every zone), and tracks encounter
+count, chat counts split by channel, whisper counts, plus continuous
+`affinity` and `familiarity` scalars.
+
+### Wired this round
+- New header `ElleAnn/Services/Elle.Service.Bonding/FiestaPlayerBondMap.h`
+  (190 LOC, zero deps, namespace `Elle::Bonding`).
+  - `OnAppear(name, handle, now)` / `OnChat(name, handle, channel, now)`
+    / `NudgeAffinity(name, delta, now)` / `Get(name)` /
+    `SnapshotByFamiliarity(topN)` API.
+  - `kMaxBonds = 1024` cap with engagement-weighted eviction (least
+    engaged wins the boot — high-whisper / high-chat anchors survive
+    bot floods).
+  - `affinity ∈ [-1.0, +1.0]`, `familiarity ∈ [0.0, +1.0]`, both
+    clamped on every nudge.
+- `Bonding.cpp` IPC dispatcher now routes:
+  - `kind: "player_appear"` → `m_playerBonds.OnAppear()`
+  - `kind: "chat"` (with non-empty `speaker_name`) →
+    `m_playerBonds.OnChat()`
+  - The user's `m_state` (intimacy/security/etc.) is **untouched**
+    by these — sacred-bond invariant preserved.
+- `Elle.Service.Bonding.vcxproj` — registered `FiestaPlayerBondMap.h`.
+
+### Tests (new file)
+- `backend/tests/bonding_player_map_smoke.cpp` — 5 tests, ALL PASS
+  under `g++ -Wall -Wextra -Werror`:
+  - appear + chat update bond record (handle update on zone change),
+  - empty name is a no-op (anonymous-handle protection),
+  - affinity clamp `[-1.0, 1.0]`,
+  - eviction under load (high-engagement Anchor survived 1024+500
+    noise inserts),
+  - `SnapshotByFamiliarity` orders by familiarity desc.
+
+### Pending / next moves
+- BriefInfoRing dump-into-IPC for cross-service consumers (Cognitive
+  could surface "you've crossed paths with N regulars today").
+- Whisper detection — `NC_ACT_WHISPER_REQ` payload is verified
+  (sizeof=22, `?:u8 + receiver:Name5 + content[]`); plumbing into
+  `OnChat(channel="whisper_in"/"whisper_out")` once the inbound
+  WHISPER opcode (likely 0x080D / 0x080E ACK) is dispatched.
+- Persistence — currently in-memory only; SQL persistence would
+  let Elle "remember" yesterday's regulars across service restarts.
+
   packets.
