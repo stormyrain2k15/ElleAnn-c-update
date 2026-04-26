@@ -495,26 +495,27 @@ protected:
                     auto j = nlohmann::json::parse(msg.GetStringPayload());
                     const std::string kind = j.value("kind", "");
                     if (kind == "chat") {
-                        /* speaker is no longer carried as a raw string —
-                         * see FiestaClient::HandlePacket WIP note.  We
-                         * receive `speaker_handle:u16` and resolve it
-                         * via the BRIEFINFO ring (TODO: wire up).  Until
-                         * then we record the chat with a placeholder
-                         * speaker so the intent ring still works. */
-                        const uint64_t spk = j.value("speaker_handle", 0ULL);
+                        /* `speaker_handle` (u16) comes from the zone
+                         * broadcast envelope; `speaker_name` is its
+                         * resolution via the FiestaClient::BriefInfoRing
+                         * (empty when the handle isn't yet cached).    */
+                        const uint64_t spk     = j.value("speaker_handle", 0ULL);
+                        const std::string name = j.value("speaker_name", "");
                         const std::string text    = j.value("text", "");
                         const std::string channel = j.value("channel", "normal");
                         if (!text.empty()) {
-                            ELLE_DEBUG("FIESTA chat [%s] handle=%llu: %s",
+                            const std::string speaker_label =
+                                !name.empty()
+                                    ? name
+                                    : (std::string("h") +
+                                       std::to_string((unsigned long long)spk));
+                            ELLE_DEBUG("FIESTA chat [%s] %s: %s",
                                        channel.c_str(),
-                                       (unsigned long long)spk, text.c_str());
+                                       speaker_label.c_str(), text.c_str());
                             ELLE_INTENT_RECORD intent{};
                             intent.id = 0;
-                            char hbuf[32];
-                            std::snprintf(hbuf, sizeof(hbuf), "h%llu",
-                                          (unsigned long long)spk);
                             const std::string ctx =
-                                "[fiesta " + channel + " " + hbuf +
+                                "[fiesta " + channel + " " + speaker_label +
                                 "] " + text;
                             strncpy_s(intent.description, ctx.c_str(),
                                       ELLE_MAX_MSG - 1);

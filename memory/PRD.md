@@ -1205,6 +1205,57 @@ exact Fiesta sprites verbatim.
 - `backend/tests/fiesta_smoke.cpp`                          (expanded)
 - `_re_artifacts/OPCODES_FROM_PDB.md`                       (updated)
 - `_re_artifacts/cn2012/INVENTORY.md`                       (new)
+
+---
+
+## Fiesta — BriefInfoRing + verified CHAT layout (Feb 26, 2026, round 2)
+
+### Source intelligence added this round
+- **`Fiesta.pdb`** (client PDB, 43 MB, V80) — pulled via Drive link by user.
+  llvm-pdbutil parses cleanly; **184 308 type records** (vs 24 216 in
+  the server zone PDB). Extraction script is the existing
+  `parse_pdb_types.py`.
+
+### What this PDB unlocked (bit-exact)
+- **`PROTO_NC_ACT_CHAT_REQ`** fieldlist `0x159AB`:
+  `itemLinkDataCount:u8 + len:u8 + content[len]` — replacing the
+  earlier `[u8 len + content]` guess. ShineEngine embeds clickable
+  item-link blocks alongside text; we now match the wire format.
+- **`PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD`** head:
+  `handle:u16 + charid:char[16]` — gives us per-player
+  handle⇆name binding.
+- **`PROTO_NC_BRIEFINFO_BRIEFINFODELETE_CMD`**: `hnd:u16`.
+- **`PROTO_NC_CHAR_BASE_CMD`** head: `chrregnum:u32 + charid:char[16]`.
+
+### Wired this round
+- New header `FiestaBriefInfoRing.h` (zero-deps, platform-portable):
+  `Insert/Remove/Resolve/Clear/Size`, `kMaxEntries=4096` cap,
+  thread-safe via `std::mutex`.
+- `FiestaClient.h` integrates the ring as a member; new dispatchers:
+  `OnLoginCharacter`, `OnBriefInfoDelete`, `OnCharBase`, `OnChatLike`.
+  `Chat()` and `Shout()` outbound now write the verified
+  `[itemLinkDataCount=0][len][content]` shape.
+- `FiestaPacket.h`: `PROTO_NC_ACT_CHAT_REQ_HEAD` POD with
+  `static_assert(sizeof == 2)` guard.
+- `CognitiveEngine.cpp` chat handler reads the new
+  `speaker_name`/`speaker_handle` fields (resolved by the ring) and
+  falls back to a `h0xNNNN` placeholder when the name isn't yet cached.
+- `Elle.Service.Fiesta.vcxproj` updated to include `FiestaBriefInfoRing.h`.
+
+### 🟡 Remaining WIP (clearly labeled in source)
+- `STUB_CHAT_BROADCAST_PARSE` in `FiestaClient::OnChatLike` — the
+  server-broadcast envelope (zone-header wrap vs separate broadcast
+  opcode) probes both shapes and emits `raw_hex` so PCAPs can
+  collapse it to one verified path.
+- `NC_BAT_TARGETING_REQ` payload still BIN-sourced (PDB has only
+  `_REQ` head sizeof — full layout requires another extraction pass).
+
+### Tests
+`backend/tests/fiesta_smoke.cpp` — **14 tests, ALL PASS** under
+`g++ -Wall -Wextra -Werror`:
+* +3 new tests this round: BriefInfoRing lifecycle, memory cap,
+  CHAT_REQ outbound layout check.
+
 - `_re_artifacts/pdb/cv_pdb_dump.py`                        (new)
 - `_re_artifacts/pdb/render_zone_protos.py`                 (new)
 - `_re_artifacts/pdb/parse_pdb_types.py`                    (new)

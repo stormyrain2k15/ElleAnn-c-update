@@ -2,13 +2,14 @@
 
 **Source binaries** (uploaded by user, mixed 2012 + 2016 builds):
 
-| PDB                  | Service role                            | TPI ver | Parser              | Symbols | Dispatchers |
-|----------------------|-----------------------------------------|---------|---------------------|--------:|------------:|
-| `Login.pdb`          | Login server (port 9010)                | V80     | llvm-pdbutil-15     |   4 013 |          50 |
-| `WorldManager.pdb`   | World Manager (port 9013)               | V80     | llvm-pdbutil-15     |   8 885 |         998 |
-| `Account.pdb`        | Account DB proxy (port 9028)            | V80     | llvm-pdbutil-15     |   7 119 |          31 |
-| `AccountLog.pdb`     | Audit / IP-block proxy (port 9029)      | V80     | llvm-pdbutil-15     |   6 655 |          35 |
-| `5ZoneServer2.pdb`   | Zone server (ports 9016/9019/9022/9025) | **V70** | custom (`cv_pdb_dump.py`) | — | 24 216 type records |
+| PDB                  | Size  | TPI ver | Parser              | Symbols | Type records |
+|----------------------|-------|---------|---------------------|--------:|-------------:|
+| `Login.pdb`          | 3.2 M | V80     | llvm-pdbutil-15     |   4 013 |       45 352 |
+| `WorldManager.pdb`   | 1.4 M | V80     | llvm-pdbutil-15     |   8 885 |              |
+| `Account.pdb`        | 4.3 M | V80     | llvm-pdbutil-15     |   7 119 |              |
+| `AccountLog.pdb`     | 4.3 M | V80     | llvm-pdbutil-15     |   6 655 |              |
+| `5ZoneServer2.pdb`   |  14 M | V70     | custom (`cv_pdb_dump.py`) | — |       24 216 |
+| `Fiesta.pdb` (client) |  43 M | V80    | llvm-pdbutil-15    |  11 200 |      184 308 |
 
 > "Fiesta was always one source — region branches just toggled features at compile-time"
 > _-- user._ The 2016 PDBs therefore overlap heavily with the 2007–2014 source we already
@@ -230,15 +231,26 @@ struct NETCOMMAND          { uint16_t protocol; };                    // 2B
 | `NC_ACT_MOVEWALK_CMD`          | `0x0817` | `from:XY + to:XY + moveattr:u8` (17 B)       |
 | `NC_ACT_MOVERUN_CMD`           | `0x0819` | _(not parsed in this build)_                 |
 | `NC_ACT_NPCCLICK_CMD`          | `0x080A` | `npchandle:u16` (2 B)                        |
-| `NC_ACT_CHAT_REQ`              | `0x0801` | `len:u8` + `content[len]`                    |
-| `NC_ACT_SHOUT_CMD`             | `0x081E` | (Zone-only)                                  |
-| `NC_ACT_WHISPER_REQ`           | `0x080C` | (Zone-only)                                  |
+| `NC_ACT_CHAT_REQ`              | `0x0801` | **`itemLinkDataCount:u8 + len:u8 + content[len]`** ⭐ |
+| `NC_ACT_SHOUT_CMD`             | `0x081E` | same shape as CHAT_REQ                       |
+| `NC_ACT_WHISPER_REQ`           | `0x080C` | `?:u8 + receiver:Name5(21B) + content[len]`  |
 | `NC_ACT_JUMP_CMD`              | `0x0824` | (Zone-only)                                  |
+| `NC_BRIEFINFO_LOGINCHARACTER_CMD` | `0x0706` | **`handle:u16 + charid:char[16]` + 203B body** ⭐ |
+| `NC_BRIEFINFO_BRIEFINFODELETE_CMD` | `0x070E` | **`hnd:u16` (2 B)** ⭐                  |
 | `NC_BRIEFINFO_INFORM_CMD`      | `0x0701` | `nMyHnd:u16 + ReceiveNetCommand:u16 + hnd:u16` (6 B) |
 | `NC_BRIEFINFO_REGENMOB_CMD`    | `0x0708` | full mob spawn (124 B incl. animation, flags) |
-| `NC_CHAR_CLIENT_BASE_CMD`      | `0x0438` | (large char-state delta)                     |
+| `NC_CHAR_BASE_CMD`             | `0x0407` | **`chrregnum:u32 + charid:char[16]` + 77B body** ⭐ |
+| `NC_CHAR_LOGIN_ACK`            | `0x0403` | `zoneip:Name4 + zoneport:u16` (18 B)         |
 | `NC_MAP_LOGIN_REQ`             | `0x0601` | `chardata:CHARDATA_REQ + checksum:Name8[120]` (978 B) |
 | `NC_MAP_LOGINCOMPLETE_CMD`     | `0x0603` | `checksumDoorBlock:Name8[4]` (32 B)          |
+
+⭐ = recovered/refined from the **client `Fiesta.pdb`** in the second
+extraction round (TPI v8.0, 184 308 type records). The CHAT layout
+was previously assumed to be `[u8 len + content]` based on the
+zone-server PDB's forward-decl; the client PDB exposes the full
+fieldlist `0x159AB` showing the actual `itemLinkDataCount + len +
+content` shape that ShineEngine uses to embed clickable item-tooltip
+links inside chat lines.
 
 > "This build" = the CN2012 5ZoneServer2.exe; some opcodes have only
 > declarations or are conditionally compiled out of THIS region toggle

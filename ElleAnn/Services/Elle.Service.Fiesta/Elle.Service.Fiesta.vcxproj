@@ -47,6 +47,7 @@
     <ClInclude Include="FiestaPacket.h" />
     <ClInclude Include="FiestaConnection.h" />
     <ClInclude Include="FiestaClient.h" />
+    <ClInclude Include="FiestaBriefInfoRing.h" />
   </ItemGroup>
 
   <ItemGroup>

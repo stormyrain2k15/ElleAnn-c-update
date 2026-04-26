@@ -41,6 +41,7 @@
 #ifndef ELLE_FIESTA_CLIENT_H
 #define ELLE_FIESTA_CLIENT_H
 
+#include "FiestaBriefInfoRing.h"
 #include "FiestaConnection.h"
 #include "FiestaPacket.h"
 
@@ -146,6 +147,11 @@ public:
     /** Send a raw packet — escape hatch for protocol exploration. */
     bool SendRaw(uint16_t opcode, const std::vector<uint8_t>& payload);
 
+    /* ── Inspection ─────────────────────────────────────────────── */
+    /** Read-only access to the handle⇆name ring (e.g. for tests
+     *  or for IPC consumers that want to dump the full table).    */
+    const BriefInfoRing& Ring() const { return m_briefRing; }
+
 private:
     void HandlePacket(const InPacket& pkt);
     void EmitEvent(const std::string& kindJson);
@@ -168,6 +174,12 @@ private:
     void OnWorldSelectAck(const InPacket& pkt);
     void OnWillLoginAck(const InPacket& pkt);
     void OnMapLoginComplete(const InPacket& pkt);
+    /* BRIEFINFO ring updates — handle⇆name maintenance. */
+    void OnLoginCharacter(const InPacket& pkt);
+    void OnBriefInfoDelete(const InPacket& pkt);
+    void OnCharBase(const InPacket& pkt);
+    /* Chat dispatch — 🟡 WIP broadcast envelope shape. */
+    void OnChatLike(const InPacket& pkt);
 
     /* Reconnect to a new host:port (used between hops).  Drops the
      * current socket, resets cipher, opens new socket. */
@@ -190,6 +202,12 @@ private:
 
     /* Last known position for movement deltas. */
     SHINE_XY_TYPE          m_lastPos{0, 0};
+
+    /* Self handle, populated from NC_CHAR_BASE_CMD. */
+    uint16_t               m_selfHandle = 0;
+
+    /* Player handle⇆displayName cache (BriefInfoRing). */
+    BriefInfoRing          m_briefRing;
 
     /* Region-toggle config. */
     std::string            m_versionKey = "SDO_FIESTA_NEW_VER_KEY";

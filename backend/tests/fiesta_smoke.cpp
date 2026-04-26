@@ -1,7 +1,8 @@
 /* Linux smoke test for the portable parts of Elle.Service.Fiesta —
  * Fiesta::Cipher (LCG stream), Fiesta::Writer/Reader (LE primitives),
- * Fiesta::BuildPacket (size-prefix framing), and the PDB-derived
- * PROTO_NC_* PODs (sizeof + offset assertions).
+ * Fiesta::BuildPacket (size-prefix framing), the PDB-derived
+ * PROTO_NC_* PODs (sizeof + offset assertions), and the BriefInfoRing
+ * handle⇆name cache.
  *
  *   The Connection/Client layers depend on <winsock2.h> and only
  *   build on Windows; this file deliberately stops at the wire-format
@@ -14,6 +15,7 @@
  */
 #include "FiestaCipher.h"
 #include "FiestaPacket.h"
+#include "FiestaBriefInfoRing.h"
 
 #include <cassert>
 #include <cstddef>
@@ -188,6 +190,11 @@ static void test_proto_layouts() {
     assert(offsetof(PROTO_NC_ACT_WALK_REQ, to)                ==   8);
     assert(offsetof(SHINE_COORD_TYPE, dir)                    ==   8);
     assert(offsetof(NETPACKETZONEHEADER, charregistnumber)    ==   2);
+    assert(offsetof(PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD_HEAD, handle) == 0);
+    assert(offsetof(PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD_HEAD, charid) == 2);
+    assert(offsetof(PROTO_NC_CHAR_BASE_CMD_HEAD, chrregnum)   ==   0);
+    assert(offsetof(PROTO_NC_CHAR_BASE_CMD_HEAD, charid)      ==   4);
+    assert(sizeof(PROTO_NC_BRIEFINFO_BRIEFINFODELETE_CMD)     ==   2);
     std::printf("[ok] PROTO_NC_* sizeof + offsetof match PDB layouts\n");
 }
 
@@ -233,6 +240,58 @@ static void test_seed_ack_payload_size_guard() {
     std::printf("[ok] SEED_ACK serializes to exactly 2 bytes (LE u16 seed)\n");
 }
 
+static void test_briefinforing_lifecycle() {
+    BriefInfoRing ring;
+    ring.Insert(0x1234, "elle");
+    ring.Insert(0x5678, "ann");
+    assert(ring.Resolve(0x1234) == "elle");
+    assert(ring.Resolve(0x5678) == "ann");
+    assert(ring.Resolve(0x0042).empty());
+
+    /* Update */
+    ring.Insert(0x1234, "elle-ann");
+    assert(ring.Resolve(0x1234) == "elle-ann");
+
+    /* Remove */
+    ring.Remove(0x5678);
+    assert(ring.Resolve(0x5678).empty());
+    assert(ring.Size() == 1);
+
+    /* Clear */
+    ring.Clear();
+    assert(ring.Size() == 0);
+    std::printf("[ok] BriefInfoRing insert/resolve/update/remove/clear\n");
+}
+
+static void test_briefinforing_capped() {
+    /* Hammer the ring with > 4096 distinct handles and confirm
+     * we never blow past kMaxEntries.  This is the griefer-safety
+     * cap referenced in the class docstring. */
+    BriefInfoRing ring;
+    for (uint32_t i = 0; i < 8192; i++) {
+        ring.Insert((uint16_t)(i & 0xFFFF), "x");
+    }
+    assert(ring.Size() <= BriefInfoRing::kMaxEntries);
+    std::printf("[ok] BriefInfoRing memory cap (size=%zu, max=%zu)\n",
+                ring.Size(), BriefInfoRing::kMaxEntries);
+}
+
+static void test_chat_req_outbound_layout() {
+    /* Replicates the exact bytes Client::Chat() now writes:
+     *   [u8 0=itemLinkDataCount][u8 len][bytes]              */
+    std::string text = "hi all";
+    Writer w;
+    w.U8(0);
+    w.U8((uint8_t)text.size());
+    w.Bytes(text.data(), text.size());
+    const auto& bytes = w.Data();
+    assert(bytes.size() == 2 + text.size());
+    assert(bytes[0] == 0);
+    assert(bytes[1] == (uint8_t)text.size());
+    assert(std::memcmp(bytes.data() + 2, text.data(), text.size()) == 0);
+    std::printf("[ok] CHAT_REQ outbound layout = [0][len][text]\n");
+}
+
 int main() {
     test_cipher_roundtrip();
     test_cipher_disabled_is_passthrough();
@@ -248,6 +307,10 @@ int main() {
     test_login_req_serialization();
     test_walk_req_serialization();
     test_seed_ack_payload_size_guard();
+
+    test_briefinforing_lifecycle();
+    test_briefinforing_capped();
+    test_chat_req_outbound_layout();
 
     std::printf("\nfiesta_smoke: ALL PASS\n");
     return 0;

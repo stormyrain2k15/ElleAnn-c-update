@@ -112,6 +112,8 @@ namespace Op {
     constexpr uint16_t NC_LOG_MAP_NOBASE_CMD                     = 0x0384;  /* [BIN] */
 
     /* ── NC_CHAR — character lifecycle / stats ───────────────────── */
+    constexpr uint16_t NC_CHAR_LOGIN_ACK                         = 0x0403;  /* [PDB-V70] */
+    constexpr uint16_t NC_CHAR_BASE_CMD                          = 0x0407;  /* [PDB-V70] my own base info */
     constexpr uint16_t NC_CHAR_CLIENT_BASE_CMD                   = 0x0438;  /* [PDB-V70] base stat delta */
     constexpr uint16_t NC_CHAR_REVIVE_REQ                        = 0x044E;  /* [PDB-V80] */
     constexpr uint16_t NC_CHAR_STAT_INCPOINT_REQ                 = 0x045C;  /* [PDB-V80] */
@@ -135,7 +137,12 @@ namespace Op {
 
     /* ── NC_BRIEFINFO — server-pushed entity-state deltas ────────── */
     constexpr uint16_t NC_BRIEFINFO_INFORM_CMD                   = 0x0701;  /* [PDB-V70] */
+    constexpr uint16_t NC_BRIEFINFO_LOGINCHARACTER_CMD           = 0x0706;  /* [PDB-V70] other player enters view */
+    constexpr uint16_t NC_BRIEFINFO_CHARACTER_CMD                = 0x0707;  /* [PDB-V70] */
     constexpr uint16_t NC_BRIEFINFO_REGENMOB_CMD                 = 0x0708;  /* [PDB-V70] */
+    constexpr uint16_t NC_BRIEFINFO_BRIEFINFODELETE_CMD          = 0x070E;  /* [PDB-V70] entity leaves view */
+    constexpr uint16_t NC_BRIEFINFO_NPC_DISAPPEAR_CMD            = 0x0715;  /* [PDB-V70] */
+    constexpr uint16_t NC_BRIEFINFO_PLAYER_LIST_INFO_APPEAR_CMD  = 0x0716;  /* [PDB-V70] */
 
     /* ── NC_ACT — movement, chat, NPC, gather, emote ─────────────── */
     constexpr uint16_t NC_ACT_CHAT_REQ                           = 0x0801;  /* [PDB-V70] */
@@ -345,6 +352,26 @@ struct PROTO_NC_ACT_NPCCLICK_CMD {
     uint16_t npchandle;
 };
 
+/** PROTO_NC_ACT_CHAT_REQ — chat / shout text payload.
+ *  Source: Fiesta CLIENT PDB struct 0x159AC + fieldlist 0x159AB.
+ *  Total wire size = 2 + len bytes.  The same struct is used for
+ *  both directions; sender identity for broadcasts comes from the
+ *  outer NETPACKETZONEHEADER (when the zone wraps the frame), NOT
+ *  from inside the chat payload.
+ *
+ *  🟡 WIP / PENDING-PROOF: the broadcast envelope (whether the
+ *  zone prepends NETPACKETZONEHEADER or whether sender is implicit
+ *  from a separate `_NORMAL_CHAT_CMD` opcode) is awaiting PCAPs.
+ *  The `STUB_CHAT_BROADCAST_PARSE` site in FiestaClient.cpp probes
+ *  both shapes and surfaces the raw bytes for diagnosis. */
+struct PROTO_NC_ACT_CHAT_REQ_HEAD {
+    uint8_t itemLinkDataCount;
+    uint8_t len;
+    /* trailing `content[len]` bytes follow this fixed head. */
+};
+static_assert(sizeof(PROTO_NC_ACT_CHAT_REQ_HEAD) == 2,
+              "CHAT_REQ head wire-size mismatch");
+
 /** PROTO_NC_BRIEFINFO_INFORM_CMD — zone broadcast trigger.
  *  Source: Zone PDB (sizeof=6). */
 struct PROTO_NC_BRIEFINFO_INFORM_CMD {
@@ -352,6 +379,40 @@ struct PROTO_NC_BRIEFINFO_INFORM_CMD {
     uint16_t ReceiveNetCommand;
     uint16_t hnd;
 };
+
+/** PROTO_NC_BRIEFINFO_BRIEFINFODELETE_CMD — entity removed from view.
+ *  Source: Zone PDB (sizeof=2). */
+struct PROTO_NC_BRIEFINFO_BRIEFINFODELETE_CMD {
+    uint16_t hnd;
+};
+
+/** PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD — other player enters our
+ *  visibility radius.  Carries the handle⇆name binding our ring
+ *  needs to resolve chat speakers.
+ *  Source: Zone PDB struct (sizeof=221).  We only need the head
+ *  fields (handle + charid); the rest is body/equipment shape data
+ *  that varies by region toggle and is handled opaquely. */
+struct PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD_HEAD {
+    uint16_t handle;
+    char     charid[16];   /* Name4 — NUL-padded ASCII */
+    /* trailing 203 bytes: coord, mode, class, shape, polymorph,
+     * emoticon, title, abstate, guild, type, …, sAnimation[32]
+     * — opaque to the ring; read separately on demand. */
+};
+static_assert(sizeof(PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD_HEAD) == 18,
+              "LOGINCHARACTER head wire-size mismatch");
+
+/** PROTO_NC_CHAR_BASE_CMD head — MY OWN base info on Zone enter.
+ *  First fields give us our own (registration#, charid) binding,
+ *  i.e. self-handle.  Source: Zone PDB struct (sizeof=97). */
+struct PROTO_NC_CHAR_BASE_CMD_HEAD {
+    uint32_t chrregnum;
+    char     charid[16];   /* Name4 */
+    /* trailing 77 bytes: slotno, level, xp, stones, hp/sp, fame,
+     * cen, login location, statdistribute, pk fields, flags. */
+};
+static_assert(sizeof(PROTO_NC_CHAR_BASE_CMD_HEAD) == 20,
+              "CHAR_BASE head wire-size mismatch");
 
 /** NETPACKETZONEHEADER — Zone-side per-client frame header used in
  *  some server→client broadcasts (entity handle + char registration #).

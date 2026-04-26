@@ -60,6 +60,130 @@ static std::string ReadStr8(Reader& r) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
+ * BRIEFINFO ring updates — handle⇆name maintenance
+ *──────────────────────────────────────────────────────────────────────────────*/
+void Client::OnLoginCharacter(const InPacket& pkt) {
+    /* PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD head: handle:u16 + charid:char[16].
+     * Trailing 203 bytes are equipment/coord/etc. — opaque to the ring. */
+    if (pkt.payload.size() < sizeof(PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD_HEAD)) {
+        return;
+    }
+    PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD_HEAD head{};
+    std::memcpy(&head, pkt.payload.data(), sizeof(head));
+    char nameBuf[17] = {0};
+    std::memcpy(nameBuf, head.charid, 16);
+    std::string name(nameBuf);
+    while (!name.empty() && name.back() == 0) name.pop_back();
+    m_briefRing.Insert(head.handle, name);
+
+    std::ostringstream o;
+    o << "{\"kind\":\"player_appear\",\"handle\":" << head.handle
+      << ",\"name\":\"" << JsonEsc(name) << "\"}";
+    EmitEvent(o.str());
+}
+
+void Client::OnBriefInfoDelete(const InPacket& pkt) {
+    /* PROTO_NC_BRIEFINFO_BRIEFINFODELETE_CMD: hnd:u16 (sizeof=2). */
+    if (pkt.payload.size() < 2) return;
+    PROTO_NC_BRIEFINFO_BRIEFINFODELETE_CMD del{};
+    std::memcpy(&del, pkt.payload.data(), sizeof(del));
+    m_briefRing.Remove(del.hnd);
+
+    std::ostringstream o;
+    o << "{\"kind\":\"entity_disappear\",\"handle\":" << del.hnd << "}";
+    EmitEvent(o.str());
+}
+
+void Client::OnCharBase(const InPacket& pkt) {
+    /* PROTO_NC_CHAR_BASE_CMD head: chrregnum:u32 + charid:char[16].
+     * This is OUR OWN data; it doesn't carry our entity handle here
+     * (handle is assigned later by zone broadcast).  We surface the
+     * registration number so Cognitive can pin Elle's own identity. */
+    if (pkt.payload.size() < sizeof(PROTO_NC_CHAR_BASE_CMD_HEAD)) return;
+    PROTO_NC_CHAR_BASE_CMD_HEAD head{};
+    std::memcpy(&head, pkt.payload.data(), sizeof(head));
+    char nameBuf[17] = {0};
+    std::memcpy(nameBuf, head.charid, 16);
+    std::string name(nameBuf);
+    while (!name.empty() && name.back() == 0) name.pop_back();
+
+    std::ostringstream o;
+    o << "{\"kind\":\"self_base\",\"chrregnum\":" << head.chrregnum
+      << ",\"charid\":\"" << JsonEsc(name) << "\"}";
+    EmitEvent(o.str());
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Chat dispatch — verified PROTO_NC_ACT_CHAT_REQ layout
+ *──────────────────────────────────────────────────────────────────────────────*/
+void Client::OnChatLike(const InPacket& pkt) {
+    /* Verified PROTO_NC_ACT_CHAT_REQ wire layout (from Fiesta CLIENT
+     * PDB type 0x159AC + fieldlist 0x159AB):
+     *   [0] u8 itemLinkDataCount
+     *   [1] u8 len
+     *   [2] u8 content[len]
+     *
+     * 🟡 STUB_CHAT_BROADCAST_PARSE — sender identification for
+     * server-broadcast chat is NOT in the CHAT_REQ payload itself.
+     * The expected envelope is one of:
+     *   (a) the zone wraps the frame in NETPACKETZONEHEADER (6B
+     *       prefix `clienthandle:u16 + charregistnumber:u32`), then
+     *       the CHAT_REQ payload follows; OR
+     *   (b) the broadcast uses a different opcode whose payload
+     *       carries `[u16 hnd][CHAT_REQ]`.
+     * Both shapes are probed here; on PCAP confirmation this site
+     * collapses to the verified shape. */
+    const char* channel =
+        (pkt.opcode == Op::NC_ACT_SHOUT_CMD) ? "shout" : "normal";
+
+    uint16_t senderHandle = 0;
+    std::string text;
+    bool decoded = false;
+
+    auto tryParseChatReq = [&](const uint8_t* p, size_t n) -> bool {
+        if (n < sizeof(PROTO_NC_ACT_CHAT_REQ_HEAD)) return false;
+        const uint8_t /*itemLinkDataCount = p[0],*/ len = p[1];
+        if ((size_t)len > n - 2) return false;
+        text.assign((const char*)(p + 2), len);
+        return true;
+    };
+
+    /* Shape (a): NETPACKETZONEHEADER (6B) + CHAT_REQ. */
+    if (pkt.payload.size() >= 6 + sizeof(PROTO_NC_ACT_CHAT_REQ_HEAD)) {
+        const uint8_t* p = pkt.payload.data();
+        const uint16_t handle = (uint16_t)(p[0] | (p[1] << 8));
+        if (tryParseChatReq(p + 6, pkt.payload.size() - 6)) {
+            senderHandle = handle;
+            decoded = true;
+        }
+    }
+    /* Shape (b): u16 sender + CHAT_REQ. */
+    if (!decoded && pkt.payload.size() >= 2 + sizeof(PROTO_NC_ACT_CHAT_REQ_HEAD)) {
+        const uint8_t* p = pkt.payload.data();
+        const uint16_t handle = (uint16_t)(p[0] | (p[1] << 8));
+        if (tryParseChatReq(p + 2, pkt.payload.size() - 2)) {
+            senderHandle = handle;
+            decoded = true;
+        }
+    }
+    /* Shape (c): bare CHAT_REQ (our own echo, or client→server). */
+    if (!decoded) {
+        decoded = tryParseChatReq(pkt.payload.data(), pkt.payload.size());
+    }
+
+    /* Resolve speakerHandle → name via the BriefInfoRing. */
+    const std::string speakerName = m_briefRing.Resolve(senderHandle);
+
+    std::ostringstream o;
+    o << "{\"kind\":\"chat\",\"channel\":\"" << channel
+      << "\",\"speaker_handle\":" << senderHandle
+      << ",\"speaker_name\":\"" << JsonEsc(speakerName) << "\""
+      << ",\"text\":\"" << JsonEsc(text) << "\""
+      << ",\"raw_hex\":\"" << ToHex(pkt.payload) << "\"}";
+    EmitEvent(o.str());
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
  * Lifecycle
  *──────────────────────────────────────────────────────────────────────────────*/
 void Client::WireConnectionCallbacks() {
@@ -436,14 +560,25 @@ bool Client::Attack(uint16_t targetHandle) {
 
 bool Client::Chat(const std::string& text) {
     if (GetState() != State::IN_GAME) return false;
-    /* PROTO_NC_ACT_CHAT_REQ = u8 len + content[len].  NOT u16-prefix. */
-    Writer w; w.Str8(text);
+    /* Verified PROTO_NC_ACT_CHAT_REQ outbound layout:
+     *   [u8 itemLinkDataCount=0][u8 len][text bytes]
+     * (No item-link blocks attached for plain text.) */
+    Writer w;
+    w.U8(0);
+    const size_t n = (text.size() > 0xFF) ? 0xFF : text.size();
+    w.U8((uint8_t)n);
+    w.Bytes(text.data(), n);
     return m_conn.Send(Op::NC_ACT_CHAT_REQ, w.Data());
 }
 
 bool Client::Shout(const std::string& text) {
     if (GetState() != State::IN_GAME) return false;
-    Writer w; w.Str8(text);
+    /* Same struct as CHAT_REQ — itemLinkDataCount + len + content. */
+    Writer w;
+    w.U8(0);
+    const size_t n = (text.size() > 0xFF) ? 0xFF : text.size();
+    w.U8((uint8_t)n);
+    w.Bytes(text.data(), n);
     return m_conn.Send(Op::NC_ACT_SHOUT_CMD, w.Data());
 }
 
@@ -530,36 +665,21 @@ void Client::HandlePacket(const InPacket& pkt) {
             break;
         }
 
-        case Op::NC_ACT_CHAT_REQ:
-        case Op::NC_ACT_SHOUT_CMD: {
-            const char* channel =
-                (pkt.opcode == Op::NC_ACT_SHOUT_CMD) ? "shout" : "normal";
-            /* 🟡 WIP: PROTO_NC_ACT_CHAT_REQ in the Zone PDB is the
-             * CLIENT→SERVER struct (just `u8 len + content[len]`).
-             * The server-side BROADCAST variant (which is what we
-             * receive from other players) is not in the recovered
-             * PDB list; convention across known FiestaPS forks is to
-             * prepend `[u16 senderHandle]`.  We probe both layouts:
-             * if the payload is at least 3 bytes we treat the first
-             * 2 as a handle, otherwise we treat the whole body as
-             * the u8-prefixed text. Cognitive resolves the handle
-             * via the BRIEFINFO ring downstream. */
-            Reader r(pkt.payload.data(), pkt.payload.size());
-            uint16_t speakerHandle = 0;
-            std::string text;
-            if (pkt.payload.size() >= 3) {
-                r.U16(speakerHandle);
-                r.Str8(text);
-            } else {
-                r.Str8(text);
-            }
-            std::ostringstream o;
-            o << "{\"kind\":\"chat\",\"channel\":\"" << channel
-              << "\",\"speaker_handle\":" << speakerHandle
-              << ",\"text\":\"" << JsonEsc(text) << "\"}";
-            EmitEvent(o.str());
+        /* ── BRIEFINFO ring updates ─────────────────────────── */
+        case Op::NC_BRIEFINFO_LOGINCHARACTER_CMD:
+            OnLoginCharacter(pkt);
             break;
-        }
+        case Op::NC_BRIEFINFO_BRIEFINFODELETE_CMD:
+            OnBriefInfoDelete(pkt);
+            break;
+        case Op::NC_CHAR_BASE_CMD:
+            OnCharBase(pkt);
+            break;
+
+        case Op::NC_ACT_CHAT_REQ:
+        case Op::NC_ACT_SHOUT_CMD:
+            OnChatLike(pkt);
+            break;
 
         default: {
             /* Unknown opcode: surface as raw for Cognitive to learn. */
