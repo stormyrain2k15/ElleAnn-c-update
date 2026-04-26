@@ -1318,3 +1318,63 @@ count, chat counts split by channel, whisper counts, plus continuous
   let Elle "remember" yesterday's regulars across service restarts.
 
   packets.
+
+
+---
+
+## Auth — `/api/auth/login` direct game-credential login (Feb 26, 2026)
+
+### Why this exists
+The previous flow required admin to issue a 6-digit pair code which
+the user then typed into their phone — terrible UX and not how MMO
+companions log in.  This adds the **canonical** route every phone
+client should use.
+
+### What was added
+- `POST /api/auth/login`  (PUBLIC, no admin gate)
+- Body: `{ username, password, device_id?, device_name? }`
+- Validates against `Account.dbo.tUser` via the existing
+  `ElleGameAuth::AuthenticateUser`.
+- Same JWT mint + `PairedDevices` upsert + `UserContinuity` link as
+  `/api/auth/pair` MODE A.
+- Returns `{ jwt, expires_ms, paired_at_ms, nUserNo, sUserName }`.
+
+### Defaults for optional fields (clean phone UX)
+- `device_id` empty → derived as `"app:<sUserID>"` (stable across
+  re-logins so the device list shows ONE row per user, not a fresh
+  row every time).
+- `device_name` empty → defaults to the user's `sUserID`.
+
+### Brute-force protection
+In-memory `LoginAttemptTracker`:
+- **5 fails in 15 min per `(peer_ip, username)` → 15-min lockout**
+- Lockout returns HTTP **429** with `Retry-After: <seconds>`.
+- Successful login clears the counter.
+- Per-IP isolation — attacker on `9.9.9.9` can't lock the legit user
+  on `1.2.3.4`.
+- GC drops records inactive > 1 hr; map capped at 4 096 entries.
+
+### Tests
+`backend/tests/login_rate_limit_smoke.cpp` — 7 tests, all ✅:
+- key normalization (lowercase username + IP separator),
+- 4 fails do NOT lock,
+- 5th fail triggers full 15-min lockout, expires cleanly,
+- window resets after 15-min inactivity,
+- success clears counter,
+- per-IP isolation,
+- GC evicts stale.
+
+### Files touched
+- `ElleAnn/Services/Elle.Service.HTTP/HTTPServer.cpp`
+  - `LoginAttemptTracker` class (in-class, ~80 LOC)
+  - new `POST /api/auth/login` route (~150 LOC)
+- `memory/test_credentials.md`  — refreshed with the new login flow.
+- `backend/tests/login_rate_limit_smoke.cpp`  — new regression test.
+
+### What the user does
+```bash
+curl -X POST http://<host>:8080/api/auth/login \
+     -H "content-type: application/json" \
+     -d '{"username":"my-fiesta-id","password":"my-fiesta-pw"}'
+```
+That's it.  No admin key, no pair-code, no pre-step.

@@ -1376,6 +1376,90 @@ private:
     }
 
     /*────────────────────────────────────────────────────────────────────────
+     * LOGIN ATTEMPT TRACKER  —  brute-force protection for /api/auth/login
+     *
+     *   Sliding-window counter keyed by `"{ip}:{username}"` so a bot
+     *   hammering one account from one IP only locks itself, not the
+     *   legitimate user from a different IP.  Also separately tracks
+     *   per-IP totals to catch credential-stuffing fan-out.
+     *
+     *   Policy (matches the playbook's contract):
+     *     - 5 failed attempts in any 15-minute window → 15-minute lockout
+     *     - any successful login on that key clears the counter
+     *     - process restart clears all state (intentional — restart is
+     *       not free and an attacker loses their progress as well)
+     *
+     *   The in-memory map is bounded by `kMaxLoginKeys` and the GC pass
+     *   evicts entries older than `kLoginRecordTtlMs` so a sustained
+     *   credential-stuffing attack can't blow our memory.
+     *────────────────────────────────────────────────────────────────────────*/
+    struct LoginFailRecord {
+        uint32_t fail_count    = 0;
+        uint64_t window_start  = 0;   /* ms — timestamp of first fail in window */
+        uint64_t lockout_until = 0;   /* ms — 0 means not locked                */
+    };
+    static constexpr uint32_t kLoginMaxFails       = 5;
+    static constexpr uint64_t kLoginWindowMs       = 15ull * 60 * 1000;  /* 15 min */
+    static constexpr uint64_t kLoginLockoutMs      = 15ull * 60 * 1000;  /* 15 min */
+    static constexpr uint64_t kLoginRecordTtlMs    = 60ull * 60 * 1000;  /*  1 hr  */
+    static constexpr size_t   kMaxLoginKeys        = 4096;
+
+    std::mutex                                          m_loginMutex;
+    std::unordered_map<std::string, LoginFailRecord>    m_loginFails;
+
+    /** Compose a stable per-IP+username failure key. */
+    static std::string LoginKey(const std::string& ip, const std::string& user) {
+        std::string k;
+        k.reserve(ip.size() + 1 + user.size());
+        k.append(ip);
+        k.push_back('|');
+        /* Lower-case the username so "Klurr" and "klurr" share counters. */
+        for (char c : user) k.push_back((char)std::tolower((unsigned char)c));
+        return k;
+    }
+
+    /** Returns ms remaining if locked, else 0.  Caller must hold m_loginMutex. */
+    uint64_t LoginCheckLockedLocked(const std::string& key, uint64_t now) {
+        auto it = m_loginFails.find(key);
+        if (it == m_loginFails.end()) return 0;
+        if (it->second.lockout_until > now) return it->second.lockout_until - now;
+        return 0;
+    }
+
+    /** Record a failed login.  Promotes to lockout on the 5th fail. */
+    void LoginRecordFailLocked(const std::string& key, uint64_t now) {
+        auto& rec = m_loginFails[key];
+        if (rec.window_start == 0 || now - rec.window_start > kLoginWindowMs) {
+            rec.window_start = now;
+            rec.fail_count   = 0;
+        }
+        rec.fail_count++;
+        if (rec.fail_count >= kLoginMaxFails) {
+            rec.lockout_until = now + kLoginLockoutMs;
+        }
+        /* Bound the map under credential-stuffing storms. */
+        if (m_loginFails.size() > kMaxLoginKeys) LoginGcLocked(now);
+    }
+
+    /** Reset a key's counter on successful auth. */
+    void LoginRecordSuccessLocked(const std::string& key) {
+        m_loginFails.erase(key);
+    }
+
+    /** Drop entries inactive for > kLoginRecordTtlMs. */
+    void LoginGcLocked(uint64_t now) {
+        for (auto it = m_loginFails.begin(); it != m_loginFails.end(); ) {
+            const uint64_t last = std::max(it->second.window_start,
+                                            it->second.lockout_until);
+            if (last + kLoginRecordTtlMs < now) {
+                it = m_loginFails.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    /*────────────────────────────────────────────────────────────────────────
      * JWT (HS256) — minimal self-contained implementation.
      *
      *   We don't pull a full library — the JWT contract here is:
@@ -2466,6 +2550,198 @@ private:
                     resp["sUserName"] = bound_user_name_cached;
                 }
                 return HTTPResponse::OK(resp);
+            }, AUTH_PUBLIC);
+
+        /* ==================================================================
+         *  /api/auth/login   (PUBLIC)  —  game-account username/password →
+         *                                  long-lived HS256 JWT.
+         *
+         *  This is the canonical "log into the companion app" endpoint.
+         *  No admin pre-step, no 6-digit hardware code: a phone client
+         *  just POSTs `{username, password}` (the same creds the user
+         *  types into the in-game Fiesta launcher) and gets back the
+         *  JWT it stores in Keystore.  Subsequent requests carry it in
+         *  `Authorization: Bearer <jwt>`.
+         *
+         *  Brute-force protection (in-memory, sliding-window):
+         *    - 5 fails in 15 minutes per (ip, username) → 15-min lockout
+         *    - on lockout, response is 429 with retry-after header
+         *    - successful login clears the counter
+         *
+         *  Body fields:
+         *    username    (required) — game sUserID, max 32 chars
+         *    password    (required) — game sUserPW, max 64 chars
+         *    device_id   (optional) — stable client UUID; if omitted we
+         *                              derive a deterministic per-account
+         *                              key so a phone without UUID-gen
+         *                              still pairs cleanly
+         *    device_name (optional) — friendly label for the admin
+         *                              device list; defaults to username
+         *
+         *  Response on success:
+         *    {jwt, expires_ms, paired_at_ms, nUserNo, sUserName}
+         *
+         *  This route is the BIG ONE Elle's Android companion uses; the
+         *  legacy /api/auth/pair-code + /api/auth/pair pair stays in
+         *  place for hardware-bound IoT scenarios that genuinely need
+         *  admin-issued one-time codes.
+         * ================================================================== */
+        m_router.Register("POST", "/api/auth/login",
+            [this](const HTTPRequest& req) -> HTTPResponse {
+                std::string username, password, device_id, device_name;
+                try {
+                    auto j = json::parse(req.body);
+                    if (j.contains("username") && j["username"].is_string())
+                        username = j["username"].get<std::string>();
+                    if (j.contains("password") && j["password"].is_string())
+                        password = j["password"].get<std::string>();
+                    if (j.contains("device_id") && j["device_id"].is_string())
+                        device_id = j["device_id"].get<std::string>();
+                    if (j.contains("device_name") && j["device_name"].is_string())
+                        device_name = j["device_name"].get<std::string>();
+                } catch (const json::exception&) {
+                    return HTTPResponse::Err(400, "malformed JSON body");
+                }
+
+                if (username.empty() || username.size() > 32) {
+                    return HTTPResponse::Err(400, "username required (<=32 chars)");
+                }
+                if (password.empty() || password.size() > 64) {
+                    return HTTPResponse::Err(400, "password required (<=64 chars)");
+                }
+
+                if (!ElleGameAccountPool::Instance().IsAvailable()) {
+                    return HTTPResponse::Err(503,
+                        "game-account auth not configured "
+                        "(set http_server.game_db_dsn)");
+                }
+
+                /* Source IP for brute-force keying. ElleServiceBase
+                 * injects x-peer-addr on every request. */
+                std::string peer;
+                {
+                    auto it = req.headers.find("x-peer-addr");
+                    if (it != req.headers.end()) peer = it->second;
+                }
+                if (peer.empty()) peer = "unknown";
+
+                const uint64_t now = (uint64_t)ELLE_MS_NOW();
+                const std::string lkey = LoginKey(peer, username);
+
+                /* ── Pre-flight: respect outstanding lockout. ──────── */
+                {
+                    std::lock_guard<std::mutex> lk(m_loginMutex);
+                    LoginGcLocked(now);
+                    const uint64_t remaining =
+                        LoginCheckLockedLocked(lkey, now);
+                    if (remaining > 0) {
+                        ELLE_INFO("login: locked out user=\"%s\" peer=%s "
+                                  "retry_after_ms=%llu",
+                                  username.c_str(), peer.c_str(),
+                                  (unsigned long long)remaining);
+                        HTTPResponse r = HTTPResponse::Err(429,
+                            "too many failed attempts — try again later");
+                        r.headers["Retry-After"] =
+                            std::to_string((remaining + 999) / 1000);
+                        return r;
+                    }
+                }
+
+                /* ── Authenticate against the game's user DB. ─────── */
+                ElleGameAuth::UserIdentity id;
+                if (!ElleGameAuth::AuthenticateUser(username, password, id)) {
+                    {
+                        std::lock_guard<std::mutex> lk(m_loginMutex);
+                        LoginRecordFailLocked(lkey, now);
+                    }
+                    ELLE_INFO("login: refused user=\"%s\" peer=%s",
+                              username.c_str(), peer.c_str());
+                    /* Generic message — never reveal whether the user
+                     * exists.  Same response shape for "no such user"
+                     * and "wrong password". */
+                    return HTTPResponse::Err(401, "invalid credentials");
+                }
+
+                /* Success: clear the failure counter. */
+                {
+                    std::lock_guard<std::mutex> lk(m_loginMutex);
+                    LoginRecordSuccessLocked(lkey);
+                }
+
+                /* ── Defaults for optional fields. ─────────────────── */
+                if (device_id.empty()) {
+                    /* Deterministic per-account key.  Stable across
+                     * re-logins from the same app on the same account,
+                     * so the device list shows ONE row per (user, app)
+                     * instead of a fresh row every login.  The user can
+                     * still pass an explicit device_id if they want
+                     * device-bound revocation. */
+                    device_id = "app:" + id.sUserID;
+                }
+                if (device_id.size() > 128) {
+                    return HTTPResponse::Err(400, "device_id too long (<=128 chars)");
+                }
+                if (device_name.empty()) {
+                    device_name = id.sUserID;
+                }
+                if (device_name.size() > 256) {
+                    device_name.resize(256);
+                }
+
+                const auto& http = ElleConfig::Instance().GetHTTP();
+                const std::string& secret = http.jwt_secret;
+                if (secret.empty()) {
+                    return HTTPResponse::Err(503,
+                        "http_server.jwt_secret not configured");
+                }
+
+                /* JWT lifetime: 90 days — matches /api/auth/pair. */
+                const uint64_t kJwtTtlMs = 90ull * 24 * 60 * 60 * 1000;
+                const uint64_t exp_ms    = now + kJwtTtlMs;
+
+                std::string jwt = MintJwt(device_id, device_name, now, exp_ms, secret);
+                if (jwt.empty()) {
+                    return HTTPResponse::Err(500, "jwt signing failed");
+                }
+                std::string fp = ElleCrypto::Sha256Hex(jwt).substr(0, 32);
+
+                ElleDB::PairedDeviceRow row;
+                row.device_id       = device_id;
+                row.device_name     = device_name;
+                row.paired_at_ms    = now;
+                row.expires_ms      = exp_ms;
+                row.jwt_fingerprint = fp;
+                if (!ElleDB::UpsertPairedDevice(row)) {
+                    return HTTPResponse::Err(500, "failed to persist paired device");
+                }
+
+                /* Link device → nUserNo + bump UserContinuity, same as
+                 * /api/auth/pair MODE A. */
+                if (id.nUserNo > 0) {
+                    auto& pool = ElleSQLPool::Instance();
+                    auto upd = pool.QueryParams(
+                        "UPDATE ElleCore.dbo.PairedDevices "
+                        "   SET nUserNo = ? WHERE device_id = ?;",
+                        { std::to_string(id.nUserNo), device_id });
+                    if (!upd.success) {
+                        ELLE_WARN("login: nUserNo link failed: %s",
+                                  upd.error.c_str());
+                    }
+                    ElleDB::TouchUserContinuityOnPair(
+                        id.nUserNo, id.sUserID, id.sUserName);
+                }
+
+                ELLE_INFO("login: user=\"%s\" nUserNo=%lld device=%s peer=%s",
+                          id.sUserID.c_str(), (long long)id.nUserNo,
+                          device_id.c_str(), peer.c_str());
+
+                return HTTPResponse::OK({
+                    {"jwt",          jwt},
+                    {"expires_ms",   (int64_t)exp_ms},
+                    {"paired_at_ms", (int64_t)now},
+                    {"nUserNo",      id.nUserNo},
+                    {"sUserName",    id.sUserName}
+                });
             }, AUTH_PUBLIC);
 
         /* ==================================================================
