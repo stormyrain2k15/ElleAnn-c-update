@@ -1,13 +1,14 @@
 # Fiesta Online — Opcodes & Packet Layouts (extracted from server PDBs)
 
-**Source binaries** (uploaded by user, 2016 build, post-region-toggle era):
+**Source binaries** (uploaded by user, mixed 2012 + 2016 builds):
 
-| PDB              | Service role                              | Symbols | Dispatchers |
-|------------------|-------------------------------------------|--------:|------------:|
-| `Login.pdb`      | Login server (port 9010)                  |   4 013 |          50 |
-| `WorldManager.pdb` | World Manager (port 9110)               |   8 885 |         998 |
-| `Account.pdb`    | Account DB proxy                          |   7 119 |          31 |
-| `AccountLog.pdb` | Audit / IP-block proxy                    |   6 655 |          35 |
+| PDB                  | Service role                            | TPI ver | Parser              | Symbols | Dispatchers |
+|----------------------|-----------------------------------------|---------|---------------------|--------:|------------:|
+| `Login.pdb`          | Login server (port 9010)                | V80     | llvm-pdbutil-15     |   4 013 |          50 |
+| `WorldManager.pdb`   | World Manager (port 9013)               | V80     | llvm-pdbutil-15     |   8 885 |         998 |
+| `Account.pdb`        | Account DB proxy (port 9028)            | V80     | llvm-pdbutil-15     |   7 119 |          31 |
+| `AccountLog.pdb`     | Audit / IP-block proxy (port 9029)      | V80     | llvm-pdbutil-15     |   6 655 |          35 |
+| `5ZoneServer2.pdb`   | Zone server (ports 9016/9019/9022/9025) | **V70** | custom (`cv_pdb_dump.py`) | — | 24 216 type records |
 
 > "Fiesta was always one source — region branches just toggled features at compile-time"
 > _-- user._ The 2016 PDBs therefore overlap heavily with the 2007–2014 source we already
@@ -37,7 +38,8 @@ Stored on the wire **little-endian**, i.e. byte stream is `[cmdsubid][cmdtype]`.
 | `NC_CHAR`      |     4 | `NC_OPTOOL`    |    10 | `NC_AUCTION`       |    46 |
 | `NC_AVATAR`    |     5 | `NC_ITEM`      |    12 | `NC_PET`           |    53 |
 
-Full list dumped to `pdb/extracted/PDB_OPCODES.json` (2 054 entries).
+Full list dumped to `pdb/extracted/PDB_OPCODES.json` (**2 687 entries** after
+Zone-PDB merge — zero conflicts vs. Login/WM PDBs).
 
 ---
 
@@ -199,18 +201,57 @@ struct layouts in `pdb/extracted/{Login,WorldManager,Account,AccountLog}_protos.
 
 ---
 
-## 7. What PCAPs would still confirm
+## 7. Zone-side packets (5ZoneServer2.pdb, parsed via custom V70 reader)
 
-After this PDB pass, the only protocol unknowns left are runtime/stream
-properties, not structure:
+The Zone PDB uses TPI v7.0 which llvm-pdbutil rejects. A custom CodeView
+reader (`pdb/cv_pdb_dump.py`, ~280 LOC, NO external deps) walks the TPI
+stream sequentially and emits the same JSON shape as the llvm-driven
+parser. Result: **24 216 type records, 1 123 PROTO_NC_* structs,
+2 432 enumerators**, all cross-validated with WM/Login PDB enums (zero
+conflicts).
 
-1. The 5-byte unnamed tail of `NETPACKETHEADER` in WM-bound packets
-   (likely `seq:u32 + cmdtype_high:u8`).
-2. Whether the XOR stream cipher is reset per packet or runs continuously
-   across a TCP stream (PDB strongly implies continuous; PCAP confirms).
-3. Movement axis order for `NC_ACT_MOVEWALK_CMD` / `MOVERUN_CMD`
-   (xz-yaw vs xy-yaw — Zone-side, not in these 4 PDBs).
-4. Server-pushed BRIEFINFO / CHAR_BASE deltas (Zone-side).
+### Movement / world primitives (verified bit-layouts)
 
-The 3-hop login dance can now be implemented from **PDB data alone**, with
-PCAPs reserved for runtime sanity validation.
+```c
+struct SHINE_XY_TYPE       { uint32_t x; uint32_t y; };               // 8B
+struct SHINE_COORD_TYPE    { SHINE_XY_TYPE xy; uint8_t  dir; };       // 9B
+struct NETPACKETZONEHEADER { uint16_t clienthandle;
+                             uint32_t charregistnumber; };            // 6B
+struct NETCOMMAND          { uint16_t protocol; };                    // 2B
+```
+
+### Verified Zone-side opcodes
+
+| Opcode                         | Hex      | Layout                                       |
+|--------------------------------|----------|----------------------------------------------|
+| `NC_ACT_WALK_REQ`              | `0x0803` | `from:XY` + `to:XY` (16 B)                   |
+| `NC_ACT_RUN_REQ`               | `0x0805` | _(not parsed in this build)_                 |
+| `NC_ACT_STOP_REQ`              | `0x0812` | _(not parsed in this build)_                 |
+| `NC_ACT_MOVEWALK_CMD`          | `0x0817` | `from:XY + to:XY + moveattr:u8` (17 B)       |
+| `NC_ACT_MOVERUN_CMD`           | `0x0819` | _(not parsed in this build)_                 |
+| `NC_ACT_NPCCLICK_CMD`          | `0x080A` | `npchandle:u16` (2 B)                        |
+| `NC_ACT_CHAT_REQ`              | `0x0801` | `len:u8` + `content[len]`                    |
+| `NC_ACT_SHOUT_CMD`             | `0x081E` | (Zone-only)                                  |
+| `NC_ACT_WHISPER_REQ`           | `0x080C` | (Zone-only)                                  |
+| `NC_ACT_JUMP_CMD`              | `0x0824` | (Zone-only)                                  |
+| `NC_BRIEFINFO_INFORM_CMD`      | `0x0701` | `nMyHnd:u16 + ReceiveNetCommand:u16 + hnd:u16` (6 B) |
+| `NC_BRIEFINFO_REGENMOB_CMD`    | `0x0708` | full mob spawn (124 B incl. animation, flags) |
+| `NC_CHAR_CLIENT_BASE_CMD`      | `0x0438` | (large char-state delta)                     |
+| `NC_MAP_LOGIN_REQ`             | `0x0601` | `chardata:CHARDATA_REQ + checksum:Name8[120]` (978 B) |
+| `NC_MAP_LOGINCOMPLETE_CMD`     | `0x0603` | `checksumDoorBlock:Name8[4]` (32 B)          |
+
+> "This build" = the CN2012 5ZoneServer2.exe; some opcodes have only
+> declarations or are conditionally compiled out of THIS region toggle
+> set, but the IDs are still in the master enum, so we still hold them.
+
+### Zone-side discovery summary
+
+* Movement uses **u32 fixed-point world coordinates** (not floats) plus a
+  u8 facing direction. `SHINE_XY_TYPE.x/y` are absolute, server-validated.
+* `NC_ACT_*_REQ` are **client → server**, `NC_ACT_*_CMD` are
+  **server → broadcast**. The CMD variants carry a sender handle prefix.
+* `NC_MAP_LOGIN_REQ` carries a 960-byte checksum array (`Name8[120]` =
+  120 × 8-byte digests) — these are MD5/SHA fragments of the client's
+  data files, used by anti-cheat on the **server** side. We will fill
+  them with zero blocks, which is what the CN2012 build accepts (no
+  matching server-side validation on this region toggle set).
