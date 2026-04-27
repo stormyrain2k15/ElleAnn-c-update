@@ -22,7 +22,16 @@
  *                                   0xFF       → length is the next u16 LE
  *       [u16 LE  payloadLen]        (only when sizeFlag == 0xFF)
  *       ┌─ cipher boundary ──────────────────────────────────────────┐
- *       │ [u16 LE  opcode]                                            │
+ *       │ [u8  cmdtype]   ─┐  this is NOT a u16 — it is the          │
+ *       │ [u8  command]    ┘  on-wire image of NETCOMMAND { BYTE     │
+ *       │                     department; BYTE command; }, struct-  │
+ *       │                     order (department first).  Verified    │
+ *       │                     against MainApp.cpp send-pump where    │
+ *       │                     `pkWorld->AddNetMsg(&netcmd,           │
+ *       │                     sizeof(netcmd))` emits the 2 bytes     │
+ *       │                     in declared order.  Storing the opcode │
+ *       │                     in a u16 constant as (cmdtype<<8)|sub  │
+ *       │                     is purely a host-side convenience.     │
  *       │ [bytes]  payload                                            │
  *       └─────────────────────────────────────────────────────────────┘
  *
@@ -446,6 +455,12 @@ class Writer {
 public:
     void U8(uint8_t v)   { m_buf.push_back(v); }
     void U16(uint16_t v) { m_buf.push_back((uint8_t)(v & 0xFF)); m_buf.push_back((uint8_t)(v >> 8)); }
+    /** Routing handle (SHINE_HANDLE_NUMBER = WORD, little-endian). Used
+     *  inside payloads for WM-bound packets that target a specific
+     *  entity (see MainApp.cpp exception reporter — handle is body
+     *  data, not framing). Functionally identical to U16; named for
+     *  intent. */
+    void Handle(uint16_t h) { U16(h); }
     void U32(uint32_t v) {
         for (int i = 0; i < 4; i++) m_buf.push_back((uint8_t)((v >> (i * 8)) & 0xFF));
     }
@@ -523,6 +538,11 @@ private:
  *   (i.e. on opcode || payload) before transmitting.  The size
  *   prefix itself stays cleartext because the receiver must read
  *   it to know how many bytes to feed into its decryptor.
+ *
+ *   ⚠ Opcode byte order: NETCOMMAND is { BYTE department; BYTE command; }
+ *   emitted in struct order. The host-side u16 constant packs them
+ *   as (department << 8) | command (e.g. 0x0207 = NC_MISC,SEED_ACK
+ *   → wire bytes [0x02][0x07]). This is NOT a little-endian u16.
  *──────────────────────────────────────────────────────────────────────────────*/
 inline std::vector<uint8_t> BuildPacket(uint16_t opcode,
                                          const std::vector<uint8_t>& payload) {
@@ -537,8 +557,9 @@ inline std::vector<uint8_t> BuildPacket(uint16_t opcode,
         out.push_back((uint8_t)(bodyLen & 0xFF));
         out.push_back((uint8_t)((bodyLen >> 8) & 0xFF));
     }
-    out.push_back((uint8_t)(opcode & 0xFF));
-    out.push_back((uint8_t)(opcode >> 8));
+    /* department (cmdtype) goes first on the wire, then command (subid). */
+    out.push_back((uint8_t)((opcode >> 8) & 0xFF));   /* department */
+    out.push_back((uint8_t)(opcode & 0xFF));          /* command    */
     out.insert(out.end(), payload.begin(), payload.end());
     return out;
 }

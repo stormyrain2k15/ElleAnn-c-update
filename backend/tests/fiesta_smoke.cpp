@@ -113,12 +113,17 @@ static void test_str8_roundtrip() {
 /* ─── Packet framing ──────────────────────────────────────────── */
 
 static void test_build_short_and_long_packet() {
+    /* Opcode 0x2010 → cmdtype=0x20, subid=0x10.
+     * Wire MUST be [size][0x20][0x10][...payload], i.e. department
+     * first, command second. NOT little-endian uint16. This is the
+     * fix for the byte-swap blocker: AddNetMsg(&NETCOMMAND, 2)
+     * emits dept then cmd in struct order. */
     std::vector<uint8_t> shortPayload{ 1, 2, 3 };
     auto wire = BuildPacket(0x2010, shortPayload);
     assert(wire.size() == 1 + 2 + 3);
     assert(wire[0] == 5);
-    assert(wire[1] == 0x10);
-    assert(wire[2] == 0x20);
+    assert(wire[1] == 0x20);   /* department / cmdtype */
+    assert(wire[2] == 0x10);   /* command    / subid   */
     assert(wire[3] == 1 && wire[4] == 2 && wire[5] == 3);
 
     std::vector<uint8_t> longPayload(300, 0x42);
@@ -127,9 +132,9 @@ static void test_build_short_and_long_packet() {
     const size_t bodyLen = (size_t)wireLong[1] | ((size_t)wireLong[2] << 8);
     assert(bodyLen == 2 + 300);
     assert(wireLong.size() == 3 + bodyLen);
-    assert(wireLong[3] == 0x10);
-    assert(wireLong[4] == 0x22);
-    std::printf("[ok] build packet (short + long framing)\n");
+    assert(wireLong[3] == 0x22);   /* department */
+    assert(wireLong[4] == 0x10);   /* command    */
+    std::printf("[ok] build packet (short + long framing, dept-first byte order)\n");
 }
 
 static void test_round_trip_through_cipher() {
@@ -152,11 +157,37 @@ static void test_round_trip_through_cipher() {
     assert(wire.size() == hdr + bodyLen);
     std::vector<uint8_t> body(wire.begin() + hdr, wire.begin() + hdr + bodyLen);
     rx.DecryptIn(body);
-    uint16_t opcode = (uint16_t)(body[0] | (body[1] << 8));
+    /* Opcode parse must mirror the build: dept = body[0], cmd = body[1],
+     * packed as (dept << 8) | cmd to match Op::NC_* constants. */
+    uint16_t opcode = (uint16_t)((body[0] << 8) | body[1]);
     std::vector<uint8_t> recoveredPayload(body.begin() + 2, body.end());
     assert(opcode == 0x2210);
     assert(recoveredPayload == payload);
     std::printf("[ok] full encrypt-and-parse round trip\n");
+}
+
+/* Regression guard: NETCOMMAND struct memcpy MUST equal what
+ * BuildPacket writes for the opcode bytes. This is the bit of
+ * MainApp.cpp evidence (`pkWorld->AddNetMsg(&netcmd, sizeof(netcmd))`)
+ * captured as a permanent test. If anyone "fixes" the byte order
+ * back to LE u16, this fails. */
+static void test_netcommand_struct_matches_buildpacket() {
+#pragma pack(push, 1)
+    struct NETCOMMAND { uint8_t department; uint8_t command; };
+#pragma pack(pop)
+    static_assert(sizeof(NETCOMMAND) == 2, "NETCOMMAND must be 2 bytes");
+
+    NETCOMMAND nc{ 0x02, 0x07 };           /* NC_MISC, SEED_ACK */
+    uint8_t structBytes[2];
+    std::memcpy(structBytes, &nc, sizeof(nc));
+
+    auto wire = BuildPacket(0x0207, /*payload=*/{});
+    /* wire = [size=2][dept][cmd] — the two opcode bytes start at index 1 */
+    assert(wire.size() == 3);
+    assert(wire[0] == 2);
+    assert(wire[1] == structBytes[0]);     /* 0x02 */
+    assert(wire[2] == structBytes[1]);     /* 0x07 */
+    std::printf("[ok] BuildPacket opcode bytes == NETCOMMAND struct memcpy\n");
 }
 
 /* ─── PROTO_NC_* layout assertions (PDB cross-check) ──────────── */
@@ -302,6 +333,7 @@ int main() {
 
     test_build_short_and_long_packet();
     test_round_trip_through_cipher();
+    test_netcommand_struct_matches_buildpacket();
 
     test_proto_layouts();
     test_login_req_serialization();

@@ -176,7 +176,10 @@ private:
                 m_cipher.DecryptIn(body);
 
                 InPacket pkt;
-                pkt.opcode  = (uint16_t)(body[0] | (body[1] << 8));
+                /* Opcode is [u8 cmdtype/department][u8 command/subid].
+                 * Pack into a host-side u16 as (dept << 8) | cmd to
+                 * match the Op::NC_* constant convention. */
+                pkt.opcode  = (uint16_t)((body[0] << 8) | body[1]);
                 pkt.payload.assign(body.begin() + 2, body.end());
 
                 if (m_onPacket) m_onPacket(pkt);
