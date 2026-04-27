@@ -240,6 +240,11 @@ protected:
             m_client.Chat(j.value("text", std::string("")));
         } else if (op == "shout") {
             m_client.Shout(j.value("text", std::string("")));
+        } else if (op == "whisper") {
+            m_client.Whisper(j.value("recipient", std::string("")),
+                             j.value("text", std::string("")));
+        } else if (op == "emote") {
+            m_client.Emote((uint16_t)j.value("emote_id", 0));
         } else if (op == "move") {
             /* Movement uses ShineEngine SHINE_XY_TYPE — u32 fixed-point
              * world coords, no Z-axis on the wire.  `run` toggles the
@@ -247,14 +252,40 @@ protected:
             m_client.MoveTo((uint32_t)j.value("x", 0),
                             (uint32_t)j.value("y", 0),
                             j.value("run", true));
+        } else if (op == "stop") {
+            m_client.Stop((uint32_t)j.value("x", 0),
+                          (uint32_t)j.value("y", 0));
+        } else if (op == "jump") {
+            m_client.Jump();
+        } else if (op == "npc_click") {
+            m_client.NpcClick((uint16_t)j.value("npc_handle", 0));
+        } else if (op == "target") {
+            m_client.Target((uint16_t)j.value("target_handle", 0));
+        } else if (op == "untarget") {
+            m_client.Untarget((uint16_t)j.value("target_handle", 0));
+        } else if (op == "hit") {
+            m_client.Hit((uint16_t)j.value("target_handle", 0));
+        } else if (op == "smash") {
+            m_client.Smash((uint16_t)j.value("target_handle", 0));
         } else if (op == "attack") {
             m_client.Attack((uint16_t)j.value("target_handle", 0));
+        } else if (op == "skill_cast") {
+            m_client.SkillCast((uint16_t)j.value("skill_id", 0),
+                               (uint16_t)j.value("target_handle", 0));
+        } else if (op == "skill_cast_abort") {
+            m_client.SkillCastAbort();
+        } else if (op == "assist") {
+            m_client.Assist((uint16_t)j.value("partner_handle", 0));
         } else if (op == "pickup") {
             m_client.Pickup((uint32_t)j.value("item_id", 0));
         } else if (op == "use_item") {
             m_client.UseItem((uint32_t)j.value("slot", 0));
         } else if (op == "respawn") {
             m_client.Respawn();
+        } else if (op == "logout") {
+            m_client.Logout();
+        } else if (op == "heartbeat") {
+            m_client.Heartbeat();
         } else if (op == "raw") {
             const std::string opcStr = j.value("opcode", std::string(""));
             const uint16_t opcode =

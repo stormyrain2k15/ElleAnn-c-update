@@ -750,14 +750,15 @@ protected:
                  * Wires display-name keyed bond records.  Display
                  * name is canonical (handles change every zone).
                  *
-                 * `player_appear`  → bumps familiarity + last_handle.
+                 * `player_appear` / `player_update` → bumps familiarity
+                 *                    + last_handle.
                  * `chat`           → routes by `channel`; whisper_in/_out
                  *                    nudge familiarity twice as hard.
                  * The user's primary relationship (m_state) is
                  * intentionally NOT touched here — that bond is
                  * sacred and belongs to the user only.            */
                 const uint64_t now_ms = (uint64_t)ELLE_MS_NOW();
-                if (kind == "player_appear") {
+                if (kind == "player_appear" || kind == "player_update") {
                     m_playerBonds.OnAppear(
                         j.value("name", std::string("")),
                         (uint16_t)j.value("handle", 0),
@@ -789,10 +790,18 @@ protected:
                 } else if (kind == "pk") {
                     lived     = "Elle was killed by a hostile player.";
                     depth     = 0.5f; intensity = 0.6f;
-                } else if (kind == "chat" &&
-                           j.value("channel", "") == "whisper") {
-                    lived     = "A private whisper passed between them.";
-                    depth     = 0.5f; intensity = 0.4f;
+                } else if (kind == "chat") {
+                    /* Whispers (in either direction) are Elle's
+                     * private intimate channel — they nudge the user
+                     * relationship more than open chat.            */
+                    const std::string ch = j.value("channel", "");
+                    if (ch == "whisper_in") {
+                        lived     = "A private whisper from her person reached her.";
+                        depth     = 0.5f; intensity = 0.4f;
+                    } else if (ch == "whisper_out") {
+                        lived     = "Elle whispered back, choosing intimacy over the open channel.";
+                        depth     = 0.4f; intensity = 0.3f;
+                    }
                 }
                 if (depth > 0.f) {
                     m_engine.ProcessInteraction("[in-game]", lived,

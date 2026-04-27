@@ -53,7 +53,7 @@ static std::string ToHex(const std::vector<uint8_t>& bytes) {
 }
 
 /* Read u8-prefixed string (used by chat/shout). */
-static std::string ReadStr8(Reader& r) {
+[[maybe_unused]] static std::string ReadStr8(Reader& r) {
     std::string s;
     r.Str8(s);
     return s;
@@ -91,6 +91,74 @@ void Client::OnBriefInfoDelete(const InPacket& pkt) {
 
     std::ostringstream o;
     o << "{\"kind\":\"entity_disappear\",\"handle\":" << del.hnd << "}";
+    EmitEvent(o.str());
+}
+
+void Client::OnRegenMob(const InPacket& pkt) {
+    /* PROTO_NC_BRIEFINFO_REGENMOB_CMD head: handle:u16 + mob_id:u16.
+     * Trailing bytes carry coord/mode/abstate, opaque to the ring. */
+    if (pkt.payload.size() < sizeof(PROTO_NC_BRIEFINFO_REGENMOB_CMD_HEAD)) return;
+    PROTO_NC_BRIEFINFO_REGENMOB_CMD_HEAD head{};
+    std::memcpy(&head, pkt.payload.data(), sizeof(head));
+    /* Mobs don't carry a display name in REGENMOB — we keep them out
+     * of the player ring (they're handle-only) and surface as an
+     * event for Cognitive's spatial model. */
+    std::ostringstream o;
+    o << "{\"kind\":\"mob_appear\",\"handle\":" << head.handle
+      << ",\"mob_id\":" << head.mob_id << "}";
+    EmitEvent(o.str());
+}
+
+void Client::OnNpcDisappear(const InPacket& pkt) {
+    if (pkt.payload.size() < 2) return;
+    PROTO_NC_BRIEFINFO_NPC_DISAPPEAR_CMD del{};
+    std::memcpy(&del, pkt.payload.data(), sizeof(del));
+    m_briefRing.Remove(del.handle);
+    std::ostringstream o;
+    o << "{\"kind\":\"npc_disappear\",\"handle\":" << del.handle << "}";
+    EmitEvent(o.str());
+}
+
+void Client::OnBriefCharacter(const InPacket& pkt) {
+    /* NC_BRIEFINFO_CHARACTER_CMD — equivalent to LOGINCHARACTER for
+     * a player already in our zone (mid-session re-broadcast e.g.
+     * after a region toggle).  Same head shape. */
+    if (pkt.payload.size() < sizeof(PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD_HEAD)) return;
+    PROTO_NC_BRIEFINFO_LOGINCHARACTER_CMD_HEAD head{};
+    std::memcpy(&head, pkt.payload.data(), sizeof(head));
+    char nameBuf[17] = {0};
+    std::memcpy(nameBuf, head.charid, 16);
+    std::string name(nameBuf);
+    while (!name.empty() && name.back() == 0) name.pop_back();
+    m_briefRing.Insert(head.handle, name);
+
+    std::ostringstream o;
+    o << "{\"kind\":\"player_update\",\"handle\":" << head.handle
+      << ",\"name\":\"" << JsonEsc(name) << "\"}";
+    EmitEvent(o.str());
+}
+
+void Client::OnPlayerListAppear(const InPacket& pkt) {
+    /* NC_BRIEFINFO_PLAYER_LIST_INFO_APPEAR_CMD — bulk roster broadcast
+     * sent by the zone on first enter. Layout per PDB-V70:
+     *   [u8 count][ {u16 handle, char[16] charid} × count ].
+     * We feed each into the ring so subsequent chats resolve.       */
+    Reader r(pkt.payload.data(), pkt.payload.size());
+    uint8_t count = 0;
+    if (!r.U8(count)) return;
+    int parsed = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        uint16_t handle = 0;
+        char     charid[16] = {0};
+        if (!r.U16(handle)) break;
+        if (!r.Bytes(charid, sizeof(charid))) break;
+        std::string name(charid, sizeof(charid));
+        while (!name.empty() && name.back() == 0) name.pop_back();
+        if (!name.empty()) m_briefRing.Insert(handle, name);
+        parsed++;
+    }
+    std::ostringstream o;
+    o << "{\"kind\":\"player_list\",\"count\":" << parsed << "}";
     EmitEvent(o.str());
 }
 
@@ -183,6 +251,38 @@ void Client::OnChatLike(const InPacket& pkt) {
     EmitEvent(o.str());
 }
 
+void Client::OnWhisper(const InPacket& pkt) {
+    /* PROTO_NC_ACT_WHISPER_REQ in the S→C direction:
+     *   [char[16] sender (NUL-pad)][u8 itemLinkDataCount][u8 len][text]
+     * The 16-byte sender slot is the speaker's display name — we do
+     * NOT need the BriefInfoRing for whispers (the name is right
+     * there in the payload). This is canonical evidence that the
+     * BriefInfoRing-based shape (a/b) above is purely a chat-channel
+     * concern, not a whisper concern. */
+    if (pkt.payload.size() < sizeof(PROTO_NC_ACT_WHISPER_REQ_HEAD)) return;
+    PROTO_NC_ACT_WHISPER_REQ_HEAD head{};
+    std::memcpy(&head, pkt.payload.data(), sizeof(head));
+
+    char nameBuf[17] = {0};
+    std::memcpy(nameBuf, head.handle, 16);
+    std::string sender(nameBuf);
+    while (!sender.empty() && sender.back() == 0) sender.pop_back();
+
+    const size_t want = sizeof(head) + head.len;
+    std::string text;
+    if (pkt.payload.size() >= want) {
+        text.assign((const char*)(pkt.payload.data() + sizeof(head)),
+                    head.len);
+    }
+
+    std::ostringstream o;
+    o << "{\"kind\":\"chat\",\"channel\":\"whisper_in\""
+      << ",\"speaker_handle\":0"
+      << ",\"speaker_name\":\"" << JsonEsc(sender) << "\""
+      << ",\"text\":\"" << JsonEsc(text) << "\"}";
+    EmitEvent(o.str());
+}
+
 /*──────────────────────────────────────────────────────────────────────────────
  * Lifecycle
  *──────────────────────────────────────────────────────────────────────────────*/
@@ -222,6 +322,7 @@ bool Client::Connect(const std::string& loginHost, uint16_t loginPort,
 }
 
 void Client::Disconnect(const std::string& why) {
+    StopHeartbeat();
     m_conn.Disconnect(why);
     SetState(State::DISCONNECTED);
 }
@@ -486,6 +587,9 @@ void Client::OnMapLoginComplete(const InPacket& pkt) {
      * Payload is 32-byte doorblock checksum which we don't verify. */
     (void)pkt;
     SetState(State::IN_GAME);
+    /* Start the keepalive thread now that we're past the auth chain.
+     * Idempotent — safe even if a re-Connect fires this twice. */
+    StartHeartbeat();
     EmitEvent("{\"kind\":\"in_game\"}");
 }
 
@@ -546,18 +650,85 @@ bool Client::MoveTo(uint32_t toX, uint32_t toY, bool run) {
                        ToBytes(req));
 }
 
-bool Client::Attack(uint16_t targetHandle) {
+bool Client::Stop(uint32_t atX, uint32_t atY) {
     if (GetState() != State::IN_GAME) return false;
-    /* NC_BAT_TARGETING_REQ payload not in PDB-V70 extracts; until we
-     * confirm, we send the canonical (handle:u16) shape that the
-     * Zone .udd file documents.  The matching follow-up HIT_REQ uses
-     * the same handle. */
-    Writer t; t.U16(targetHandle);
-    if (!m_conn.Send(Op::NC_BAT_TARGETING_REQ, t.Data())) return false;
-    Writer h; h.U16(targetHandle);
-    return m_conn.Send(Op::NC_BAT_HIT_REQ, h.Data());
+    /* PROTO_NC_ACT_STOP_REQ payload: SHINE_XY_TYPE (8B). The server
+     * uses this to authoritatively pin where we stopped — important
+     * for bot-detection dampening on private servers that ban for
+     * "teleporting" stop-points. */
+    SHINE_XY_TYPE xy{ atX, atY };
+    m_lastPos = xy;
+    return m_conn.Send(Op::NC_ACT_STOP_REQ, ToBytes(xy));
 }
 
+bool Client::Jump() {
+    if (GetState() != State::IN_GAME) return false;
+    /* NC_ACT_JUMP_CMD has no payload — the zone server records the
+     * jump and broadcasts it. */
+    return m_conn.Send(Op::NC_ACT_JUMP_CMD, {});
+}
+
+bool Client::NpcClick(uint16_t npcHandle) {
+    if (GetState() != State::IN_GAME) return false;
+    PROTO_NC_ACT_NPCCLICK_CMD req{};
+    req.npchandle = npcHandle;
+    return m_conn.Send(Op::NC_ACT_NPCCLICK_CMD, ToBytes(req));
+}
+
+/*── Combat ──────────────────────────────────────────────────────*/
+bool Client::Target(uint16_t targetHandle) {
+    if (GetState() != State::IN_GAME) return false;
+    PROTO_NC_BAT_TARGETING_REQ r{}; r.target_handle = targetHandle;
+    return m_conn.Send(Op::NC_BAT_TARGETING_REQ, ToBytes(r));
+}
+
+bool Client::Untarget(uint16_t targetHandle) {
+    if (GetState() != State::IN_GAME) return false;
+    PROTO_NC_BAT_TARGETING_REQ r{}; r.target_handle = targetHandle;
+    return m_conn.Send(Op::NC_BAT_UNTARGET_REQ, ToBytes(r));
+}
+
+bool Client::Hit(uint16_t targetHandle) {
+    if (GetState() != State::IN_GAME) return false;
+    PROTO_NC_BAT_HIT_REQ r{}; r.target_handle = targetHandle;
+    return m_conn.Send(Op::NC_BAT_HIT_REQ, ToBytes(r));
+}
+
+bool Client::Smash(uint16_t targetHandle) {
+    if (GetState() != State::IN_GAME) return false;
+    PROTO_NC_BAT_HIT_REQ r{}; r.target_handle = targetHandle;
+    return m_conn.Send(Op::NC_BAT_SMASH_REQ, ToBytes(r));
+}
+
+bool Client::Attack(uint16_t targetHandle) {
+    /* Canonical "engage in melee" sequence: Target then Hit. The
+     * server validates that HIT_REQ.target matches the most-recent
+     * TARGETING_REQ.target — issuing them back-to-back from the
+     * same thread keeps that invariant trivially. */
+    if (!Target(targetHandle)) return false;
+    return Hit(targetHandle);
+}
+
+bool Client::SkillCast(uint16_t skillId, uint16_t targetHandle) {
+    if (GetState() != State::IN_GAME) return false;
+    PROTO_NC_BAT_SKILLCAST_REQ r{};
+    r.skill_id      = skillId;
+    r.target_handle = targetHandle;
+    return m_conn.Send(Op::NC_BAT_SKILLCAST_REQ, ToBytes(r));
+}
+
+bool Client::SkillCastAbort() {
+    if (GetState() != State::IN_GAME) return false;
+    return m_conn.Send(Op::NC_BAT_SKILLCASTABORT_CMD, {});
+}
+
+bool Client::Assist(uint16_t partnerHandle) {
+    if (GetState() != State::IN_GAME) return false;
+    PROTO_NC_BAT_TARGETING_REQ r{}; r.target_handle = partnerHandle;
+    return m_conn.Send(Op::NC_BAT_ASSIST_REQ, ToBytes(r));
+}
+
+/*── Social ──────────────────────────────────────────────────────*/
 bool Client::Chat(const std::string& text) {
     if (GetState() != State::IN_GAME) return false;
     /* Verified PROTO_NC_ACT_CHAT_REQ outbound layout:
@@ -582,6 +753,40 @@ bool Client::Shout(const std::string& text) {
     return m_conn.Send(Op::NC_ACT_SHOUT_CMD, w.Data());
 }
 
+bool Client::Whisper(const std::string& recipient, const std::string& text) {
+    if (GetState() != State::IN_GAME) return false;
+    /* PROTO_NC_ACT_WHISPER_REQ outbound layout:
+     *   [char[16] recipient (NUL-pad)][u8 itemLinkDataCount=0]
+     *   [u8 len][text bytes].
+     * Recipient must be the canonical character display name (Name4).
+     * Server resolves it to a handle internally. */
+    Writer w;
+    w.FixedStr(recipient, 16);
+    w.U8(0);
+    const size_t n = (text.size() > 0xFF) ? 0xFF : text.size();
+    w.U8((uint8_t)n);
+    w.Bytes(text.data(), n);
+    /* Emit a local `whisper_out` event so Bonding/Cognitive can
+     * record outbound whisper without waiting for server echo
+     * (echoes are not guaranteed on private CN builds).            */
+    {
+        std::ostringstream o;
+        o << "{\"kind\":\"chat\",\"channel\":\"whisper_out\""
+          << ",\"speaker_handle\":" << m_selfHandle
+          << ",\"speaker_name\":\"" << JsonEsc(recipient) << "\""
+          << ",\"text\":\"" << JsonEsc(text) << "\"}";
+        EmitEvent(o.str());
+    }
+    return m_conn.Send(Op::NC_ACT_WHISPER_REQ, w.Data());
+}
+
+bool Client::Emote(uint16_t emoteId) {
+    if (GetState() != State::IN_GAME) return false;
+    PROTO_NC_ACT_EMOTICON_CMD r{}; r.emote_id = emoteId;
+    return m_conn.Send(Op::NC_ACT_EMOTICON_CMD, ToBytes(r));
+}
+
+/*── Inventory / lifecycle ──────────────────────────────────────*/
 bool Client::Pickup(uint32_t itemId) {
     if (GetState() != State::IN_GAME) return false;
     Writer w; w.U32(itemId);
@@ -599,8 +804,58 @@ bool Client::Respawn() {
     return m_conn.Send(Op::NC_CHAR_REVIVE_REQ, w.Data());
 }
 
+bool Client::Logout() {
+    /* Polite logout: tell the server we're going (NORMALLOGOUT_CMD)
+     * before yanking the socket. The CN2012 server treats a sudden
+     * close as a crash and keeps your character "ghosted" in-zone
+     * for ~30s — sending this CMD first releases the slot cleanly. */
+    if (m_conn.IsConnected()) {
+        m_conn.Send(Op::NC_USER_NORMALLOGOUT_CMD, {});
+    }
+    Disconnect("logout");
+    return true;
+}
+
+bool Client::Heartbeat() {
+    /* NC_MISC_HEARTBEAT_REQ has no payload on this build — the
+     * server replies with NC_MISC_HEARTBEAT_ACK which we don't need
+     * to act on (the round-trip is the keepalive). */
+    return m_conn.Send(Op::NC_MISC_HEARTBEAT_REQ, {});
+}
+
 bool Client::SendRaw(uint16_t opcode, const std::vector<uint8_t>& payload) {
     return m_conn.Send(opcode, payload);
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * Heartbeat thread — periodic NC_MISC_HEARTBEAT_REQ while IN_GAME.
+ *
+ *   The CN2012 zone disconnects clients with no traffic for ~60s.
+ *   30s cadence keeps us safely under that watchdog without spamming.
+ *──────────────────────────────────────────────────────────────────────────────*/
+void Client::HeartbeatLoop() {
+    using namespace std::chrono_literals;
+    while (m_hbRunning.load()) {
+        /* Sleep in 1s slices so Stop returns promptly. */
+        for (int i = 0; i < 30 && m_hbRunning.load(); i++) {
+            std::this_thread::sleep_for(1s);
+        }
+        if (!m_hbRunning.load()) break;
+        if (GetState() == State::IN_GAME) Heartbeat();
+    }
+}
+
+void Client::StartHeartbeat() {
+    if (m_hbRunning.exchange(true)) return;   /* already running */
+    m_hbThread = std::thread(&Client::HeartbeatLoop, this);
+}
+
+void Client::StopHeartbeat() {
+    if (!m_hbRunning.exchange(false)) return;
+    if (m_hbThread.joinable() &&
+        m_hbThread.get_id() != std::this_thread::get_id()) {
+        m_hbThread.join();
+    }
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -672,6 +927,18 @@ void Client::HandlePacket(const InPacket& pkt) {
         case Op::NC_BRIEFINFO_BRIEFINFODELETE_CMD:
             OnBriefInfoDelete(pkt);
             break;
+        case Op::NC_BRIEFINFO_REGENMOB_CMD:
+            OnRegenMob(pkt);
+            break;
+        case Op::NC_BRIEFINFO_NPC_DISAPPEAR_CMD:
+            OnNpcDisappear(pkt);
+            break;
+        case Op::NC_BRIEFINFO_CHARACTER_CMD:
+            OnBriefCharacter(pkt);
+            break;
+        case Op::NC_BRIEFINFO_PLAYER_LIST_INFO_APPEAR_CMD:
+            OnPlayerListAppear(pkt);
+            break;
         case Op::NC_CHAR_BASE_CMD:
             OnCharBase(pkt);
             break;
@@ -679,6 +946,15 @@ void Client::HandlePacket(const InPacket& pkt) {
         case Op::NC_ACT_CHAT_REQ:
         case Op::NC_ACT_SHOUT_CMD:
             OnChatLike(pkt);
+            break;
+
+        case Op::NC_ACT_WHISPER_REQ:
+            OnWhisper(pkt);
+            break;
+
+        case Op::NC_MISC_HEARTBEAT_ACK:
+            /* Server confirmed our heartbeat. No action needed; the
+             * round-trip itself is what proves the connection is up. */
             break;
 
         default: {

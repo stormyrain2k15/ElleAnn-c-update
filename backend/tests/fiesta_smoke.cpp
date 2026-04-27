@@ -323,6 +323,116 @@ static void test_chat_req_outbound_layout() {
     std::printf("[ok] CHAT_REQ outbound layout = [0][len][text]\n");
 }
 
+/* ─── New outbound primitives (combat, whisper, emote, mob) ─── */
+
+static void test_whisper_outbound_layout() {
+    /* WHISPER_REQ outbound = [char[16] recipient NUL-pad][u8 0]
+     *                        [u8 len][bytes]. */
+    std::string recipient = "Bob";
+    std::string text      = "ping";
+
+    Writer w;
+    w.FixedStr(recipient, 16);
+    w.U8(0);
+    w.U8((uint8_t)text.size());
+    w.Bytes(text.data(), text.size());
+
+    const auto& bytes = w.Data();
+    assert(bytes.size() == 16 + 2 + text.size());
+    /* Recipient field is exactly 16 bytes, NUL-padded after "Bob". */
+    assert(std::memcmp(bytes.data(), "Bob\0\0\0\0\0\0\0\0\0\0\0\0\0", 16) == 0);
+    assert(bytes[16] == 0);
+    assert(bytes[17] == (uint8_t)text.size());
+    assert(std::memcmp(bytes.data() + 18, text.data(), text.size()) == 0);
+    std::printf("[ok] WHISPER_REQ outbound layout = [name16][0][len][text]\n");
+}
+
+static void test_combat_target_hit_layout() {
+    /* TARGETING_REQ + HIT_REQ are identical wire shape: u16 LE handle. */
+    PROTO_NC_BAT_TARGETING_REQ t{}; t.target_handle = 0xBEEF;
+    auto tb = ToBytes(t);
+    assert(tb.size() == 2);
+    assert(tb[0] == 0xEF && tb[1] == 0xBE);
+
+    PROTO_NC_BAT_HIT_REQ h{}; h.target_handle = 0x1234;
+    auto hb = ToBytes(h);
+    assert(hb.size() == 2);
+    assert(hb[0] == 0x34 && hb[1] == 0x12);
+    std::printf("[ok] TARGETING_REQ + HIT_REQ = [u16 LE handle]\n");
+}
+
+static void test_skillcast_layout() {
+    PROTO_NC_BAT_SKILLCAST_REQ s{};
+    s.skill_id      = 0x00AA;
+    s.target_handle = 0xBEEF;
+    auto sb = ToBytes(s);
+    assert(sb.size() == 4);
+    assert(sb[0] == 0xAA && sb[1] == 0x00);   /* skill_id LE     */
+    assert(sb[2] == 0xEF && sb[3] == 0xBE);   /* target_handle LE */
+    std::printf("[ok] SKILLCAST_REQ = [u16 skill][u16 handle] (LE)\n");
+}
+
+static void test_emote_layout() {
+    PROTO_NC_ACT_EMOTICON_CMD e{}; e.emote_id = 0x0042;
+    auto eb = ToBytes(e);
+    assert(eb.size() == 2);
+    assert(eb[0] == 0x42 && eb[1] == 0x00);
+    std::printf("[ok] EMOTICON_CMD = [u16 emote_id] (LE)\n");
+}
+
+static void test_stop_layout() {
+    /* Stop = SHINE_XY_TYPE (8 bytes). */
+    SHINE_XY_TYPE xy{ 0x11223344, 0x55667788 };
+    auto b = ToBytes(xy);
+    assert(b.size() == 8);
+    assert(b[0] == 0x44 && b[3] == 0x11);   /* x LE */
+    assert(b[4] == 0x88 && b[7] == 0x55);   /* y LE */
+    std::printf("[ok] STOP_REQ = SHINE_XY_TYPE (8B LE)\n");
+}
+
+static void test_jump_and_skill_abort_have_no_payload() {
+    /* JUMP_CMD + SKILLCASTABORT_CMD send empty payloads — the wire
+     * frame is just [size=2][dept][cmd] with no body. */
+    auto wire = BuildPacket(Op::NC_ACT_JUMP_CMD, {});
+    assert(wire.size() == 3);          /* size byte + 2 opcode bytes */
+    assert(wire[0] == 2);
+    auto wire2 = BuildPacket(Op::NC_BAT_SKILLCASTABORT_CMD, {});
+    assert(wire2.size() == 3);
+    assert(wire2[0] == 2);
+    std::printf("[ok] empty-payload opcodes frame as [2][dept][cmd]\n");
+}
+
+static void test_npc_disappear_layout() {
+    PROTO_NC_BRIEFINFO_NPC_DISAPPEAR_CMD n{}; n.handle = 0xCAFE;
+    auto b = ToBytes(n);
+    assert(b.size() == 2);
+    assert(b[0] == 0xFE && b[1] == 0xCA);
+    std::printf("[ok] NPC_DISAPPEAR = [u16 handle] (LE)\n");
+}
+
+static void test_regenmob_head_layout() {
+    PROTO_NC_BRIEFINFO_REGENMOB_CMD_HEAD m{};
+    m.handle = 0x1111;
+    m.mob_id = 0x2222;
+    auto b = ToBytes(m);
+    assert(b.size() == 4);
+    assert(b[0] == 0x11 && b[1] == 0x11);
+    assert(b[2] == 0x22 && b[3] == 0x22);
+    std::printf("[ok] REGENMOB head = [u16 handle][u16 mob_id] (LE)\n");
+}
+
+static void test_writer_handle_helper() {
+    /* Writer::Handle is an alias for U16 used at WM-routed payload
+     * sites (see MainApp.cpp exception reporter). It MUST behave
+     * identically to U16 — this test is the contract. */
+    Writer wh; wh.Handle(0xABCD);
+    Writer wu; wu.U16(0xABCD);
+    assert(wh.Data() == wu.Data());
+    assert(wh.Data().size() == 2);
+    assert(wh.Data()[0] == 0xCD && wh.Data()[1] == 0xAB);
+    std::printf("[ok] Writer::Handle == Writer::U16 (LE u16 routing handle)\n");
+}
+
 int main() {
     test_cipher_roundtrip();
     test_cipher_disabled_is_passthrough();
@@ -343,6 +453,15 @@ int main() {
     test_briefinforing_lifecycle();
     test_briefinforing_capped();
     test_chat_req_outbound_layout();
+    test_whisper_outbound_layout();
+    test_combat_target_hit_layout();
+    test_skillcast_layout();
+    test_emote_layout();
+    test_stop_layout();
+    test_jump_and_skill_abort_have_no_payload();
+    test_npc_disappear_layout();
+    test_regenmob_head_layout();
+    test_writer_handle_helper();
 
     std::printf("\nfiesta_smoke: ALL PASS\n");
     return 0;

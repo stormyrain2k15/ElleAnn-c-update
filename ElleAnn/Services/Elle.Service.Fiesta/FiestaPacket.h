@@ -381,6 +381,65 @@ struct PROTO_NC_ACT_CHAT_REQ_HEAD {
 static_assert(sizeof(PROTO_NC_ACT_CHAT_REQ_HEAD) == 2,
               "CHAT_REQ head wire-size mismatch");
 
+/** PROTO_NC_ACT_WHISPER_REQ_HEAD — directed whisper.
+ *  PDB-V70 struct (Zone + Client builds). Layout:
+ *    [0]  char[16] target/sender (NUL-pad ASCII)  ← in C→S this is
+ *                  the recipient name; in S→C broadcast this is the
+ *                  speaker name. The wire shape is symmetric.
+ *    [16] u8       itemLinkDataCount
+ *    [17] u8       len
+ *    [18] u8       content[len]                                       */
+struct PROTO_NC_ACT_WHISPER_REQ_HEAD {
+    char    handle[16];
+    uint8_t itemLinkDataCount;
+    uint8_t len;
+};
+static_assert(sizeof(PROTO_NC_ACT_WHISPER_REQ_HEAD) == 18,
+              "WHISPER_REQ head wire-size mismatch");
+
+/** PROTO_NC_BAT_TARGETING_REQ — switch target.  Payload `target:u16`. */
+struct PROTO_NC_BAT_TARGETING_REQ {
+    uint16_t target_handle;
+};
+
+/** PROTO_NC_BAT_HIT_REQ — melee hit on current target.  Payload
+ *  `target:u16`.  The Zone server validates that this matches the
+ *  most recent NC_BAT_TARGETING_REQ.target_handle.                  */
+struct PROTO_NC_BAT_HIT_REQ {
+    uint16_t target_handle;
+};
+
+/** PROTO_NC_BAT_SKILLCAST_REQ — cast a learned skill on a target.
+ *  Layout (PDB-V70 inferred): [u16 skillId][u16 targetHandle].      */
+struct PROTO_NC_BAT_SKILLCAST_REQ {
+    uint16_t skill_id;
+    uint16_t target_handle;
+};
+static_assert(sizeof(PROTO_NC_BAT_SKILLCAST_REQ) == 4,
+              "SKILLCAST_REQ wire-size mismatch");
+
+/** PROTO_NC_ACT_EMOTICON_CMD — play emote.  Payload `emoteId:u16`. */
+struct PROTO_NC_ACT_EMOTICON_CMD {
+    uint16_t emote_id;
+};
+
+/** PROTO_NC_ACT_JUMP_CMD — cosmetic jump trigger.  Empty payload. */
+/* (no struct — zero bytes) */
+
+/** PROTO_NC_BRIEFINFO_REGENMOB_CMD head — mob spawned in our view.
+ *  Source: Zone PDB.  Head fields are handle:u16 + mobId:u16. The
+ *  trailing bytes carry mode/coord/abstate which are opaque here.  */
+struct PROTO_NC_BRIEFINFO_REGENMOB_CMD_HEAD {
+    uint16_t handle;
+    uint16_t mob_id;
+};
+
+/** PROTO_NC_BRIEFINFO_NPC_DISAPPEAR_CMD — NPC despawn.  Payload
+ *  `handle:u16` (sizeof=2). */
+struct PROTO_NC_BRIEFINFO_NPC_DISAPPEAR_CMD {
+    uint16_t handle;
+};
+
 /** PROTO_NC_BRIEFINFO_INFORM_CMD — zone broadcast trigger.
  *  Source: Zone PDB (sizeof=6). */
 struct PROTO_NC_BRIEFINFO_INFORM_CMD {
@@ -447,6 +506,11 @@ static_assert(sizeof(PROTO_NC_ACT_WALK_REQ)                 ==  16, "WALK_REQ wi
 static_assert(sizeof(PROTO_NC_ACT_NPCCLICK_CMD)             ==   2, "NPCCLICK_CMD wire-size mismatch");
 static_assert(sizeof(PROTO_NC_BRIEFINFO_INFORM_CMD)         ==   6, "BRIEFINFO_INFORM_CMD wire-size mismatch");
 static_assert(sizeof(NETPACKETZONEHEADER)                   ==   6, "NETPACKETZONEHEADER wire-size mismatch");
+static_assert(sizeof(PROTO_NC_BAT_TARGETING_REQ)            ==   2, "BAT_TARGETING wire-size mismatch");
+static_assert(sizeof(PROTO_NC_BAT_HIT_REQ)                  ==   2, "BAT_HIT wire-size mismatch");
+static_assert(sizeof(PROTO_NC_ACT_EMOTICON_CMD)             ==   2, "EMOTICON wire-size mismatch");
+static_assert(sizeof(PROTO_NC_BRIEFINFO_REGENMOB_CMD_HEAD)  ==   4, "REGENMOB head wire-size mismatch");
+static_assert(sizeof(PROTO_NC_BRIEFINFO_NPC_DISAPPEAR_CMD)  ==   2, "NPC_DISAPPEAR wire-size mismatch");
 
 /*──────────────────────────────────────────────────────────────────────────────
  * Buffer reader/writer helpers for little-endian primitives.

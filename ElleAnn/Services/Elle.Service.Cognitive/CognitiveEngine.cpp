@@ -530,6 +530,28 @@ protected:
                     } else if (kind == "login_state") {
                         ELLE_INFO("FIESTA login state: %s",
                                   j.value("state", "?").c_str());
+                    } else if (kind == "player_appear") {
+                        /* Ambient social awareness — surface to log
+                         * so the pattern engine can correlate "who
+                         * is around" with later chat events. */
+                        ELLE_DEBUG("FIESTA player_appear h=%llu name=%s",
+                                   (unsigned long long)j.value("handle", 0ULL),
+                                   j.value("name", "?").c_str());
+                    } else if (kind == "player_update") {
+                        ELLE_DEBUG("FIESTA player_update h=%llu name=%s",
+                                   (unsigned long long)j.value("handle", 0ULL),
+                                   j.value("name", "?").c_str());
+                    } else if (kind == "entity_disappear" ||
+                               kind == "npc_disappear") {
+                        ELLE_DEBUG("FIESTA %s h=%llu",
+                                   kind.c_str(),
+                                   (unsigned long long)j.value("handle", 0ULL));
+                    } else if (kind == "mob_appear") {
+                        ELLE_DEBUG("FIESTA mob_appear h=%llu mob_id=%llu",
+                                   (unsigned long long)j.value("handle", 0ULL),
+                                   (unsigned long long)j.value("mob_id", 0ULL));
+                    } else if (kind == "in_game") {
+                        ELLE_INFO("FIESTA in_game — Elle is logged in");
                     }
                 } catch (const std::exception& e) {
                     ELLE_DEBUG("IPC_FIESTA_EVENT parse failed: %s", e.what());

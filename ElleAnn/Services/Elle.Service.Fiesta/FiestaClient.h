@@ -136,13 +136,51 @@ public:
      *  Pass `run=true` for NC_ACT_RUN_REQ, otherwise NC_ACT_WALK_REQ.
      *  `from` defaults to the last known position (set internally). */
     bool MoveTo(uint32_t toX, uint32_t toY, bool run = true);
+    /** Halt current movement at (x,y). PDB layout: SHINE_XY_TYPE.    */
+    bool Stop(uint32_t atX, uint32_t atY);
+    /** Cosmetic jump — no payload, no target. */
+    bool Jump();
+    /** Click an NPC (open dialog tree etc.). Payload = handle:u16.   */
+    bool NpcClick(uint16_t npcHandle);
 
+    /* Combat — verified Zone-side opcodes (BIN-sourced; payloads
+     * follow the `target:u16` convention shared by every reverse-
+     * engineered ShineEngine build we have available). */
+    bool Target(uint16_t targetHandle);
+    bool Untarget(uint16_t targetHandle);
+    bool Hit(uint16_t targetHandle);
+    bool Smash(uint16_t targetHandle);
+    /** Convenience: Target then Hit in one call (the canonical
+     *  "engage in melee" sequence the client emits on left-click). */
     bool Attack(uint16_t targetHandle);
+    /** Cast a learned skill on a target.
+     *  Payload: [u16 skillId][u16 targetHandle]. */
+    bool SkillCast(uint16_t skillId, uint16_t targetHandle);
+    bool SkillCastAbort();
+    /** Assist a party member (target whoever they're targeting). */
+    bool Assist(uint16_t partnerHandle);
+
+    /* Social / chat. */
     bool Chat(const std::string& text);
     bool Shout(const std::string& text);
+    /** Whisper to a named recipient. PDB-V70 layout:
+     *  [char[16] recipient (NUL-pad)][u8 itemLinkDataCount][u8 len][text]. */
+    bool Whisper(const std::string& recipient, const std::string& text);
+    /** Play an emoticon — id is the emote table index. */
+    bool Emote(uint16_t emoteId);
+
+    /* Inventory. */
     bool Pickup(uint32_t itemId);
     bool UseItem(uint32_t slot);
+
+    /* Lifecycle helpers. */
     bool Respawn();
+    /** Send NC_USER_NORMALLOGOUT_CMD then close socket cleanly.    */
+    bool Logout();
+    /** Send a manual heartbeat (NC_MISC_HEARTBEAT_REQ).
+     *  The internal heartbeat thread does this periodically while
+     *  IN_GAME; this method is exposed for tests/manual control. */
+    bool Heartbeat();
 
     /** Send a raw packet — escape hatch for protocol exploration. */
     bool SendRaw(uint16_t opcode, const std::vector<uint8_t>& payload);
@@ -177,9 +215,20 @@ private:
     /* BRIEFINFO ring updates — handle⇆name maintenance. */
     void OnLoginCharacter(const InPacket& pkt);
     void OnBriefInfoDelete(const InPacket& pkt);
+    void OnRegenMob(const InPacket& pkt);
+    void OnNpcDisappear(const InPacket& pkt);
+    void OnBriefCharacter(const InPacket& pkt);
+    void OnPlayerListAppear(const InPacket& pkt);
     void OnCharBase(const InPacket& pkt);
     /* Chat dispatch — 🟡 WIP broadcast envelope shape. */
     void OnChatLike(const InPacket& pkt);
+    /* Whisper — PDB-V70 layout: [char[16] sender][u8 itemLinkDataCount][u8 len][text]. */
+    void OnWhisper(const InPacket& pkt);
+    /* Heartbeat thread — sends NC_MISC_HEARTBEAT_REQ on a cadence
+     * while IN_GAME. Started on Connect(), stopped on Disconnect().  */
+    void HeartbeatLoop();
+    void StartHeartbeat();
+    void StopHeartbeat();
 
     /* Reconnect to a new host:port (used between hops).  Drops the
      * current socket, resets cipher, opens new socket. */
@@ -212,6 +261,10 @@ private:
     /* Region-toggle config. */
     std::string            m_versionKey = "SDO_FIESTA_NEW_VER_KEY";
     std::string            m_spawnApps;
+
+    /* Heartbeat thread state. */
+    std::thread            m_hbThread;
+    std::atomic<bool>      m_hbRunning{false};
 
     EventCallback          m_onEvent;
     RawPacketCallback      m_onRawPacket;
