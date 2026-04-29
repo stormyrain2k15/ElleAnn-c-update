@@ -3195,15 +3195,45 @@ private:
         });
 
         /* ============== Tokens / Conversations — dbo.conversations + messages ==== */
-        /* Helper — extract an identity-bearing user_id from body/query with
-         * strict validation. Returns a populated response when the id is
-         * missing or invalid; callers use:
-         *     int32_t userId = 0;
-         *     if (auto err = RequireUserId(body, userId)) return *err;
-         * Previously every one of these handlers had `body.value("user_id", 1)`
-         * then (more recently) `body.value("user_id", 0)`, and silently
-         * wrote the 0 sentinel into user-scoped tables. Now a missing or
-         * non-positive user_id is a 400.                                 */
+        /* Helper — resolve the *authenticated* user (= Account.dbo.tUser.nUserNo)
+         * from the request's JWT.  Flow:
+         *
+         *     Authorization: Bearer <jwt>
+         *           │  (verified by RequireAuth in middleware that wraps
+         *           │   every protected route)
+         *           ▼
+         *     jwt.sub == device_id
+         *           │
+         *           ▼  (lookup)
+         *     ElleCore.dbo.PairedDevices.nUserNo  ←  the canonical user id
+         *
+         * The body's "user_id" field is honoured ONLY for ADMIN tools that
+         * need to scope a query to a different user (audit, support).
+         * For every regular user-scoped write the JWT identity wins so a
+         * compromised client can't claim it's user 9999 and write into
+         * someone else's memory.
+         *
+         * Pre-pivot the helper trusted body.user_id blindly, which let
+         * unauthenticated/multi-user installs collide on the wrong row.
+         * That's the path the operator hit when "everything was empty" —
+         * writes succeeded, just under the wrong identity.            */
+        auto ResolveAuthenticatedUser = [](const HTTPRequest& req) -> int32_t {
+            auto it = req.headers.find("x-auth-device-id");
+            if (it == req.headers.end()) return 0;
+            const std::string& deviceId = it->second;
+            if (deviceId.empty()) return 0;
+
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT TOP 1 nUserNo FROM ElleCore.dbo.PairedDevices "
+                "  WHERE DeviceId = ? AND Revoked = 0;",
+                { deviceId });
+            if (!rs.success || rs.rows.empty()) return 0;
+            int64_t v = 0;
+            return rs.rows[0].TryGetInt(0, v) && v > 0 && v <= INT32_MAX
+                       ? (int32_t)v : 0;
+        };
+
+        /* Strict body-supplied user_id (legacy / admin path). */
         auto RequireUserId = [](const json& body, int32_t& out) -> std::optional<HTTPResponse> {
             if (!body.contains("user_id"))
                 return HTTPResponse::Err(400, "user_id is required");
@@ -3223,10 +3253,79 @@ private:
             return std::nullopt;
         };
 
-        m_router.Register("POST", "/api/tokens/conversations", [RequireUserId](const HTTPRequest& req) {
+        /* Resolve user_id with JWT-first precedence:
+         *   1. JWT-bound device → PairedDevices.nUserNo (authenticated)
+         *   2. else fall back to body.user_id (admin/anonymous tools)
+         *   3. else 400.
+         * Most regular endpoints want #1; legacy admin endpoints stay
+         * on RequireUserId(). */
+        auto RequireAuthOrBodyUser = [&](const HTTPRequest& req,
+                                         const json& body,
+                                         int32_t& out)
+                -> std::optional<HTTPResponse> {
+            const int32_t fromJwt = ResolveAuthenticatedUser(req);
+            if (fromJwt > 0) { out = fromJwt; return std::nullopt; }
+            return RequireUserId(body, out);
+        };
+
+        /* ==================================================================
+         *  GET /api/me  (USER)
+         *
+         *  "Who am I?" endpoint for the dev panel and the Android client.
+         *  Resolves the JWT-bound device → nUserNo → game account, returns:
+         *
+         *    { "user_id", "username", "device_id", "paired_at_ms",
+         *      "last_seen_ms", "authoritative_source": "Account.dbo.tUser" }
+         *
+         *  No body parameters — pure identity reflection. Returns 401 if
+         *  the request isn't tied to a paired device (i.e. the caller is
+         *  using the legacy shared-secret path with no device identity).
+         *  The dev panel uses this on every page mount to prove it's
+         *  authenticated and to scope subsequent reads.
+         *
+         *  This is the canonical replacement for the old "look up the
+         *  user_id query param against ElleCore.dbo.Users" pattern that
+         *  this pivot removes.                                          */
+        m_router.Register("GET", "/api/me", [](const HTTPRequest& req) {
+            auto it = req.headers.find("x-auth-device-id");
+            if (it == req.headers.end() || it->second.empty())
+                return HTTPResponse::Err(401, "no device identity on request");
+            const std::string& deviceId = it->second;
+
+            auto rs = ElleSQLPool::Instance().QueryParams(
+                "SELECT TOP 1 nUserNo, PairedAt, LastSeen "
+                "  FROM ElleCore.dbo.PairedDevices "
+                "  WHERE DeviceId = ? AND Revoked = 0;",
+                { deviceId });
+            if (!rs.success || rs.rows.empty())
+                return HTTPResponse::Err(401, "device not paired");
+            int64_t nUserNo = 0;
+            std::string pairedAt = rs.rows[0].values.size() > 1 ? rs.rows[0][1] : "";
+            std::string lastSeen = rs.rows[0].values.size() > 2 ? rs.rows[0][2] : "";
+            rs.rows[0].TryGetInt(0, nUserNo);
+            if (nUserNo <= 0)
+                return HTTPResponse::Err(500, "device row has no nUserNo");
+
+            ElleGameAuth::UserIdentity user;
+            std::string username;
+            if (ElleGameAuth::GetUserById(nUserNo, user)) {
+                username = user.sUserID;
+            }
+            return HTTPResponse::OK({
+                {"user_id",              (int32_t)nUserNo},
+                {"username",             username},
+                {"device_id",            deviceId},
+                {"paired_at",            pairedAt},
+                {"last_seen",            lastSeen},
+                {"authoritative_source", "Account.dbo.tUser"}
+            });
+        });
+
+        m_router.Register("POST", "/api/tokens/conversations",
+            [RequireAuthOrBodyUser](const HTTPRequest& req) {
             json body = req.BodyJSON();
             int32_t userId = 0;
-            if (auto err = RequireUserId(body, userId)) return *err;
+            if (auto err = RequireAuthOrBodyUser(req, body, userId)) return *err;
             std::string title = body.value("title", std::string("New conversation"));
             int32_t newId = 0;
             if (!ElleDB::CreateConversation(userId, title, newId))
@@ -3292,10 +3391,11 @@ private:
             }
             return HTTPResponse::OK(j);
         });
-        m_router.Register("POST", "/api/tokens/video-calls", [RequireUserId](const HTTPRequest& req) {
+        m_router.Register("POST", "/api/tokens/video-calls",
+            [RequireAuthOrBodyUser](const HTTPRequest& req) {
             json body = req.BodyJSON();
             int32_t userId = 0;
-            if (auto err = RequireUserId(body, userId)) return *err;
+            if (auto err = RequireAuthOrBodyUser(req, body, userId)) return *err;
             int32_t convId = body.value("conversation_id", 0);
             if (convId <= 0)
                 return HTTPResponse::Err(400, "conversation_id must be positive");
@@ -3439,10 +3539,13 @@ private:
                 return HTTPResponse::Err(500, e.what());
             }
         });
-        m_router.Register("GET", "/api/video/avatar", [](const HTTPRequest& req) {
-            int32_t userId = req.QueryInt("user_id", 0);
+        m_router.Register("GET", "/api/video/avatar",
+            [ResolveAuthenticatedUser](const HTTPRequest& req) {
+            /* JWT-bound nUserNo wins; fall back to ?user_id= for admin tools. */
+            int32_t userId = ResolveAuthenticatedUser(req);
+            if (userId <= 0) userId = req.QueryInt("user_id", 0);
             if (userId <= 0)
-                return HTTPResponse::Err(400, "user_id query parameter is required");
+                return HTTPResponse::Err(400, "authenticate or pass ?user_id=");
             ElleDB::UserAvatar a;
             if (!ElleDB::GetDefaultAvatar(userId, a))
                 return HTTPResponse::OK({{"avatar", nullptr}, {"note", "no avatar configured"}});
@@ -3455,10 +3558,12 @@ private:
                 {"is_default", a.is_default}
             });
         });
-        m_router.Register("GET", "/api/video/avatars", [](const HTTPRequest& req) {
-            int32_t userId = req.QueryInt("user_id", 0);
+        m_router.Register("GET", "/api/video/avatars",
+            [ResolveAuthenticatedUser](const HTTPRequest& req) {
+            int32_t userId = ResolveAuthenticatedUser(req);
+            if (userId <= 0) userId = req.QueryInt("user_id", 0);
             if (userId <= 0)
-                return HTTPResponse::Err(400, "user_id query parameter is required");
+                return HTTPResponse::Err(400, "authenticate or pass ?user_id=");
             std::vector<ElleDB::UserAvatar> avs;
             ElleDB::ListAvatars(userId, avs);
             json arr = json::array();
