@@ -50,7 +50,12 @@ data class EmotionsResponse(
 @Serializable
 data class PairResponse(
     val jwt: String,
-    @kotlinx.serialization.SerialName("expires_ms") val expiresMs: Long = Long.MAX_VALUE,
+    @kotlinx.serialization.SerialName("expires_ms")    val expiresMs:   Long = Long.MAX_VALUE,
+    @kotlinx.serialization.SerialName("paired_at_ms") val pairedAtMs:  Long = 0,
+    /** Present only when game-account auth was used (sign-in path).
+     *  Pair-code path leaves these null. */
+    val nUserNo:   Int?    = null,
+    val sUserName: String? = null,
 )
 
 // ─── TokenStore ───────────────────────────────────────────────────────────────

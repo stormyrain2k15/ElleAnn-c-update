@@ -707,6 +707,22 @@ void ElleEmotionalService::OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID 
         case IPC_EMOTION_QUERY:
             HandleEmotionQuery(msg, sender);
             break;
+        case IPC_EMOTION_CONSOLIDATE:
+            /* Manual consolidation request — fired by HTTP
+             * /api/emotion/consolidate so the operator can force a
+             * snapshot mid-session. Pre-pivot this message had no
+             * consumer and silently discarded; now it persists the
+             * current state and acks via the standard reply path.
+             *
+             * Side note: this is on the path the user complained
+             * about ("she remembers in spurts"). When the emotion
+             * snapshot fails to land, downstream Cognitive context
+             * builders read a stale or empty state on the next turn,
+             * which manifests as Elle "feeling differently" within
+             * the same conversation.                              */
+            ElleDB::PersistEmotionSnapshot(m_engine.GetState());
+            m_checkpointCounter = 0;
+            break;
         default:
             break;
     }

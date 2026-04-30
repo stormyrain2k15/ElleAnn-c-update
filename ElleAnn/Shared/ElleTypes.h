@@ -792,6 +792,7 @@ typedef struct ELLE_LLM_RESPONSE {
     float       latency_ms;
     uint32_t    provider_used;     /* which actually served */
     char        error[ELLE_MAX_NAME * 4];
+    char        model_used[ELLE_MAX_NAME];   /* model name (e.g. "llama-3.3-70b-versatile") */
 } ELLE_LLM_RESPONSE;
 
 /*──────────────────────────────────────────────────────────────────────────────

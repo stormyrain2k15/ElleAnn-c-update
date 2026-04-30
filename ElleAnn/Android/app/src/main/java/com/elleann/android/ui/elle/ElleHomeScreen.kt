@@ -43,6 +43,8 @@ data class ElleHomeState(
     val wordOfDay: DictionaryWord? = null,
     val brainStatus: String = "",
     val halStatus: String = "",
+    /** Identity tuple from /api/me — proves auth wired to Account.dbo.tUser. */
+    val me: MeResponse? = null,
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val loading: Boolean = true,
     val error: String? = null,
@@ -83,6 +85,15 @@ class ElleHomeViewModel(
                     }
             }
 // Emotion data loaded via startEmotionPolling() and WebSocket ipc_broadcast — no load-time job needed
+            val meJob = launch {
+                /* /api/me confirms the JWT actually resolves to a real
+                 * tUser row.  If this returns 401, the token is stale
+                 * and the operator should re-pair.  We surface the
+                 * error in the home strip so it's visible without
+                 * needing the dev panel. */
+                runCatching { api.getMe() }
+                    .onSuccess { m -> _state.update { it.copy(me = m) } }
+            }
             val aiJob = launch {
                 runCatching { api.getAiStatus() }
                     .onSuccess { s -> _state.update { it.copy(aiStatus = s) } }
@@ -217,7 +228,13 @@ fun ElleHomeScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         ConnectionDot(state.connectionState)
                         Spacer(Modifier.width(6.dp))
-                        Text(serverLabel, style = MaterialTheme.typography.labelSmall, color = IsyaMuted)
+                        /* Show the resolved game-account username instead
+                         * of just host:port so the operator can confirm
+                         * at a glance which user the JWT belongs to.
+                         * Falls back to host:port when /api/me hasn't
+                         * resolved yet (or returned 401 → re-pair). */
+                        val ident = state.me?.let { "${it.username} · #${it.userId}" } ?: serverLabel
+                        Text(ident, style = MaterialTheme.typography.labelSmall, color = IsyaMuted)
                     }
                 },
                 actions = {

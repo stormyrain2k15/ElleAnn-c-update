@@ -668,6 +668,26 @@ data class SessionGreeting(
     val greeting: String,
 )
 
+/**
+ * Response shape for GET /api/me — Feb 2026 pivot.
+ *
+ *   user_id              → tUser.nUserNo (canonical user id across services)
+ *   username             → tUser.sUserID (the in-game login)
+ *   device_id            → ANDROID_ID this paired with
+ *   pairedAt / lastSeen  → ISO timestamps from PairedDevices
+ *   authoritativeSource  → always "Account.dbo.tUser" (proof we no longer
+ *                          ship a redundant ElleCore.Users table)
+ */
+@Serializable
+data class MeResponse(
+    @SerialName("user_id")              val userId:              Int = 0,
+    @SerialName("username")              val username:            String = "",
+    @SerialName("device_id")             val deviceId:            String = "",
+    @SerialName("paired_at")             val pairedAt:            String = "",
+    @SerialName("last_seen")             val lastSeen:            String = "",
+    @SerialName("authoritative_source") val authoritativeSource: String = "",
+)
+
 // ════════════════════════════════════════════════════════════════════════════
 // X-CHROMOSOME MODELS
 // Source: ElleAnn_XChromosome_Schema.sql + /api/x/* routes

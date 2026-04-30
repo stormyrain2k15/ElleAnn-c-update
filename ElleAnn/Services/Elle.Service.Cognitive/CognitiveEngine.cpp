@@ -1303,6 +1303,24 @@ private:
                   memories.size(), entities.size(),
                   (unsigned long long)elapsed);
 
+        /* 10. Reply.
+         *
+         *  Includes `provider_used` and `model_used` so the dev panel /
+         *  Android home strip can show "served by groq · llama-3.3-70b"
+         *  on every reply.  If memory continuity flips mid-conversation
+         *  ("remembers, then forgets, then remembers" within consecutive
+         *  turns), the operator can now correlate the flip with a
+         *  provider fallback firing — which was previously invisible
+         *  and required tailing logs to spot.                         */
+        const char* providerName =
+            llmResp.provider_used == LLM_PROVIDER_GROQ        ? "groq"        :
+            llmResp.provider_used == LLM_PROVIDER_OPENAI      ? "openai"      :
+            llmResp.provider_used == LLM_PROVIDER_ANTHROPIC   ? "anthropic"   :
+            llmResp.provider_used == LLM_PROVIDER_LM_STUDIO   ? "lm_studio"   :
+            llmResp.provider_used == LLM_PROVIDER_LOCAL_LLAMA ? "local_llama" :
+            llmResp.provider_used == LLM_PROVIDER_CUSTOM_API  ? "custom_api"  :
+                                                                 "unknown";
+
         json out = {
             {"request_id", requestId},
             {"response", responseText},
@@ -1310,7 +1328,9 @@ private:
             {"mode", mode == MODE_RESEARCH ? "research" : "companion"},
             {"memories_used", memories.size()},
             {"entities", entities},
-            {"latency_ms", (uint64_t)elapsed}
+            {"latency_ms", (uint64_t)elapsed},
+            {"provider_used", providerName},
+            {"model_used",    llmResp.model_used}
         };
         SendChatReply(reply_to, out);
 

@@ -234,7 +234,16 @@ public:
     /* Provider management */
     bool IsAPIAvailable() const;
     bool IsLocalAvailable() const;
+    /** True when Initialize() succeeded (at least one provider live).
+     *  Used by /api/ai/status so the dev panel reports "unavailable"
+     *  instead of "ready" when the LLM subsystem is actually down. */
+    bool IsInitialized() const { return m_initialized; }
     ELLE_LLM_PROVIDER GetActiveProvider() const { return m_activeProvider; }
+    /** Human-readable name of the provider SelectProvider() would
+     *  pick right now ("groq", "local_llama", …).  Empty when no
+     *  initialized provider is available — callers should fall back
+     *  to llm.primary_provider from config in that case. */
+    std::string GetActiveProviderName() const;
     void ForceProvider(ELLE_LLM_PROVIDER provider);
     void ResetProviderSelection();
 

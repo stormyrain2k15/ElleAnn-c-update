@@ -263,6 +263,10 @@ ELLE_LLM_RESPONSE LLMAPIProvider::Complete(const std::vector<LLMMessage>& messag
                                             float temperature, uint32_t maxTokens) {
     ELLE_LLM_RESPONSE resp = {};
     resp.provider_used = m_providerId;
+    /* Stamp model so callers can distinguish e.g. groq's
+     * llama-3.3-70b-versatile from openai's gpt-4o-mini in the chat
+     * reply.  Truncation is fine — display only. */
+    strncpy_s(resp.model_used, m_config.model.c_str(), sizeof(resp.model_used) - 1);
 
     if (!CheckRateLimit()) {
         resp.success = 0;
@@ -649,6 +653,10 @@ ELLE_LLM_RESPONSE LLMLocalProvider::Complete(const std::vector<LLMMessage>& mess
                                               float temperature, uint32_t maxTokens) {
     ELLE_LLM_RESPONSE resp = {};
     resp.provider_used = LLM_PROVIDER_LOCAL_LLAMA;
+    /* Local provider runs whatever GGUF the operator pointed it at —
+     * record the basename so dev-panel diagnostics show e.g.
+     * "local_llama · llama-3.1-8b-instruct.Q5_K_M.gguf".            */
+    strncpy_s(resp.model_used, m_config.model_path.c_str(), sizeof(resp.model_used) - 1);
 
     float temp = temperature >= 0 ? temperature : m_config.temperature;
     uint32_t tokens = maxTokens > 0 ? maxTokens : m_config.max_tokens;
@@ -1217,6 +1225,32 @@ std::string ElleLLMEngine::ParseIntent(const std::string& text, const std::strin
     return Ask("Context: " + context + "\nUser input: " + text,
                "Parse the user's intent. Return JSON: {\"intent_type\": \"...\", "
                "\"confidence\": 0-1.0, \"parameters\": {...}, \"urgency\": 0-1.0}");
+}
+
+std::string ElleLLMEngine::GetActiveProviderName() const {
+    /* Mirror SelectProvider() preference order WITHOUT the recursive
+     * health check (we want a non-mutating peek for the dev panel).
+     * If nothing is initialised, return empty so the caller falls
+     * back to config's nominal primary_provider for display. */
+    if (!m_initialized) return "";
+    auto idToName = [](ELLE_LLM_PROVIDER id) -> std::string {
+        switch (id) {
+            case LLM_PROVIDER_GROQ:        return "groq";
+            case LLM_PROVIDER_OPENAI:      return "openai";
+            case LLM_PROVIDER_ANTHROPIC:   return "anthropic";
+            case LLM_PROVIDER_LM_STUDIO:   return "lm_studio";
+            case LLM_PROVIDER_LOCAL_LLAMA: return "local_llama";
+            case LLM_PROVIDER_CUSTOM_API:  return "custom_api";
+            default:                       return "";
+        }
+    };
+    /* Honor an explicit ForceProvider() override first — that's the
+     * provider the next Chat() call will actually hit. */
+    if ((int)m_forcedProvider != -1) return idToName(m_forcedProvider);
+    for (const auto& p : m_providers) {
+        if (p && p->IsAvailable()) return idToName(p->GetProviderId());
+    }
+    return "";
 }
 
 bool ElleLLMEngine::IsAPIAvailable() const {

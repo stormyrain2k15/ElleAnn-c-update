@@ -18,6 +18,17 @@ interface ElleApiExtended {
 
     // ── SESSION ──────────────────────────────────────────────────────────────
 
+    /**
+     * GET /api/me — "who am I" identity reflection.
+     *
+     * Resolves the JWT-bound device → PairedDevices.nUserNo → game account
+     * (Account.dbo.tUser) and returns the canonical identity tuple.  Use
+     * this once at session start instead of trying to derive identity
+     * from the JWT body or from local prefs.
+     */
+    @GET("/api/me")
+    suspend fun getMe(): MeResponse
+
     /** GET /api/session/greeting — LLM-rendered welcome phrase */
     @GET("/api/session/greeting")
     suspend fun getSessionGreeting(): SessionGreeting

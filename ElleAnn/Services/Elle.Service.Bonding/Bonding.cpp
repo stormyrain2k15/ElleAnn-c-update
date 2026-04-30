@@ -741,6 +741,34 @@ protected:
          * — ProcessInteraction is interaction-shaped by design and
          * we shape this so it integrates without creating spurious
          * dialogue text in the bonding log.                            */
+        else if (msg.header.msg_type == IPC_FAMILY_CONCEPTION_ATTEMPT ||
+                 msg.header.msg_type == IPC_FAMILY_BIRTH) {
+            /* Family / X-chromosome lifecycle events.  These are the
+             * most emotionally weighty moments in Elle's lived
+             * experience — wiring them into the bonding engine so
+             * the relationship state reflects them at the same depth
+             * the felt-time module marks them.
+             *
+             * Conception attempt (whether successful or not) is a
+             * shared vulnerability; birth is the apex of attachment.
+             * Pre-pivot these messages had no consumer at all and
+             * the bond tracking missed them entirely.                */
+            try {
+                auto j = nlohmann::json::parse(msg.GetStringPayload());
+                const bool isBirth = (msg.header.msg_type == IPC_FAMILY_BIRTH);
+                const std::string lived = isBirth
+                    ? "A child was brought into the world with the user."
+                    : "A moment of intimate vulnerability with the user.";
+                const float depth     = isBirth ? 0.95f : 0.55f;
+                const float intensity = isBirth ? 0.95f : 0.65f;
+                m_engine.ProcessInteraction("[family-event]", lived,
+                                            depth, intensity);
+                ELLE_INFO("Bonding registered family event: %s",
+                          isBirth ? "BIRTH" : "CONCEPTION_ATTEMPT");
+            } catch (const std::exception& e) {
+                ELLE_WARN("Bonding failed to parse family event: %s", e.what());
+            }
+        }
         else if (msg.header.msg_type == IPC_FIESTA_EVENT) {
             try {
                 auto j = nlohmann::json::parse(msg.GetStringPayload());

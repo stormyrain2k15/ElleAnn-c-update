@@ -3479,7 +3479,8 @@ private:
                 {"finished_ms", job.finished_ms}
             });
         });
-        m_router.Register("POST", "/api/video/avatar/upload", [RequireUserId](const HTTPRequest& req) {
+        m_router.Register("POST", "/api/video/avatar/upload",
+            [RequireAuthOrBodyUser](const HTTPRequest& req) {
             /* Accept either (a) a file_path already on disk, or (b) base64 image
              * bytes. Base64 path writes the file into cfg avatar_dir so the
              * video generator can pick it up.                                  */
@@ -3521,7 +3522,7 @@ private:
 
                 ElleDB::UserAvatar a;
                 int32_t auid = 0;
-                if (auto err = RequireUserId(body, auid)) return *err;
+                if (auto err = RequireAuthOrBodyUser(req, body, auid)) return *err;
                 a.user_id    = auid;
                 a.label      = label;
                 a.file_path  = filePath;
@@ -3728,19 +3729,35 @@ private:
             });
         });
         m_router.Register("GET", "/api/ai/status", [this](const HTTPRequest&) {
-            /* Pull live model info from config, emotion from cache, service health from DB */
-            auto& llm = ElleConfig::Instance().GetLLM();
+            /* Reflect the LIVE LLM engine state — pre-pivot this hardcoded
+             * "ready" + groq config, so the dev panel always reported
+             * green even when the engine was down (empty api_key) or
+             * had transparently failed over to local_llama. Now the
+             * status string reports init state and the model fields
+             * report the provider that SelectProvider() would actually
+             * use right now. Falls back to config-only display when
+             * the engine isn't yet initialised (e.g. during boot). */
+            auto& llm    = ElleConfig::Instance().GetLLM();
+            auto& engine = ElleLLMEngine::Instance();
+            const bool initialised = engine.IsInitialized();
+            std::string activeProvider = engine.GetActiveProviderName();
+            if (activeProvider.empty()) activeProvider = llm.primary_provider;
+
             std::string modelName = "llama-3.3-70b-versatile";
             std::string modelUrl  = "groq://api.groq.com";
-            auto it = llm.providers.find("groq");
+            auto it = llm.providers.find(activeProvider);
             if (it != llm.providers.end()) {
                 if (!it->second.model.empty())    modelName = it->second.model;
                 if (!it->second.api_url.empty())  modelUrl  = it->second.api_url;
+                if (it->second.api_url.empty() && !it->second.model_path.empty()) {
+                    modelUrl = std::string("local://") + it->second.model_path;
+                }
             }
             json j = {
-                {"modelStatus", "ready"},
-                {"modelName", modelName},
-                {"modelUrl", modelUrl},
+                {"modelStatus", initialised ? "ready" : "unavailable"},
+                {"modelName",   modelName},
+                {"modelUrl",    modelUrl},
+                {"provider",    activeProvider},
                 {"emotionalState", {
                     {"valence", m_cachedEmotions.valence},
                     {"arousal", m_cachedEmotions.arousal},
