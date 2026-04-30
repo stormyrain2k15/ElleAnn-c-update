@@ -473,6 +473,29 @@ interface ElleApiExtended {
     @GET("/api/diag/routes")
     suspend fun getDiagRoutes(): DiagRoutesResponse
 
+    /** GET /api/diag/wires — in-process IPC liveness stamps (ADMIN).
+     *  One row per peer service this process has talked to:
+     *  pipe name, last_seen_ms, quiet_minutes, state. */
+    @GET("/api/diag/wires")
+    suspend fun getDiagWires(): DiagWiresResponse
+
+    /** GET /api/diag/heartbeats — DB-shared worker liveness (ADMIN).
+     *  Cross-process truth from `ElleSystem.dbo.Workers`. Distinct from
+     *  /api/diag/wires which is in-process only. */
+    @GET("/api/diag/heartbeats")
+    suspend fun getDiagHeartbeats(): DiagHeartbeatsResponse
+
+    /** GET /api/diag/health — single-call aggregator (ADMIN).
+     *  Combines /api/me, /api/ai/status, wires, heartbeats, queues into
+     *  one payload + an `issues[]` list of human-readable warnings. */
+    @GET("/api/diag/health")
+    suspend fun getDiagHealth(): DiagHealthResponse
+
+    /** GET /api/memory/why — explain why Elle remembered a thing.
+     *  Returns the ranking trace for the supplied entity hits. */
+    @GET("/api/memory/why")
+    suspend fun getMemoryWhy(@Query("entities") entities: String): MemoryWhyResponse
+
     /** POST /api/admin/reload — hot-reload config (ADMIN) */
     @POST("/api/admin/reload")
     suspend fun reloadConfig(): OkResponse

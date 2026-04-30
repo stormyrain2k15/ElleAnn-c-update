@@ -1127,16 +1127,69 @@ ELLE_LLM_RESPONSE ElleLLMEngine::Chat(const std::vector<LLMMessage>& messages,
     m_totalTokens += resp.tokens_total;
     m_totalLatencyMs += (uint64_t)resp.latency_ms;
 
-    /* Failover on failure */
-    if (!resp.success && m_mode == LLM_MODE_HYBRID) {
-        ELLE_WARN("Primary LLM failed, attempting failover...");
-        for (auto& p : m_providers) {
-            if (p.get() != provider && p->IsAvailable()) {
-                resp = p->Complete(effective, temperature, maxTokens);
-                if (resp.success) {
+    /* Failover on failure — UNCONDITIONAL cascade.
+     *
+     * Pre-pivot the cascade only ran in HYBRID mode and walked
+     * `m_providers` in initialisation order, which meant a Groq 401
+     * mid-conversation could fall through to LM Studio (slow, local)
+     * when the operator clearly expected it to try OpenAI / Anthropic
+     * first. Now the cascade is mode-independent (any time we have
+     * >1 provider live, try them all on failure) and order-stable:
+     *
+     *   1. The provider we just called (already attempted).
+     *   2. The config-declared primary_provider (if not == 1).
+     *   3. The config-declared fallback_provider (if not == 1 or 2).
+     *   4. The remaining providers in declaration order:
+     *      groq → openai → anthropic → lm_studio → custom_api →
+     *      local_llama.
+     *
+     * Each fallback attempt is logged with provider id + model so
+     * /api/diag/health and the dev-panel chat strip can surface
+     * "groq failed → answered by anthropic" without the user
+     * wondering why latency tripled.                                 */
+    if (!resp.success) {
+        const auto& cfgLLM = ElleConfig::Instance().GetLLM();
+        auto nameToId = [](const std::string& n) -> ELLE_LLM_PROVIDER {
+            if (n == "groq")       return LLM_PROVIDER_GROQ;
+            if (n == "openai")     return LLM_PROVIDER_OPENAI;
+            if (n == "anthropic")  return LLM_PROVIDER_ANTHROPIC;
+            if (n == "lm_studio")  return LLM_PROVIDER_LOCAL_LMSTUDIO;
+            if (n == "local_llama")return LLM_PROVIDER_LOCAL_LLAMA;
+            if (n == "custom_api") return LLM_PROVIDER_CUSTOM_API;
+            return (ELLE_LLM_PROVIDER)-1;
+        };
+
+        std::vector<ILLMProvider*> ordered;
+        auto pushIfNew = [&](ILLMProvider* p) {
+            if (!p || p == provider) return;
+            for (auto* x : ordered) if (x == p) return;
+            ordered.push_back(p);
+        };
+        if (auto id = nameToId(cfgLLM.primary_provider);  id != (ELLE_LLM_PROVIDER)-1) pushIfNew(GetProviderById(id));
+        if (auto id = nameToId(cfgLLM.fallback_provider); id != (ELLE_LLM_PROVIDER)-1) pushIfNew(GetProviderById(id));
+        for (ELLE_LLM_PROVIDER id : { LLM_PROVIDER_GROQ, LLM_PROVIDER_OPENAI,
+                                       LLM_PROVIDER_ANTHROPIC, LLM_PROVIDER_LOCAL_LMSTUDIO,
+                                       LLM_PROVIDER_CUSTOM_API, LLM_PROVIDER_LOCAL_LLAMA }) {
+            pushIfNew(GetProviderById(id));
+        }
+
+        if (!ordered.empty()) {
+            ELLE_WARN("Primary LLM (%s) failed (%s) — cascading through %zu fallback(s)",
+                      provider->GetModelName().c_str(),
+                      resp.error[0] ? resp.error : "no detail",
+                      ordered.size());
+            for (auto* p : ordered) {
+                if (!p->IsAvailable()) continue;
+                auto alt = p->Complete(effective, temperature, maxTokens);
+                m_totalTokens    += alt.tokens_total;
+                m_totalLatencyMs += (uint64_t)alt.latency_ms;
+                if (alt.success) {
                     ELLE_INFO("Failover to %s succeeded", p->GetModelName().c_str());
-                    break;
+                    return alt;
                 }
+                ELLE_WARN("Fallback %s also failed: %s",
+                          p->GetModelName().c_str(),
+                          alt.error[0] ? alt.error : "no detail");
             }
         }
     }

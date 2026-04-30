@@ -101,6 +101,7 @@ object ElleRoutes {
     const val DEV_LOGS          = "dev/logs"
     const val DEV_SERVICES      = "dev/services"
     const val DEV_DIAGNOSTICS   = "dev/diagnostics"
+    const val DEV_HEALTH        = "dev/health"
     const val DEV_API_EXPLORER  = "dev/api-explorer"
     const val DEV_HARDWARE      = "dev/hardware"
     const val DEV_MODELS        = "dev/models"

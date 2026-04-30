@@ -647,6 +647,95 @@ data class DiagRoutesResponse(
     val count: Int = 0,
 )
 
+// ── /api/diag/wires ──────────────────────────────────────────────────────────
+
+/** One row per peer service this HTTP process has exchanged IPC with. */
+@Serializable
+data class DiagWireRow(
+    val service: String,
+    @SerialName("service_id") val serviceId: Int = 0,
+    @SerialName("pipe_name") val pipeName: String = "",
+    @SerialName("last_seen_ms") val lastSeenMs: Long = 0L,
+    @SerialName("quiet_minutes") val quietMinutes: Long = 0L,
+    /** "up" / "stale" / "unknown" — human-readable. */
+    val state: String = "unknown",
+)
+
+@Serializable
+data class DiagWiresResponse(
+    @SerialName("now_ms") val nowMs: Long = 0L,
+    val count: Int = 0,
+    val wires: List<DiagWireRow> = emptyList(),
+)
+
+// ── /api/diag/heartbeats ─────────────────────────────────────────────────────
+
+@Serializable
+data class DiagHeartbeatRow(
+    @SerialName("service_id") val serviceId: Long = 0L,
+    @SerialName("last_hb_ms") val lastHbMs: Long = 0L,
+    @SerialName("quiet_sec")  val quietSec: Long = 0L,
+    val healthy: Boolean = false,
+    /** "up" / "stale" / "down". */
+    val state: String = "down",
+)
+
+@Serializable
+data class DiagHeartbeatsResponse(
+    val count: Int = 0,
+    val heartbeats: List<DiagHeartbeatRow> = emptyList(),
+)
+
+// ── /api/diag/health ─────────────────────────────────────────────────────────
+
+@Serializable
+data class DiagHealthLLM(
+    val provider: String = "",
+    val model: String = "",
+    val healthy: Boolean = false,
+)
+
+/** Aggregated system status — what the Health Banner consumes. */
+@Serializable
+data class DiagHealthResponse(
+    @SerialName("ts_ms") val tsMs: Long = 0L,
+    val llm: DiagHealthLLM = DiagHealthLLM(),
+    @SerialName("wires_up_count")  val wiresUp: Int = 0,
+    @SerialName("wires_total")     val wiresTotal: Int = 0,
+    @SerialName("heartbeats_up")   val heartbeatsUp: Int = 0,
+    @SerialName("heartbeats_total") val heartbeatsTotal: Int = 0,
+    @SerialName("intent_pending")  val intentPending: Long = 0L,
+    @SerialName("action_pending")  val actionPending: Long = 0L,
+    @SerialName("memory_count")    val memoryCount: Long = 0L,
+    /** Human-readable issue strings — empty when healthy. */
+    val issues: List<String> = emptyList(),
+)
+
+// ── /api/memory/why ──────────────────────────────────────────────────────────
+
+@Serializable
+data class MemoryWhyHit(
+    val id: Long = 0L,
+    val preview: String = "",
+    val importance: Double = 0.0,
+    val recency: Double = 0.0,
+    val access: Double = 0.0,
+    val score: Double = 0.0,
+    @SerialName("age_days") val ageDays: Double = 0.0,
+    @SerialName("access_count") val accessCount: Long = 0L,
+    @SerialName("created_ms") val createdMs: Long = 0L,
+    @SerialName("last_access_ms") val lastAccessMs: Long = 0L,
+)
+
+@Serializable
+data class MemoryWhyResponse(
+    val memories: List<MemoryWhyHit> = emptyList(),
+    val count: Int = 0,
+    @SerialName("score_formula") val scoreFormula: String = "",
+    @SerialName("recency_half_life_days") val recencyHalfLifeDays: Double = 7.0,
+    @SerialName("entities_filter") val entitiesFilter: List<String> = emptyList(),
+)
+
 @Serializable
 data class PairedDevice(
     val id: String,

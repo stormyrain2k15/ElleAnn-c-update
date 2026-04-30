@@ -157,8 +157,29 @@ private:
     bool InitializeCore();
     void ShutdownCore();
 
-    /* Connect to dependency services with retry */
-    void ConnectDependencies();
+    /* PASSIVE peer-connect.
+     *
+     * Originally this method tried 5 times with backoff (~15s total) and
+     * gave up. That made cold-boot order load-bearing: if Heartbeat came
+     * up before Memory, Heartbeat would never reconnect to Memory after
+     * Memory finished initialising, and stayed permanently blind to it
+     * until the Heartbeat process restarted.
+     *
+     * Now: do ONE non-blocking connect attempt per declared dependency
+     * (1500 ms timeout each), then return. Successes are logged; misses
+     * are silent so we don't spam the log with "not yet up" warnings
+     * during normal cold-boot. The background reconnector picks up
+     * everything that didn't connect on the first pass.                */
+    void ConnectDependenciesNonBlocking();
+
+    /* Background reconnector thread (started once during init,
+     * joined during shutdown). Wakes every kReconnectIntervalMs
+     * and re-attempts ConnectTo for any declared dependency we
+     * are not currently connected to. Idempotent — m_ipcHub.ConnectTo
+     * short-circuits when already wired.                             */
+    std::thread        m_reconnectThread;
+    void RunReconnectorLoop();
+    static constexpr uint32_t kReconnectIntervalMs = 5000;
 };
 
 /*──────────────────────────────────────────────────────────────────────────────

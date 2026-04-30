@@ -32,7 +32,7 @@
                 "rate_limit_rpm": 30
             },
             "openai": {
-                "enabled": false,
+                "enabled": true,
                 "api_url": "https://api.openai.com/v1/chat/completions",
                 "api_key": "",
                 "model": "gpt-4o",
@@ -42,7 +42,7 @@
                 "timeout_ms": 60000
             },
             "anthropic": {
-                "enabled": false,
+                "enabled": true,
                 "api_url": "https://api.anthropic.com/v1/messages",
                 "api_key": "",
                 "model": "claude-sonnet-4-5-20250514",

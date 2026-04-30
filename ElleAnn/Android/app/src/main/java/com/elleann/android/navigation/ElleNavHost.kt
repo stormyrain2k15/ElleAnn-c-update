@@ -366,6 +366,7 @@ private fun TabNavHost(
             )
         }
         composable(ElleRoutes.DEV_LOGS)          { LogMonitorScreen(containerExtended) { navController.popBackStack() } }
+        composable(ElleRoutes.DEV_HEALTH)        { SystemHealthScreen(containerExtended) { navController.popBackStack() } }
         composable(ElleRoutes.DEV_SERVICES)      { ServiceStatusScreen(containerExtended) { navController.popBackStack() } }
         composable(ElleRoutes.DEV_DIAGNOSTICS)   { DiagnosticsScreen(containerExtended) { navController.popBackStack() } }
         composable(ElleRoutes.DEV_API_EXPLORER)  { ApiExplorerScreen(containerExtended) { navController.popBackStack() } }

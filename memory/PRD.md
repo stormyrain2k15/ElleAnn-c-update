@@ -1522,3 +1522,104 @@ curl -X POST http://<host>:8080/api/auth/login \
      -d '{"username":"my-fiesta-id","password":"my-fiesta-pw"}'
 ```
 That's it.  No admin key, no pair-code, no pre-step.
+
+## Session Feb-2026 (continued) — v2.x: Passive service mesh + LLM cascade + Health UI
+
+**User directive recap**:
+1. Groq stays as primary LLM; OpenAI / Anthropic / local_llama all become
+   active fallbacks (user adds keys at compile time).
+2. The Android app + every panel must be self-sufficient ("dev panel
+   should be in the android app", not the React frontend — the React
+   tree is a corpse and stays that way).
+3. **Hard pain point**: inter-service dependencies were preventing
+   clean start/stop. Services need to be PASSIVE — connect to peers
+   as they appear, in any order.
+
+### LLM cascade (`Shared/ElleLLM.cpp`) — Groq + every other provider
+- `Chat()` failover is now **mode-independent** (was gated on
+  `LLM_MODE_HYBRID`, so a misconfigured `mode: "api"` killed all
+  fallback). Any time a provider returns `!success`, the engine walks
+  every other live provider in stable order:
+  ```
+  forced → primary_provider → fallback_provider →
+    GROQ → OPENAI → ANTHROPIC → LM_STUDIO → CUSTOM_API → LOCAL_LLAMA
+  ```
+  (de-duplicated, only available providers tried). Each fallback
+  attempt logs provider id + model + error so the dev panel and
+  /api/diag/health can show "Groq 401 → answered by Anthropic".
+- `elle_master_config.json` flipped `openai.enabled` and
+  `anthropic.enabled` to `true`. They stay no-ops until the user
+  drops in an api_key (provider Init refuses to register on empty
+  key — already audited Feb 2026), so this is a one-liner activation
+  at compile time: paste key, Reinitialize() picks it up.
+
+### Passive service mesh (`Shared/ElleServiceBase.{h,cpp}`)
+**Pre-pivot**: `ConnectDependencies()` did 5 retries with backoff
+(~15 s total) and gave up. If Heartbeat came up before Memory,
+Heartbeat stayed permanently blind to Memory until the Heartbeat
+process restarted. Cold-boot order was load-bearing.
+
+**Post-pivot**:
+- New `ConnectDependenciesNonBlocking()` — one short attempt
+  (1500 ms timeout) per declared dependency, then returns. Successes
+  log; misses are silent.
+- New `RunReconnectorLoop()` background thread, started once during
+  init, joined during shutdown. Wakes every 5 s
+  (`InterruptibleSleep`-based, so shutdown latency is ≤ tick),
+  re-attempts `ConnectTo` for every declared dependency.
+  `m_ipcHub.ConnectTo` is idempotent — short-circuits when already
+  wired — so the loop is cheap on the steady-state path.
+- `ShutdownCore` now flips `m_running` under `m_stopMutex`,
+  notify_all's `m_stopCv`, and joins `m_reconnectThread` BEFORE
+  tearing down the IPC hub, so the reconnector never touches a
+  half-destroyed hub.
+- The existing lazy-reconnect path inside `ElleIPCHub::Send` (added
+  earlier) handles peer crashes mid-conversation. The new
+  reconnector handles the cold-boot ordering case. Together: any
+  start/stop order works.
+
+### Android — surface the new diagnostics in the app
+**API additions** (`data/ElleApiExtended.kt`, `data/models/AllModels.kt`):
+- `getDiagWires()` → `DiagWiresResponse` (in-process IPC stamps).
+- `getDiagHeartbeats()` → `DiagHeartbeatsResponse` (cross-process
+  Workers truth).
+- `getDiagHealth()` → `DiagHealthResponse` (single-call aggregator
+  with `issues[]`).
+- `getMemoryWhy(entities)` → `MemoryWhyResponse` (memory ranking
+  explainability, the dev-side counterpart to provider_used in chat
+  replies).
+- All response shapes calibrated against the actual JSON the C++
+  routes emit (verified line-by-line in `HTTPServer.cpp`).
+
+**New screen — System Health** (`ui/dev/SystemHealthScreen.kt`):
+- 10-second auto-refresh loop, polls all four diag endpoints.
+- Top "issues panel" lights up red if `/api/diag/health` is
+  unreachable, green if `issues[]` is empty, amber if non-empty.
+- Per-section blocks for LLM (provider/model/healthy), wires (per-
+  service quiet-time + state), heartbeats (per-service quiet-sec +
+  state), queues (intent/action/memory + per-service depth).
+- Registered as `ElleRoutes.DEV_HEALTH`, surfaced as the second
+  card in the Dev dashboard.
+
+**Home-screen banner** (`ui/elle/ElleHomeScreen.kt`):
+- New `HealthBanner` composable, polls `/api/diag/health` every 30s.
+- **Silent when green** — the banner only appears when the LLM is
+  down or `issues[]` is non-empty. Always-visible status bars become
+  wallpaper; this one earns its slot on the home screen by only
+  showing up when the operator needs to look.
+- Severity-aware colour: red strip when LLM is offline, amber when
+  there are warnings only.
+
+### Verification
+- C++ brace/paren balance preserved (skew matches pre-edit; the
+  string-literal false positives the handoff summary documented are
+  unchanged).
+- Kotlin balance clean across all 7 touched files (DevScreens.kt
+  retains its pre-existing +2 skew from `${...}` interpolations my
+  stripper doesn't account for).
+
+### Still pending (next session)
+- User adds Groq API key at compile time → first end-to-end LLM
+  smoke test.
+- Resume Fiesta C++ headless client once private-server buffer
+  issues are resolved (still on hold per user).

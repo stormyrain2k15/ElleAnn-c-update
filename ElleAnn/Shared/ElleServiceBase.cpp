@@ -600,8 +600,14 @@ bool ElleServiceBase::InitializeCore() {
         this->OnMessage(msg, sender);
     });
 
-    /* 7. Connect to dependency services */
-    ConnectDependencies();
+    /* 7. Connect to dependency services — non-blocking, with a background
+     *    reconnector thread that handles peers that come up later. Service
+     *    init no longer waits 5×backoff on missing peers; the reconnector
+     *    handles them as they appear, in any startup order. */
+    ConnectDependenciesNonBlocking();
+    if (!m_reconnectThread.joinable()) {
+        m_reconnectThread = std::thread([this]{ this->RunReconnectorLoop(); });
+    }
 
     /* 8. Initialize LLM engine if this service needs it */
     if (m_serviceId == SVC_COGNITIVE || m_serviceId == SVC_SELF_PROMPT || 
@@ -620,6 +626,19 @@ bool ElleServiceBase::InitializeCore() {
 
 void ElleServiceBase::ShutdownCore() {
     ELLE_INFO("Shutting down %s...", m_displayName.c_str());
+
+    /* Wake + join the reconnector before tearing the IPC hub down so it
+     * never touches a half-destroyed hub. m_running has already been
+     * flipped false by the dispatcher path; m_stopCv.notify_all() in
+     * the InterruptibleSleep used inside the loop means the join is
+     * fast (≤ tickIntervalMs, not the full 5s reconnect period).      */
+    {
+        std::lock_guard<std::mutex> lk(m_stopMutex);
+        m_running = false;
+    }
+    m_stopCv.notify_all();
+    if (m_reconnectThread.joinable()) m_reconnectThread.join();
+
     /* Deregister before we tear the hub down so any racing identity
      * callers see nullptr and no-op rather than touching freed memory. */
     ElleIdentityCore::SetIPCHub(nullptr);
@@ -629,23 +648,47 @@ void ElleServiceBase::ShutdownCore() {
     ElleLogger::Instance().Shutdown();
 }
 
-void ElleServiceBase::ConnectDependencies() {
+void ElleServiceBase::ConnectDependenciesNonBlocking() {
     auto deps = GetDependencies();
     for (auto dep : deps) {
-        ELLE_INFO("Connecting to %s...", ElleIPC::GetServiceName(dep));
-        for (int attempt = 0; attempt < 5; attempt++) {
-            if (m_ipcHub.ConnectTo(dep, 3000)) {
-                ELLE_INFO("Connected to %s", ElleIPC::GetServiceName(dep));
-                break;
-            }
-            ELLE_WARN("Failed to connect to %s (attempt %d/5)",
-                      ElleIPC::GetServiceName(dep), attempt + 1);
-            /* Interruptible back-off: if SCM asks us to stop mid-init
-             * (e.g. a dependency is down and Heartbeat escalates),
-             * InterruptibleSleep returns immediately on m_running==false
-             * instead of blocking up to 5 seconds per attempt.         */
-            InterruptibleSleep(1000 * (attempt + 1));
+        if (!m_running.load()) break;
+        /* Short timeout — we do NOT want service init to block on a peer
+         * that hasn't started yet. The reconnector will retry every 5 s. */
+        if (m_ipcHub.ConnectTo(dep, 1500)) {
+            ELLE_INFO("Connected to %s", ElleIPC::GetServiceName(dep));
+        } else {
+            ELLE_INFO("Peer %s not yet up — reconnector will pick it up",
+                      ElleIPC::GetServiceName(dep));
+        }
+    }
+}
+
+void ElleServiceBase::RunReconnectorLoop() {
+    /* Wakes every kReconnectIntervalMs (or earlier if shutdown is
+     * requested via m_stopCv) and tries to (re-)connect to every
+     * declared dependency that isn't currently wired. ConnectTo is
+     * idempotent: it short-circuits when already connected, and the
+     * pipe-side `EllePipeConnection` tracks `m_connected` so a peer
+     * that crashed and respawned on the same pipe name is detected
+     * here and re-wired without restarting our service.              */
+    while (m_running.load()) {
+        InterruptibleSleep(kReconnectIntervalMs);
+        if (!m_running.load()) break;
+
+        auto deps = GetDependencies();
+        for (auto dep : deps) {
             if (!m_running.load()) break;
+            /* ConnectTo holds m_clientMutex internally; cheap on the
+             * already-connected path (one map lookup + IsConnected).  */
+            if (m_ipcHub.ConnectTo(dep, 1000)) {
+                /* Only log when this is a *new* connection (i.e. we
+                 * had no live client for this peer before this call).
+                 * The hub doesn't currently expose that, so we suppress
+                 * the chatter and rely on the StampLastSeen path on
+                 * actual traffic to surface liveness in /api/diag/wires.
+                 * Logging here would print "connected to X" every 5 s
+                 * forever once everyone is up.                          */
+            }
         }
     }
 }

@@ -156,6 +156,7 @@ fun DevDashboardScreen(
 
     val sections = listOf(
         DevSection("Dashboard",     "Server status, analytics",         ElleRoutes.DEV_DASHBOARD),
+        DevSection("System Health", "LLM, IPC wires, heartbeats, queues", ElleRoutes.DEV_HEALTH),
         DevSection("Logs",          "Console log stream",               ElleRoutes.DEV_LOGS),
         DevSection("Services",      "19 Windows service status",        ElleRoutes.DEV_SERVICES),
         DevSection("Diagnostics",   "IPC queues, route manifest",       ElleRoutes.DEV_DIAGNOSTICS),

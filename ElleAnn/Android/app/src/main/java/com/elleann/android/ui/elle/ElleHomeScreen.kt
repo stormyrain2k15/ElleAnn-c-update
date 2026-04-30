@@ -274,6 +274,14 @@ fun ElleHomeScreen(
             // resume instead of dead.
             state.recap?.let { r -> RecapStrip(r) }
 
+            // ─── System health banner ──────────────────────────────────────
+            // Polls /api/diag/health every 30 s; hides itself when nothing
+            // is wrong. The intent is for the operator to see issues *as
+            // they happen* without having to dig into the Dev tab — Elle
+            // should be the first to know when one of her own organs is
+            // misbehaving.
+            HealthBanner(containerExtended)
+
             // ── Greeting card ─────────────────────────────────────────────────
             state.greeting?.let { greeting ->
                 IsyaPanel(title = "✦ Elle speaks", flowingBorder = true) {
@@ -427,6 +435,80 @@ private fun RecapStrip(r: com.elleann.android.data.models.RecapResponse) {
                     style = MaterialTheme.typography.bodySmall,
                     color = IsyaCream.copy(alpha = 0.85f),
                     modifier = Modifier.padding(vertical = 1.dp),
+                )
+            }
+        }
+    }
+}
+
+
+/**
+ * HealthBanner — passive, self-hiding diagnostic strip on the home screen.
+ *
+ *   - Polls /api/diag/health every 30 s.
+ *   - Renders nothing while the system is healthy (no `issues[]` and the
+ *     LLM is up). This is deliberate: a banner that's always visible
+ *     becomes wallpaper. The user only sees this when something is wrong,
+ *     so when they DO see it they pay attention.
+ *   - Falls back gracefully if /api/diag/health is unreachable (e.g.
+ *     no admin key configured) — silently does nothing.
+ *
+ * The Dev → System Health screen is the deep-dive for the same data.
+ */
+@Composable
+private fun HealthBanner(container: AppContainerExtended) {
+    var health by remember { mutableStateOf<com.elleann.android.data.models.DiagHealthResponse?>(null) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            // Prefer the admin-keyed API since /api/diag/health is admin-gated;
+            // gracefully no-op if no admin key is configured.
+            val api = container.adminApi ?: return@LaunchedEffect
+            runCatching { api.getDiagHealth() }.onSuccess { health = it }
+            delay(30_000)
+        }
+    }
+
+    val h = health ?: return
+    val llmDown = !h.llm.healthy
+    val hasIssues = h.issues.isNotEmpty()
+    if (!llmDown && !hasIssues) return // Silent when green.
+
+    val severe = llmDown
+    val bg = if (severe) androidx.compose.ui.graphics.Color(0xFF3A0D0D)
+             else        androidx.compose.ui.graphics.Color(0xFF3A2A0D)
+    val accent = if (severe) androidx.compose.ui.graphics.Color(0xFFFF6F6F)
+                 else        IsyaGold
+
+    androidx.compose.material3.Surface(
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+        color = bg,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (llmDown) "Elle's brain is offline" else "System needs attention",
+                    color = accent,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+            if (llmDown) {
+                Text(
+                    "LLM provider \"${h.llm.provider.ifBlank { "—" }}\" is not responding. " +
+                        "Add an api_key in elle_master_config.json or wait for the fallback to come up.",
+                    color = androidx.compose.ui.graphics.Color(0xFFFFE8B0),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            h.issues.forEach { iss ->
+                Text(
+                    "·  $iss",
+                    color = androidx.compose.ui.graphics.Color(0xFFFFE8B0),
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
         }
