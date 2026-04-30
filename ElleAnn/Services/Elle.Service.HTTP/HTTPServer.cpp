@@ -168,6 +168,13 @@ struct HTTPRequest {
         if (!StrictParseLL(it->second, v)) return def;
         return v;
     }
+    /** Look up a query-string value as a (URL-decoded) string. Returns
+     *  the supplied default when the key is absent. Decoding is already
+     *  done by ParseQueryString. */
+    std::string QueryString(const std::string& key, const std::string& def = "") const {
+        auto it = queryParams.find(key);
+        return it == queryParams.end() ? def : it->second;
+    }
     int PathInt(const std::string& param, int def = 0) const {
         auto it = headers.find("x-path-" + param);
         if (it == headers.end()) return def;
@@ -3061,6 +3068,123 @@ private:
         }, AUTH_ADMIN);
 
         /* ==================================================================
+         *  GET /api/diag/health  (ADMIN)
+         *
+         *  Single-call aggregator: combines /api/me, /api/ai/status,
+         *  /api/diag/wires, /api/diag/heartbeats, /api/diag/queues into
+         *  one response so the dev panel home / Android admin tab can
+         *  paint a complete picture in one round trip.
+         *
+         *    {
+         *      "ts_ms":            <epoch>,
+         *      "llm": { provider, model, healthy },
+         *      "wires_up_count":    <int>,
+         *      "wires_total":       <int>,
+         *      "heartbeats_up":     <int>,
+         *      "heartbeats_total":  <int>,
+         *      "intent_pending":    <int>,
+         *      "action_pending":    <int>,
+         *      "memory_count":      <int>,
+         *      "issues":            ["llm down", "Cognitive stale"…]
+         *    }
+         *
+         *  The `issues` array is the operator-actionable summary — empty
+         *  when everything is green, populated with one short string per
+         *  problem otherwise.  Designed so a watchdog cron can poll
+         *  this every minute and alert when issues.length > 0.        */
+        m_router.Register("GET", "/api/diag/health", [this](const HTTPRequest&) {
+            json issues = json::array();
+            const uint64_t now = ELLE_MS_NOW();
+
+            /* LLM */
+            auto& llm    = ElleConfig::Instance().GetLLM();
+            auto& engine = ElleLLMEngine::Instance();
+            const bool llmHealthy = engine.IsInitialized();
+            std::string activeProvider = engine.GetActiveProviderName();
+            if (activeProvider.empty()) activeProvider = llm.primary_provider;
+            std::string activeModel;
+            auto pit = llm.providers.find(activeProvider);
+            if (pit != llm.providers.end() && !pit->second.model.empty())
+                activeModel = pit->second.model;
+            if (!llmHealthy) issues.push_back("llm: down");
+
+            /* Wires (in-process IPC stamps) */
+            const auto stamps = GetIPCHub().LastSeenPerService();
+            int wiresUp = 0;
+            for (auto& kv : stamps) {
+                if (now - kv.second <= 5 * 60 * 1000) wiresUp++;
+            }
+            const int wiresTotal = (int)stamps.size();
+
+            /* Heartbeats (DB-shared) */
+            int hbUp = 0, hbTotal = 0;
+            {
+                auto rs = ElleSQLPool::Instance().Query(
+                    "SELECT Healthy, "
+                    "  DATEDIFF(SECOND, "
+                    "           DATEADD(SECOND, LastHeartbeatMs/1000, '1970-01-01'), "
+                    "           GETUTCDATE()) AS quiet_sec "
+                    "  FROM ElleSystem.dbo.Workers;");
+                if (rs.success) {
+                    hbTotal = (int)rs.rows.size();
+                    for (auto& row : rs.rows) {
+                        int64_t healthy = 0, quiet = 0;
+                        row.TryGetInt(0, healthy);
+                        row.TryGetInt(1, quiet);
+                        if (healthy && quiet <= 300) hbUp++;
+                    }
+                    if (hbTotal > 0 && hbUp < hbTotal) {
+                        issues.push_back("heartbeats: " +
+                            std::to_string(hbTotal - hbUp) + " stale of " +
+                            std::to_string(hbTotal));
+                    }
+                }
+            }
+
+            /* Queues + memory totals */
+            int64_t intentPending = 0, actionPending = 0, memoryCount = 0;
+            {
+                auto rs = ElleSQLPool::Instance().Query(
+                    "SELECT COUNT(*) FROM ElleCore.dbo.IntentQueue WHERE Status = 0;");
+                if (rs.success && !rs.rows.empty()) rs.rows[0].TryGetInt(0, intentPending);
+            }
+            {
+                auto rs = ElleSQLPool::Instance().Query(
+                    "SELECT COUNT(*) FROM ElleCore.dbo.action_queue WHERE status = 0;");
+                if (rs.success && !rs.rows.empty()) rs.rows[0].TryGetInt(0, actionPending);
+            }
+            {
+                auto rs = ElleSQLPool::Instance().Query(
+                    "SELECT COUNT(*) FROM ElleCore.dbo.memory;");
+                if (rs.success && !rs.rows.empty()) rs.rows[0].TryGetInt(0, memoryCount);
+            }
+            /* Surface stuck queues — anything over 1k pending is a sign
+             * the worker is wedged or the producer is louder than the
+             * consumer can drain. */
+            if (intentPending > 1000)
+                issues.push_back("intent_queue: " + std::to_string(intentPending) + " pending");
+            if (actionPending > 1000)
+                issues.push_back("action_queue: " + std::to_string(actionPending) + " pending");
+
+            return HTTPResponse::OK({
+                {"ts_ms",            (int64_t)now},
+                {"llm", {
+                    {"provider",  activeProvider},
+                    {"model",     activeModel},
+                    {"healthy",   llmHealthy}
+                }},
+                {"wires_up_count",   wiresUp},
+                {"wires_total",      wiresTotal},
+                {"heartbeats_up",    hbUp},
+                {"heartbeats_total", hbTotal},
+                {"intent_pending",   intentPending},
+                {"action_pending",   actionPending},
+                {"memory_count",     memoryCount},
+                {"issues",           issues}
+            });
+        }, AUTH_ADMIN);
+
+        /* ==================================================================
          *  POST /api/admin/config/reload  (ADMIN)
          *
          *  Re-reads elle_master_config.json from disk into this process,
@@ -3116,14 +3240,67 @@ private:
             int limit = req.QueryInt("limit", 10);
             if (limit <= 0)  limit = 10;
             if (limit > 50)  limit = 50;
-            auto rs = ElleSQLPool::Instance().Query(
-                "SELECT TOP " + std::to_string(limit) + " "
-                "  id, content, summary, importance, "
-                "  CONVERT(BIGINT, created_ms)     AS created_ms, "
-                "  CONVERT(BIGINT, last_access_ms) AS last_access_ms, "
-                "  COALESCE(access_count, 0)       AS access_count "
-                "  FROM ElleCore.dbo.memory "
-                "  ORDER BY id DESC;");   /* hydrate from recent — deterministic */
+
+            /* Optional entity filter: ?entities=foo,bar narrows the
+             * candidate set to memories that touched any of those
+             * names (via the memory_entity_links table). This is the
+             * "explain that reply" flow: the chat reply already returns
+             * an `entities` array, so the dev panel just plumbs them
+             * straight as the filter. */
+            std::string entitiesParam = req.QueryString("entities", "");
+            std::vector<std::string> entityList;
+            if (!entitiesParam.empty()) {
+                std::stringstream ss(entitiesParam);
+                std::string tok;
+                while (std::getline(ss, tok, ',')) {
+                    /* trim */
+                    auto a = tok.find_first_not_of(" \t");
+                    auto b = tok.find_last_not_of(" \t");
+                    if (a != std::string::npos)
+                        entityList.push_back(tok.substr(a, b - a + 1));
+                }
+            }
+
+            std::string sql;
+            std::vector<std::string> params;
+            if (entityList.empty()) {
+                sql = "SELECT TOP " + std::to_string(limit) + " "
+                      "  m.id, m.content, m.summary, m.importance, "
+                      "  CONVERT(BIGINT, m.created_ms)     AS created_ms, "
+                      "  CONVERT(BIGINT, m.last_access_ms) AS last_access_ms, "
+                      "  COALESCE(m.access_count, 0)       AS access_count "
+                      "  FROM ElleCore.dbo.memory m "
+                      "  ORDER BY m.id DESC;";
+            } else {
+                /* JOIN through memory_entity_links → world_entity. We
+                 * do exact-name match (entity names are canonical
+                 * lowercase per WorldModel's normalisation). DISTINCT
+                 * is important — a memory linked to two of the
+                 * filter entities would otherwise duplicate. */
+                std::string placeholders;
+                for (size_t i = 0; i < entityList.size(); i++) {
+                    if (i) placeholders += ",";
+                    placeholders += "?";
+                    params.push_back(entityList[i]);
+                }
+                sql = "SELECT TOP " + std::to_string(limit) + " "
+                      "  m.id, m.content, m.summary, m.importance, "
+                      "  CONVERT(BIGINT, m.created_ms)     AS created_ms, "
+                      "  CONVERT(BIGINT, m.last_access_ms) AS last_access_ms, "
+                      "  COALESCE(m.access_count, 0)       AS access_count "
+                      "  FROM ElleCore.dbo.memory m "
+                      "  INNER JOIN ElleCore.dbo.memory_entity_links mel "
+                      "    ON mel.memory_id = m.id "
+                      "  INNER JOIN ElleCore.dbo.world_entity we "
+                      "    ON we.id = mel.entity_id "
+                      "  WHERE we.name IN (" + placeholders + ") "
+                      "  GROUP BY m.id, m.content, m.summary, m.importance, "
+                      "    m.created_ms, m.last_access_ms, m.access_count "
+                      "  ORDER BY m.id DESC;";
+            }
+            auto rs = params.empty()
+                        ? ElleSQLPool::Instance().Query(sql)
+                        : ElleSQLPool::Instance().QueryParams(sql, params);
             if (!rs.success)
                 return HTTPResponse::Err(500, "SQL query failed");
 
@@ -3180,7 +3357,8 @@ private:
                 {"memories",   arr},
                 {"count",      (int)arr.size()},
                 {"score_formula", "importance*0.4 + recency*0.4 + access*0.2"},
-                {"recency_half_life_days", 7.0}
+                {"recency_half_life_days", 7.0},
+                {"entities_filter", entityList}
             });
         });
 

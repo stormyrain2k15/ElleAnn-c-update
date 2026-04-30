@@ -626,6 +626,19 @@ protected:
         ELLE_INFO("Bonding service stopped");
     }
 
+    void OnConfigReload() override {
+        /* Re-seed engine constants from the freshly-reloaded master
+         * config. The bonding policy (decay rates, vulnerability
+         * weights, etc.) lives under config.bonding in elle_master_
+         * config.json — calling Initialize() re-reads it. The current
+         * relationship_state row is preserved (it's persisted in
+         * dbo.CrystalProfile, not engine memory) so the user's lived
+         * bond doesn't reset.  Pre-pivot a tuning change required a
+         * full Bonding service restart. */
+        ELLE_INFO("Bonding: applying config reload (re-seeding engine policy)");
+        m_engine.Initialize();
+    }
+
     void OnTick() override {
         /* Cross-process identity sync is now push-based — SVC_IDENTITY
          * broadcasts IPC_IDENTITY_DELTA the moment a peer mutation commits

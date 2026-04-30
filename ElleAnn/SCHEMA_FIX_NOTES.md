@@ -75,25 +75,27 @@ PascalCase tables that genuinely match code (`PairedDevices`,
 
 ```
 1. ElleAnn_Schema.sql
-2. ElleAnn_PairedDevicesDelta.sql
-3. ElleAnn_QueueReaperDelta.sql
-4. ElleAnn_MemoryDelta.sql
-5. ElleAnn_GameUnification.sql
-6. ElleAnn_Identity_Schema.sql
-7. ElleAnn_XChromosome_Schema.sql
-```
-
-**Upgrade from older install (anything before Feb 2026):**
-
-```
-1. ElleAnn_SchemaSync_FebPivot.sql        ← THIS FIRST
-2. ElleAnn_Schema.sql
+2. ElleAnn_System_Schema.sql           ← ElleSystem.dbo.Workers/Logs/...
 3. ElleAnn_PairedDevicesDelta.sql
 4. ElleAnn_QueueReaperDelta.sql
 5. ElleAnn_MemoryDelta.sql
 6. ElleAnn_GameUnification.sql
 7. ElleAnn_Identity_Schema.sql
 8. ElleAnn_XChromosome_Schema.sql
+```
+
+**Upgrade from older install (anything before Feb 2026):**
+
+```
+1. ElleAnn_SchemaSync_FebPivot.sql      ← THIS FIRST
+2. ElleAnn_Schema.sql
+3. ElleAnn_System_Schema.sql            ← ElleSystem.dbo.Workers/Logs/...
+4. ElleAnn_PairedDevicesDelta.sql
+5. ElleAnn_QueueReaperDelta.sql
+6. ElleAnn_MemoryDelta.sql
+7. ElleAnn_GameUnification.sql
+8. ElleAnn_Identity_Schema.sql
+9. ElleAnn_XChromosome_Schema.sql
 ```
 
 If `ElleAnn_SchemaSync_FebPivot.sql` PRINTs warnings about non-empty
