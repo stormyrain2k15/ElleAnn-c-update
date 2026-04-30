@@ -1354,7 +1354,7 @@ private:
             llmResp.provider_used == LLM_PROVIDER_GROQ        ? "groq"        :
             llmResp.provider_used == LLM_PROVIDER_OPENAI      ? "openai"      :
             llmResp.provider_used == LLM_PROVIDER_ANTHROPIC   ? "anthropic"   :
-            llmResp.provider_used == LLM_PROVIDER_LM_STUDIO   ? "lm_studio"   :
+            llmResp.provider_used == LLM_PROVIDER_LOCAL_LMSTUDIO ? "lm_studio"   :
             llmResp.provider_used == LLM_PROVIDER_LOCAL_LLAMA ? "local_llama" :
             llmResp.provider_used == LLM_PROVIDER_CUSTOM_API  ? "custom_api"  :
                                                                  "unknown";
