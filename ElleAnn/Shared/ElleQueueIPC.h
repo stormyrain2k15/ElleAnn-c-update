@@ -222,6 +222,18 @@ public:
     uint64_t MessagesSent() const { return m_sent; }
     uint64_t MessagesReceived() const { return m_received; }
 
+    /* Per-service liveness stamps for /api/diag/wires.
+     *
+     * Updated on every successful Send (target stamped) and every
+     * incoming message (sender stamped). Empty until any traffic flows
+     * — a service that never appeared at all will be reported "unknown"
+     * by the dev panel rather than "down" so we don't spuriously red-
+     * flag services that are simply not started yet (lazy services).  */
+    std::unordered_map<ELLE_SERVICE_ID, uint64_t> LastSeenPerService() const {
+        std::lock_guard<std::mutex> lk(m_lastSeenMutex);
+        return m_lastSeen;
+    }
+
 private:
     ELLE_SERVICE_ID m_serviceId = (ELLE_SERVICE_ID)0;
     HANDLE          m_hIOCP = nullptr;
@@ -248,6 +260,18 @@ private:
 
     std::atomic<uint64_t> m_sent{0};
     std::atomic<uint64_t> m_received{0};
+
+    /* Per-service last-seen ms epoch — populated on Send/Recv. Mutex-
+     * guarded because /api/diag/wires reads from the HTTP thread while
+     * the IOCP workers write. */
+    mutable std::mutex                              m_lastSeenMutex;
+    std::unordered_map<ELLE_SERVICE_ID, uint64_t>   m_lastSeen;
+    void StampLastSeen(ELLE_SERVICE_ID id) {
+        const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        std::lock_guard<std::mutex> lk(m_lastSeenMutex);
+        m_lastSeen[id] = now;
+    }
 };
 
 /*──────────────────────────────────────────────────────────────────────────────

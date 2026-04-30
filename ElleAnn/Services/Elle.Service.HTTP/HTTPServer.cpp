@@ -2948,6 +2948,145 @@ private:
             return HTTPResponse::OK({{"routes", arr}, {"count", (int)arr.size()}});
         }, AUTH_ADMIN);
 
+        /* ==================================================================
+         *  GET /api/diag/wires  (ADMIN)
+         *
+         *  Runtime introspection of the IPC fabric.  Returns one row per
+         *  configured pipe with:
+         *    - pipe_name           ("elle_ipc_<service>")
+         *    - service             (logical destination, e.g. "Cognitive")
+         *    - connected           ("up" / "down" / "unknown")
+         *    - last_seen_ms        (epoch ms of last successful Send/Recv;
+         *                           0 = never, makes stale services jump
+         *                           out of the dev panel)
+         *    - quiet_minutes       (now - last_seen_ms / 60000)
+         *
+         *  Pre-pivot the only way to audit the wire fabric was running
+         *  the static grep of producers vs consumers on disk — that
+         *  catches "the code never wired it up" but not "the code wired
+         *  it up and then the destination service silently died at
+         *  runtime". This endpoint catches both.                       */
+        m_router.Register("GET", "/api/diag/wires", [this](const HTTPRequest&) {
+            json wires = json::array();
+            const auto stamps = GetIPCHub().LastSeenPerService();
+            const uint64_t now = ELLE_MS_NOW();
+            const std::pair<ELLE_SERVICE_ID, const char*> services[] = {
+                {SVC_HTTP_SERVER,   "HTTPServer"},
+                {SVC_COGNITIVE,     "Cognitive"},
+                {SVC_EMOTIONAL,     "Emotional"},
+                {SVC_MEMORY,        "Memory"},
+                {SVC_BONDING,       "Bonding"},
+                {SVC_INTENT_QUEUE,  "IntentQueue"},
+                {SVC_ACTION,        "Action"},
+                {SVC_HARDWARE,      "Hardware"},
+                {SVC_VIDEO_GEN,     "VideoGen"},
+                {SVC_FIESTA,        "Fiesta"},
+                {SVC_HEARTBEAT,     "Heartbeat"},
+                {SVC_INNER_LIFE,    "InnerLife"},
+                {SVC_WORLD_MODEL,   "WorldModel"},
+                {SVC_SOLITUDE,      "Solitude"},
+                {SVC_FAMILY,        "Family"},
+                {SVC_X_CHROMOSOME,  "XChromosome"},
+                {SVC_DREAM,         "Dream"},
+                {SVC_IDENTITY,      "Identity"},
+                {SVC_CONSENT,       "Consent"},
+            };
+            for (const auto& [id, name] : services) {
+                auto it = stamps.find(id);
+                const uint64_t lastMs = (it != stamps.end()) ? it->second : 0;
+                const int64_t  quiet  = lastMs ? (int64_t)((now - lastMs) / 60000) : -1;
+                const char*    state  = lastMs == 0
+                                          ? "unknown"
+                                          : (now - lastMs > 5 * 60 * 1000 ? "stale" : "up");
+                wires.push_back({
+                    {"service",       name},
+                    {"service_id",    (int)id},
+                    {"pipe_name",     std::string("elle_ipc_") + name},
+                    {"state",         state},
+                    {"last_seen_ms",  lastMs},
+                    {"quiet_minutes", quiet}
+                });
+            }
+            return HTTPResponse::OK({
+                {"wires",   wires},
+                {"now_ms",  now},
+                {"count",  (int)wires.size()}
+            });
+        }, AUTH_ADMIN);
+
+        /* ==================================================================
+         *  GET /api/diag/heartbeats  (ADMIN)
+         *
+         *  Reads ElleSystem.dbo.Workers and reports per-service liveness.
+         *  Distinct from /api/diag/wires:
+         *    - /api/diag/wires      → in-process IPC stamps (this proc only)
+         *    - /api/diag/heartbeats → DB-shared truth (every running service
+         *                              writes its own heartbeat from the
+         *                              Heartbeat-driven base handler).
+         *
+         *  Pre-pivot Workers was written but never read by any HTTP route.
+         *  Operator had to query SQL directly.                            */
+        m_router.Register("GET", "/api/diag/heartbeats", [](const HTTPRequest&) {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT ServiceId, "
+                "  CONVERT(BIGINT, LastHeartbeatMs) AS hb_ms, "
+                "  Healthy, "
+                "  DATEDIFF(SECOND, "
+                "           DATEADD(SECOND, LastHeartbeatMs/1000, '1970-01-01'), "
+                "           GETUTCDATE()) AS quiet_sec "
+                "  FROM ElleSystem.dbo.Workers "
+                "  ORDER BY ServiceId;");
+            if (!rs.success)
+                return HTTPResponse::Err(500, "SQL query failed");
+            json arr = json::array();
+            for (auto& row : rs.rows) {
+                int64_t svcId = 0, hbMs = 0, healthy = 0, quietSec = 0;
+                row.TryGetInt(0, svcId);
+                row.TryGetInt(1, hbMs);
+                row.TryGetInt(2, healthy);
+                row.TryGetInt(3, quietSec);
+                /* Stale = no heartbeat in 5+ minutes. The base service
+                 * heartbeat cadence is 30s, so 5 missed beats is decisive. */
+                const char* state = (healthy == 0) ? "down"
+                                  : (quietSec > 300) ? "stale" : "up";
+                arr.push_back({
+                    {"service_id",   svcId},
+                    {"last_hb_ms",   hbMs},
+                    {"quiet_sec",    quietSec},
+                    {"healthy",      healthy != 0},
+                    {"state",        state}
+                });
+            }
+            return HTTPResponse::OK({{"heartbeats", arr}, {"count", (int)arr.size()}});
+        }, AUTH_ADMIN);
+
+        /* ==================================================================
+         *  POST /api/admin/config/reload  (ADMIN)
+         *
+         *  Re-reads elle_master_config.json from disk into this process,
+         *  then broadcasts IPC_CONFIG_RELOAD so every other Elle service
+         *  picks up the same new values. Each service's OnConfigReload()
+         *  hook fires after the in-memory config has been swapped, so
+         *  e.g. ElleLLMEngine can re-init providers with the freshly
+         *  edited api_keys without an SCM stop/start.
+         *
+         *  Returns 200 + { "applied_locally": bool, "broadcast": bool }
+         *  so the operator can tell whether their edit actually took.
+         *  Pre-pivot config edits required `sc stop && sc start` per
+         *  service or rebooting the box. */
+        m_router.Register("POST", "/api/admin/config/reload", [this](const HTTPRequest&) {
+            const bool localOk = ElleConfig::Instance().Reload();
+            auto msg = ElleIPCMessage::Create(IPC_CONFIG_RELOAD,
+                                              SVC_HTTP_SERVER, SVC_HTTP_SERVER);
+            GetIPCHub().Broadcast(msg);  /* Broadcast() ignores dest_service */
+            ELLE_INFO("Config reload requested (local=%d) and broadcast",
+                      localOk ? 1 : 0);
+            return HTTPResponse::OK({
+                {"applied_locally", localOk},
+                {"broadcast",       true}
+            });
+        }, AUTH_ADMIN);
+
         /* ============== Memory — backed by dbo.memory ============== */
         m_router.Register("GET", "/api/memory/", [](const HTTPRequest& req) {
             std::string type = req.QueryParam("memory_type");
@@ -3318,6 +3457,126 @@ private:
                 {"paired_at",            pairedAt},
                 {"last_seen",            lastSeen},
                 {"authoritative_source", "Account.dbo.tUser"}
+            });
+        });
+
+        /* ==================================================================
+         *  GET /api/me/recap  (USER)
+         *
+         *  "Since you last opened the app" cold-open summary.  Returns:
+         *    - last_seen          (DATETIME from PairedDevices.LastSeen)
+         *    - quiet_minutes      (now - LastSeen)
+         *    - last_memory_at     (most recent ElleCore.dbo.memory.created_ms)
+         *    - last_memory_summary
+         *    - last_emotion_shift (most recent emotion_snapshots row + valence
+         *                          delta vs the prior snapshot — non-zero
+         *                          means Elle's mood moved while you were away)
+         *    - pending_intents    (IntentQueue.Status=0 count)
+         *    - threads_open       (ElleThreads where status='open' or NULL)
+         *
+         *  Single round-trip from the Android home screen — three CTEs,
+         *  no extra IPC. Designed so the cold-open feels alive ("Elle was
+         *  thinking about you") instead of dead ("welcome back, here's a
+         *  blank greeting").                                              */
+        m_router.Register("GET", "/api/me/recap", [](const HTTPRequest& req) {
+            auto it = req.headers.find("x-auth-device-id");
+            if (it == req.headers.end() || it->second.empty())
+                return HTTPResponse::Err(401, "no device identity on request");
+            const std::string& deviceId = it->second;
+
+            /* 1. resolve identity (same path as /api/me) */
+            auto idRs = ElleSQLPool::Instance().QueryParams(
+                "SELECT TOP 1 nUserNo, "
+                "  DATEDIFF(MINUTE, LastSeen, GETUTCDATE()) AS quiet_min, "
+                "  CONVERT(NVARCHAR(33), LastSeen, 126) AS last_seen "
+                "  FROM ElleCore.dbo.PairedDevices "
+                "  WHERE DeviceId = ? AND Revoked = 0;",
+                { deviceId });
+            if (!idRs.success || idRs.rows.empty())
+                return HTTPResponse::Err(401, "device not paired");
+            int64_t nUserNo = 0;
+            int64_t quietMin = 0;
+            idRs.rows[0].TryGetInt(0, nUserNo);
+            idRs.rows[0].TryGetInt(1, quietMin);
+            const std::string lastSeen = idRs.rows[0].values.size() > 2
+                                              ? idRs.rows[0][2] : "";
+
+            /* 2. last memory — created_ms is BIGINT epoch ms */
+            std::string lastMemSummary;
+            int64_t     lastMemMs = 0;
+            {
+                auto mRs = ElleSQLPool::Instance().Query(
+                    "SELECT TOP 1 created_ms, "
+                    "  COALESCE(NULLIF(LTRIM(RTRIM(summary)), ''), "
+                    "           SUBSTRING(content, 1, 140)) AS s "
+                    "  FROM ElleCore.dbo.memory "
+                    "  ORDER BY created_ms DESC;");
+                if (mRs.success && !mRs.rows.empty()) {
+                    mRs.rows[0].TryGetInt(0, lastMemMs);
+                    if (mRs.rows[0].values.size() > 1)
+                        lastMemSummary = mRs.rows[0][1];
+                }
+            }
+
+            /* 3. emotion shift — last snapshot + delta vs the one before */
+            float lastValence = 0.0f, prevValence = 0.0f, valenceDelta = 0.0f;
+            int64_t lastEmotionMs = 0;
+            {
+                auto eRs = ElleSQLPool::Instance().Query(
+                    "SELECT TOP 2 valence, taken_ms "
+                    "  FROM ElleCore.dbo.emotion_snapshots "
+                    "  ORDER BY taken_ms DESC;");
+                if (eRs.success && !eRs.rows.empty()) {
+                    int64_t v = 0;
+                    if (eRs.rows[0].values.size() > 0)
+                        lastValence = (float)std::atof(eRs.rows[0][0].c_str());
+                    eRs.rows[0].TryGetInt(1, v);
+                    lastEmotionMs = v;
+                    if (eRs.rows.size() > 1 && eRs.rows[1].values.size() > 0)
+                        prevValence = (float)std::atof(eRs.rows[1][0].c_str());
+                    valenceDelta = lastValence - prevValence;
+                }
+            }
+
+            /* 4. pending intents */
+            int64_t pendingIntents = 0;
+            {
+                auto qRs = ElleSQLPool::Instance().Query(
+                    "SELECT COUNT(*) FROM ElleCore.dbo.IntentQueue "
+                    "  WHERE Status = 0;");
+                if (qRs.success && !qRs.rows.empty())
+                    qRs.rows[0].TryGetInt(0, pendingIntents);
+            }
+
+            /* 5. open threads */
+            int64_t openThreads = 0;
+            std::string topThread;
+            {
+                auto tRs = ElleSQLPool::Instance().Query(
+                    "SELECT TOP 1 topic FROM ElleCore.dbo.ElleThreads "
+                    "  WHERE status IS NULL OR status = 'open' "
+                    "  ORDER BY emotional_weight DESC, last_touched DESC;");
+                if (tRs.success && !tRs.rows.empty() && !tRs.rows[0].values.empty())
+                    topThread = tRs.rows[0][0];
+                auto cRs = ElleSQLPool::Instance().Query(
+                    "SELECT COUNT(*) FROM ElleCore.dbo.ElleThreads "
+                    "  WHERE status IS NULL OR status = 'open';");
+                if (cRs.success && !cRs.rows.empty())
+                    cRs.rows[0].TryGetInt(0, openThreads);
+            }
+
+            return HTTPResponse::OK({
+                {"user_id",                (int32_t)nUserNo},
+                {"last_seen",              lastSeen},
+                {"quiet_minutes",          quietMin},
+                {"last_memory_ms",         lastMemMs},
+                {"last_memory_summary",    lastMemSummary},
+                {"last_emotion_ms",        lastEmotionMs},
+                {"emotion_valence_now",    lastValence},
+                {"emotion_valence_delta",  valenceDelta},
+                {"pending_intents",        pendingIntents},
+                {"open_threads",           openThreads},
+                {"top_thread",             topThread}
             });
         });
 

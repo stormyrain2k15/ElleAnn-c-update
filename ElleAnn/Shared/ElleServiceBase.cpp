@@ -555,6 +555,30 @@ bool ElleServiceBase::InitializeCore() {
         if (msg.header.msg_type == IPC_IDENTITY_DELTA) {
             ElleIdentityCore::Instance().ApplyDelta(msg.GetStringPayload());
         }
+        /* Config hot-reload fabric: any service may broadcast
+         * IPC_CONFIG_RELOAD when it has rewritten elle_master_config.json
+         * (or the operator nudged the dev panel "reload config" button).
+         * Every service re-pulls the on-disk config into the singleton
+         * BEFORE its own OnConfigReload override runs, so derived
+         * services see fresh values when they grab them. Pre-pivot
+         * this message had no consumer and config edits required a
+         * full service restart.                                       */
+        if (msg.header.msg_type == IPC_CONFIG_RELOAD) {
+            const bool ok = ElleConfig::Instance().Reload();
+            /* If this service had the LLM engine initialised, re-roll
+             * it under the new config so e.g. a freshly-pasted Groq
+             * api_key takes effect without a service restart. Services
+             * that don't use LLM are unaffected — IsInitialized() is
+             * false on those processes. */
+            if (ok && ElleLLMEngine::Instance().IsInitialized()) {
+                const bool llmOk = ElleLLMEngine::Instance().Reinitialize();
+                ELLE_INFO("IPC_CONFIG_RELOAD: LLM engine re-init %s",
+                          llmOk ? "succeeded" : "FAILED");
+            }
+            ELLE_INFO("IPC_CONFIG_RELOAD applied (sender=%d, ok=%d) — "
+                      "calling OnConfigReload()", (int)sender, ok ? 1 : 0);
+            this->OnConfigReload();
+        }
         /* Forward to service-specific handler */
         this->OnMessage(msg, sender);
     });

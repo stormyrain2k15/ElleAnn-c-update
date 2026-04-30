@@ -201,6 +201,12 @@ public:
 
     bool Initialize();
     void Shutdown();
+    /** Re-read the LLM section of the master config and rebuild the
+     *  provider chain. Safe to call from a service's OnConfigReload()
+     *  hook. Returns true if at least one provider remains live
+     *  afterwards. Pre-pivot the only way to apply an api_key edit
+     *  was a full SCM stop/start of the service. */
+    bool Reinitialize();
 
     /* High-level chat */
     ELLE_LLM_RESPONSE Chat(const std::vector<LLMMessage>& messages,

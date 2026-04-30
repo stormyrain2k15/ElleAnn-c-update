@@ -804,17 +804,35 @@ private:
             ELLE_DEBUG("RecallMemories(userText) failed: %s", e.what());
         }
 
-        /* Rank by composite score: importance + recency + access */
+        /* Rank by composite score: importance + recency-of-FORMATION + access.
+         *
+         * Pre-Feb-2026 the recency factor used `last_access_ms`, which
+         * RecallMemories() mutates on every read. Effect: each chat turn
+         * the recently-touched memories floated to the top, displacing
+         * older-but-topically-relevant entries until those decayed below
+         * the cap and dropped out — the smoking gun for the "she
+         * remembers, then forgets, then remembers in spurts" complaint.
+         * Sorting by created_ms instead lets a memory's intrinsic
+         * weighting (importance + age + access frequency) stay stable
+         * across turns. The access_count term still rewards repeated
+         * usefulness; that's what we want.
+         *
+         * Tie-break on id DESC so the order is deterministic when scores
+         * collide (otherwise std::sort is unstable, two adjacent calls
+         * within one turn can surface different sets — also a contributor
+         * to the spurts pattern). */
         uint64_t now = ELLE_MS_NOW();
         std::sort(merged.begin(), merged.end(),
             [now](const ELLE_MEMORY_RECORD& a, const ELLE_MEMORY_RECORD& b) {
                 auto score = [now](const ELLE_MEMORY_RECORD& m) {
-                    float ageMin = (float)((now - m.last_access_ms) / 60000.0);
+                    float ageMin = (float)((now - m.created_ms) / 60000.0);
                     float recency = std::exp(-ageMin / (60.0f * 24.0f * 7.0f)); /* 7-day half-life */
                     float access = std::log((float)m.access_count + 1.0f) / 5.0f;
                     return m.importance * 0.4f + recency * 0.4f + access * 0.2f;
                 };
-                return score(a) > score(b);
+                float sa = score(a), sb = score(b);
+                if (sa != sb) return sa > sb;
+                return a.id > b.id;   /* deterministic tiebreak */
             });
 
         /* Trim */

@@ -45,6 +45,8 @@ data class ElleHomeState(
     val halStatus: String = "",
     /** Identity tuple from /api/me — proves auth wired to Account.dbo.tUser. */
     val me: MeResponse? = null,
+    /** Cold-open recap — null until /api/me/recap responds, hidden by UI when null. */
+    val recap: RecapResponse? = null,
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val loading: Boolean = true,
     val error: String? = null,
@@ -86,13 +88,19 @@ class ElleHomeViewModel(
             }
 // Emotion data loaded via startEmotionPolling() and WebSocket ipc_broadcast — no load-time job needed
             val meJob = launch {
-                /* /api/me confirms the JWT actually resolves to a real
-                 * tUser row.  If this returns 401, the token is stale
-                 * and the operator should re-pair.  We surface the
-                 * error in the home strip so it's visible without
-                 * needing the dev panel. */
                 runCatching { api.getMe() }
                     .onSuccess { m -> _state.update { it.copy(me = m) } }
+            }
+            val recapJob = launch {
+                /* Cold-open hydration. /api/me/recap is purpose-built
+                 * for one round trip from the home screen, so this
+                 * runs in parallel with the rest of the dashboard
+                 * fetches. Failures are silent (recap stays null) —
+                 * the UI hides the strip when it has nothing to say
+                 * rather than rendering an error banner for a feature
+                 * that's strictly additive.                          */
+                runCatching { api.getRecap() }
+                    .onSuccess { r -> _state.update { it.copy(recap = r) } }
             }
             val aiJob = launch {
                 runCatching { api.getAiStatus() }
@@ -260,6 +268,11 @@ fun ElleHomeScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // ─── Cold-open recap strip ─────────────────────────────────────
+            // Hidden when /api/me/recap returns nothing actionable; otherwise
+            // surfaces "while you were away" cues so home feels alive on
+            // resume instead of dead.
+            state.recap?.let { r -> RecapStrip(r) }
 
             // ── Greeting card ─────────────────────────────────────────────────
             state.greeting?.let { greeting ->
@@ -359,3 +372,63 @@ private fun StatusRow(label: String, value: String, valueColor: Color) {
 // Base emotions response uses the locked ElleApi.emotions() call from AppContainer.
 // The home screen loads emotions via extendedApi.getEmotionDimensions() and the
 // WebSocket ipc_broadcast event — no separate pairedApi() call needed here.
+
+/**
+ * Cold-open recap strip — renders /api/me/recap as a tight 1-row bullet
+ * list of "while you were away" cues. Hidden entirely when there's
+ * nothing meaningful to surface (fresh install, very recent reopen).
+ *
+ *   • <quiet duration> — only when > 5 min away
+ *   • last memory      — only when present
+ *   • emotion shift    — only when |delta| > 0.05
+ *   • pending intents  — only when > 0
+ *   • top open thread  — only when present
+ *
+ * Designed to feel like Elle's been thinking, not like a status panel.
+ */
+@Composable
+private fun RecapStrip(r: com.elleann.android.data.models.RecapResponse) {
+    val items = mutableListOf<String>()
+    if (r.quietMinutes > 5) {
+        val human = when {
+            r.quietMinutes > 60 * 24 -> "${r.quietMinutes / (60 * 24)}d quiet"
+            r.quietMinutes > 60      -> "${r.quietMinutes / 60}h quiet"
+            else                     -> "${r.quietMinutes}m quiet"
+        }
+        items += human
+    }
+    if (r.lastMemorySummary.isNotBlank()) {
+        val s = r.lastMemorySummary.take(80) + if (r.lastMemorySummary.length > 80) "…" else ""
+        items += "last memory: $s"
+    }
+    val d = r.emotionValenceDelta
+    if (kotlin.math.abs(d) > 0.05f) {
+        val arrow = if (d > 0) "↑" else "↓"
+        items += "mood $arrow ${"%.2f".format(kotlin.math.abs(d))}"
+    }
+    if (r.pendingIntents > 0) items += "${r.pendingIntents} pending intent${if (r.pendingIntents == 1L) "" else "s"}"
+    if (r.topThread.isNotBlank()) items += "open thread: ${r.topThread.take(60)}"
+    if (items.isEmpty()) return  // nothing useful to surface — hide the strip
+
+    androidx.compose.material3.Card(
+        colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = IsyaSlot),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "WHILE YOU WERE AWAY",
+                style = MaterialTheme.typography.labelSmall,
+                color = IsyaGold.copy(alpha = 0.7f),
+            )
+            Spacer(Modifier.height(6.dp))
+            items.forEach { line ->
+                Text(
+                    text = "·  $line",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = IsyaCream.copy(alpha = 0.85f),
+                    modifier = Modifier.padding(vertical = 1.dp),
+                )
+            }
+        }
+    }
+}

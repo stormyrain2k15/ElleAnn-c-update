@@ -849,8 +849,17 @@ ElleLLMEngine& ElleLLMEngine::Instance() {
     return inst;
 }
 
-bool ElleLLMEngine::Initialize() {
-    auto& cfg = ElleConfig::Instance().GetLLM();
+bool ElleLLMEngine::Reinitialize() {
+    /* Tear down + rebuild — simplest correct semantics. The Shutdown()
+     * path drains in-flight requests and frees provider resources;
+     * Initialize() reads the (now-fresh) config and constructs a new
+     * provider chain. Slightly heavier than a per-provider
+     * .ApplyConfig() but bulletproof against partial state. */
+    Shutdown();
+    return Initialize();
+}
+
+bool ElleLLMEngine::Initialize() {    auto& cfg = ElleConfig::Instance().GetLLM();
     m_mode = cfg.mode;
 
     /* Initialize API providers */

@@ -29,6 +29,18 @@ interface ElleApiExtended {
     @GET("/api/me")
     suspend fun getMe(): MeResponse
 
+    /**
+     * GET /api/me/recap — "since you last opened the app" summary.
+     *
+     * Single-shot cold-open hydration: one HTTP round-trip surfaces
+     * Elle's quiet-time metrics (last memory, last emotion shift,
+     * pending intents, open threads). The Android home screen shows
+     * a brief "while you were away" strip from this so the UX feels
+     * like Elle was thinking instead of asleep.
+     */
+    @GET("/api/me/recap")
+    suspend fun getRecap(): RecapResponse
+
     /** GET /api/session/greeting — LLM-rendered welcome phrase */
     @GET("/api/session/greeting")
     suspend fun getSessionGreeting(): SessionGreeting

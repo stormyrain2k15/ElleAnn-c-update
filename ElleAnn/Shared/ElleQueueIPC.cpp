@@ -726,18 +726,25 @@ bool ElleIPCHub::ConnectTo(ELLE_SERVICE_ID target, uint32_t timeoutMs) {
 
 bool ElleIPCHub::Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg) {
     m_sent++;
+    /* Stamp the target so /api/diag/wires can show "we last spoke to
+     * Cognitive at T". Note: this records ATTEMPTED contact, not
+     * confirmed delivery. The dispatch path below stamps the SUCCESS
+     * branches separately so a target that exists but is jammed will
+     * still age out as "stale". */
 
     /* Try existing client connection first */
     {
         std::lock_guard<std::mutex> lock(m_clientMutex);
         auto it = m_clients.find(target);
         if (it != m_clients.end() && it->second->IsConnected()) {
-            return it->second->Send(msg);
+            const bool ok = it->second->Send(msg);
+            if (ok) StampLastSeen(target);
+            return ok;
         }
     }
 
     /* Fall back to server (if target connected as client to us) */
-    if (m_server.Send(target, msg)) return true;
+    if (m_server.Send(target, msg)) { StampLastSeen(target); return true; }
 
     /* Last resort — lazy reconnect. We may have missed the startup window,
      * the peer may have restarted, or this target wasn't declared as a
@@ -748,7 +755,9 @@ bool ElleIPCHub::Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg) {
         std::lock_guard<std::mutex> lock(m_clientMutex);
         auto it = m_clients.find(target);
         if (it != m_clients.end() && it->second->IsConnected()) {
-            return it->second->Send(msg);
+            const bool ok = it->second->Send(msg);
+            if (ok) StampLastSeen(target);
+            return ok;
         }
     }
     return false;
@@ -789,6 +798,10 @@ bool ElleIPCHub::PopMessage(ElleIPCMessage& out, uint32_t timeoutMs) {
 
 void ElleIPCHub::DispatchMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) {
     m_received++;
+    /* Stamp the sender — proves the wire to that service is alive in
+     * the inbound direction. /api/diag/wires uses this to differentiate
+     * "we sent but never heard back" from "two-way conversation". */
+    StampLastSeen(sender);
 
     if (m_handler) {
         m_handler(msg, sender);

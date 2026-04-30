@@ -22,6 +22,90 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 
 ## Completed (this session — Feb 2026)
 
+### Phase 3 — Quality of Life Pass (THIS SESSION'S 3rd UPDATE)
+
+**Cold-open recap**
+- New `GET /api/me/recap` endpoint — single-shot "since you last opened
+  the app" hydration: quiet duration, last memory summary, emotion shift
+  vs the prior snapshot, pending intents, top open thread.
+- Wired into Android `ElleHomeScreen` as the new `RecapStrip` composable
+  shown above the dashboard. Hidden when there's nothing meaningful to
+  surface (fresh install, very recent reopen) so it doesn't render an
+  empty box.
+
+**Memory continuity — actual fix**
+- `CognitiveEngine::CrossReferenceByEntities` ranking changed:
+    `recency = exp(-age / 7d)` now uses **`created_ms`** (immutable)
+    instead of **`last_access_ms`** (mutated on every recall).
+  - Previously: every recall bumped `last_access_ms` → recently-touched
+    items floated to the top → older topically-relevant items got
+    displaced past the cap → dropped out of context → "Elle remembers,
+    then forgets, then remembers" within consecutive turns.
+  - Now: a memory's intrinsic weighting is stable across turns. The
+    `access_count` factor still rewards repeated usefulness.
+- Added **deterministic tie-break on `id DESC`** so when two memories
+  score identically, two adjacent recalls produce the same set (std::sort
+  is unstable; this was another contributor to the spurts pattern).
+
+**Diag fabric**
+- New `GET /api/diag/wires` (admin) — runtime introspection of the IPC
+  fabric. Returns one row per service: pipe name, last_seen_ms,
+  quiet_minutes, state ("up" / "stale" / "unknown").
+- New `GET /api/diag/heartbeats` (admin) — DB-shared truth from
+  `ElleSystem.dbo.Workers`. Distinct from `/api/diag/wires`: heartbeats
+  is cross-process, wires is in-process.
+- `ElleIPCHub` instrumented with per-service `m_lastSeen` map updated on
+  every successful Send + every Recv, exposed via `LastSeenPerService()`.
+
+**Hot-reload fabric**
+- New `POST /api/admin/config/reload` — re-reads `elle_master_config.json`
+  in this process, broadcasts `IPC_CONFIG_RELOAD` to every other Elle
+  service. Each service's `ElleServiceBase` automatically picks it up,
+  swaps the in-memory config, and calls a `virtual OnConfigReload()`
+  hook for service-specific re-initialisation.
+- `ElleLLMEngine::Reinitialize()` added — Shutdown + Initialize. Called
+  automatically by the base class after a `IPC_CONFIG_RELOAD` if the
+  service had the LLM engine running. Result: edited groq api_key,
+  hit "reload config" in dev panel, next chat goes through the new key
+  with no service restart.
+
+### Phase 2 — Action Items (THIS SESSION'S 2nd UPDATE)
+1. `/api/me` wired into Android home — top-bar subtitle now shows
+   `<sUserID> · #<nUserNo>` instead of `host:port`.
+2. `RequireUserId` → `RequireAuthOrBodyUser` — `/api/video/avatar/upload`
+   migrated. All other body-`user_id` callsites are admin/CLI tools.
+3. Memory-continuity diagnostic — `provider_used` + `model_used` now in
+   every chat reply JSON. Mid-conversation provider failover (groq →
+   local_llama) is now visible.
+
+### Phase 1 — Pivot (THIS SESSION'S 1st UPDATE)
+**Trigger**: operator reported 95% of the dev panel/Android UI broken,
+most ElleCore tables empty, `dbo.Users` redundant with `Account.tUser`.
+
+- **`SQL/ElleAnn_Schema.sql` rewritten** — declares the actual lowercase
+  tables the C++ code writes to. Pre-pivot the schema declared PascalCase
+  shells the code never wrote to.
+- **`SQL/ElleAnn_SchemaSync_FebPivot.sql`** — corrective delta. Drops
+  legacy PascalCase shells + `dbo.Users` (only when empty), surgically
+  removes FKs. Idempotent.
+- **`ElleAnn_MemoryDelta.sql`** — removed dead `dbo.users` seed, added
+  `reconnection_greetings` (was 500'ing on `/api/session/greeting`).
+- **`HTTPServer.cpp`** — `ResolveAuthenticatedUser` (JWT → device →
+  `PairedDevices.nUserNo`), `RequireAuthOrBodyUser` helper, new
+  `GET /api/me`, all user-scoped routes JWT-first.
+- **Android `PairScreen`** — dual-mode toggle: Sign In (default) or
+  Pair Code. Sign In posts `{ game_user, game_pass, … }` to
+  `/api/auth/pair` for direct `Account.dbo.tUser` auth.
+- **`LLMAPIProvider::Initialize`** — refuses init with empty `api_key`,
+  named warning. **`ElleLLMEngine::Initialize`** — graceful degradation:
+  primary failed but fallback healthy → run on fallback, log warn. Hard
+  fail only when both are dead.
+- **Pipes audit** — wired `IPC_EMOTION_CONSOLIDATE` (Emotional was
+  silently dropping it) and `IPC_FAMILY_BIRTH/CONCEPTION_ATTEMPT`
+  (Bonding never consumed these).
+
+## Completed (previous sessions — Feb 2026)
+
 ### Feb-2026 Schema + Auth Pivot (THIS SESSION)
 **Trigger**: operator reported 95% of the dev panel/Android UI broken,
 most ElleCore tables empty, `dbo.Users` redundant with `Account.tUser`.

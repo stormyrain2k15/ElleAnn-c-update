@@ -76,6 +76,14 @@ protected:
     /* Called when an IPC message arrives for this service */
     virtual void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) {}
 
+    /* Called when the global config has been re-loaded from disk
+     * (IPC_CONFIG_RELOAD). Default behaviour: no-op. Services that
+     * cache config-derived state (LLM clients, SQL connection
+     * strings, RNG seeds, …) should override and re-pull from
+     * ElleConfig::Instance(). The base layer has already swapped
+     * the in-memory config by the time this fires.                  */
+    virtual void OnConfigReload() {}
+
     /* Called periodically by the service main loop (default: 100ms) */
     virtual void OnTick() {}
 

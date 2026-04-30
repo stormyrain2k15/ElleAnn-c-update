@@ -688,6 +688,29 @@ data class MeResponse(
     @SerialName("authoritative_source") val authoritativeSource: String = "",
 )
 
+/**
+ * Cold-open recap — GET /api/me/recap.
+ *
+ *   "Since you last opened the app" tuple. Backed by 5 cheap SQL hits
+ *   on the Elle side, designed so the home screen feels alive on
+ *   resume instead of dead.  Fields are nullable / zero-valued when
+ *   nothing is interesting; the UI hides empty rows.
+ */
+@Serializable
+data class RecapResponse(
+    @SerialName("user_id")               val userId:               Int = 0,
+    @SerialName("last_seen")             val lastSeen:             String = "",
+    @SerialName("quiet_minutes")         val quietMinutes:         Long = 0,
+    @SerialName("last_memory_ms")        val lastMemoryMs:         Long = 0,
+    @SerialName("last_memory_summary")   val lastMemorySummary:    String = "",
+    @SerialName("last_emotion_ms")       val lastEmotionMs:        Long = 0,
+    @SerialName("emotion_valence_now")   val emotionValenceNow:    Float = 0.0f,
+    @SerialName("emotion_valence_delta") val emotionValenceDelta:  Float = 0.0f,
+    @SerialName("pending_intents")       val pendingIntents:       Long = 0,
+    @SerialName("open_threads")          val openThreads:          Long = 0,
+    @SerialName("top_thread")            val topThread:            String = "",
+)
+
 // ════════════════════════════════════════════════════════════════════════════
 // X-CHROMOSOME MODELS
 // Source: ElleAnn_XChromosome_Schema.sql + /api/x/* routes
