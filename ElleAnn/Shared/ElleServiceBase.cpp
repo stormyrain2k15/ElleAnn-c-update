@@ -6,6 +6,8 @@
 #include "ElleServiceBase.h"
 #include "ElleIdentityCore.h"
 #include "ElleLLM.h"         /* ElleLLMEngine::Instance() used in InitializeCore */
+#include "ElleSQLConn.h"     /* ElleSQLPool::Instance().Reinitialize() in OnConfigReload */
+#include "ElleConfig.h"      /* ElleConfig::Instance().GetService() in OnConfigReload */
 #include <tlhelp32.h>        /* CreateToolhelp32Snapshot / PROCESSENTRY32 */
 #include <iostream>
 #include <sstream>
@@ -574,6 +576,21 @@ bool ElleServiceBase::InitializeCore() {
                 const bool llmOk = ElleLLMEngine::Instance().Reinitialize();
                 ELLE_INFO("IPC_CONFIG_RELOAD: LLM engine re-init %s",
                           llmOk ? "succeeded" : "FAILED");
+            }
+            /* Database credentials may have changed too. The DB block
+             * lives at config.database.connection_string in the master
+             * file; rebuild the pool with whatever's there now. We do
+             * this AFTER the LLM re-init so a flapping DB doesn't
+             * starve the LLM warmup of its own SQL needs.            */
+            if (ok) {
+                const auto& svc = ElleConfig::Instance().GetService();
+                if (!svc.sql_connection_string.empty()) {
+                    const bool poolOk = ElleSQLPool::Instance().Reinitialize(
+                        svc.sql_connection_string,
+                        svc.sql_pool_size > 0 ? svc.sql_pool_size : 8);
+                    ELLE_INFO("IPC_CONFIG_RELOAD: SQL pool re-init %s",
+                              poolOk ? "succeeded" : "FAILED");
+                }
             }
             ELLE_INFO("IPC_CONFIG_RELOAD applied (sender=%d, ok=%d) — "
                       "calling OnConfigReload()", (int)sender, ok ? 1 : 0);

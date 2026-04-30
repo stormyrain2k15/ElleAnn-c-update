@@ -34,11 +34,25 @@ bool GetLatestEmotionState(ELLE_EMOTION_STATE& out) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
- * MEMORY tier transitions — declared in the header and not yet used at call
- * sites, but implement them so the link table is complete for anyone who
- * picks them up later (and to honour the NO STUB policy).
+ * MEMORY tier transitions — DEAD CODE (Feb 2026 audit).
+ *
+ * The actual consolidation path is `MemoryEngine::ConsolidateMemories()`
+ * which writes promoted records to LTM via the `WriteToLTM` private
+ * method on the engine — these standalone helpers are vestigial from
+ * an earlier design where /api/memory/{id}/promote was supposed to call
+ * them directly.  They are deliberately kept (not deleted) because:
+ *   1. The header still declares them — removing breaks ABI for any
+ *      external tool that linked against the .lib.
+ *   2. The /api/memory/{id}/promote route may want to manually flip
+ *      tier without going through the full decay pass.
+ *
+ * Naming caveat: pre-pivot `PromoteToLTM` wrote tier=2, which is MTM
+ * by the canonical schema (tier 1=STM, 2=MTM, 3=LTM).  Fixed below so
+ * `PromoteToLTM` actually writes tier=3, and a new `PromoteToMTM`
+ * writes tier=2.  Old `ArchiveMemory(tier=3)` is now redundant with
+ * the corrected `PromoteToLTM` and is left as an alias.
  *──────────────────────────────────────────────────────────────────────────────*/
-bool PromoteToLTM(uint64_t memId) {
+bool PromoteToMTM(uint64_t memId) {
     return ElleSQLPool::Instance().QueryParams(
         "UPDATE ElleCore.dbo.memory SET tier = 2, "
         "       last_access_ms = ? "
@@ -46,12 +60,20 @@ bool PromoteToLTM(uint64_t memId) {
         { std::to_string((int64_t)ELLE_MS_NOW()), std::to_string((int64_t)memId) }).success;
 }
 
-bool ArchiveMemory(uint64_t memId) {
+bool PromoteToLTM(uint64_t memId) {
     return ElleSQLPool::Instance().QueryParams(
         "UPDATE ElleCore.dbo.memory SET tier = 3, "
         "       last_access_ms = ? "
         "WHERE id = ?;",
         { std::to_string((int64_t)ELLE_MS_NOW()), std::to_string((int64_t)memId) }).success;
+}
+
+bool ArchiveMemory(uint64_t memId) {
+    /* Now an alias for PromoteToLTM — long-term retention IS the archive
+     * tier in our model.  Kept as a separate name because some call
+     * sites express archival intent and that semantic deserves to
+     * survive even when the implementation is identical. */
+    return PromoteToLTM(memId);
 }
 
 /*──────────────────────────────────────────────────────────────────────────────

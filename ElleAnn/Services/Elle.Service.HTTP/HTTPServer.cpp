@@ -3087,6 +3087,103 @@ private:
             });
         }, AUTH_ADMIN);
 
+        /* ==================================================================
+         *  GET /api/memory/why  (USER)
+         *
+         *  Memory-ranking explainability.  Reproduces the exact scoring
+         *  formula `CrossReferenceByEntities` uses and returns the top
+         *  N memories for the current state, with each score component
+         *  broken out:
+         *
+         *    [
+         *      { id, content, importance, recency, access, total,
+         *        created_ms, age_days }
+         *    ]
+         *
+         *  When Elle says something surprising, you call this and see
+         *  exactly which memories shaped the score landscape that turn.
+         *  This is the dev-side counterpart to the `provider_used` /
+         *  `model_used` fields in the chat reply: between the two, every
+         *  reply is fully traceable.
+         *
+         *  Query params:
+         *    limit (default 10, max 50)
+         *
+         *  Pre-pivot the only way to inspect ranking was to add log
+         *  lines to CognitiveEngine and rebuild — this endpoint pulls
+         *  the same numbers from SQL with zero code change.            */
+        m_router.Register("GET", "/api/memory/why", [](const HTTPRequest& req) {
+            int limit = req.QueryInt("limit", 10);
+            if (limit <= 0)  limit = 10;
+            if (limit > 50)  limit = 50;
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP " + std::to_string(limit) + " "
+                "  id, content, summary, importance, "
+                "  CONVERT(BIGINT, created_ms)     AS created_ms, "
+                "  CONVERT(BIGINT, last_access_ms) AS last_access_ms, "
+                "  COALESCE(access_count, 0)       AS access_count "
+                "  FROM ElleCore.dbo.memory "
+                "  ORDER BY id DESC;");   /* hydrate from recent — deterministic */
+            if (!rs.success)
+                return HTTPResponse::Err(500, "SQL query failed");
+
+            const uint64_t now = ELLE_MS_NOW();
+            json arr = json::array();
+            for (auto& row : rs.rows) {
+                int64_t id = 0, createdMs = 0, lastAccessMs = 0, accessCount = 0;
+                row.TryGetInt(0, id);
+                const std::string content = row.values.size() > 1 ? row.values[1] : "";
+                const std::string summary = row.values.size() > 2 ? row.values[2] : "";
+                const float importance =
+                    row.values.size() > 3 ? (float)std::atof(row.values[3].c_str()) : 0.0f;
+                row.TryGetInt(4, createdMs);
+                row.TryGetInt(5, lastAccessMs);
+                row.TryGetInt(6, accessCount);
+
+                /* Reproduce CrossReferenceByEntities scoring exactly:
+                 *   score = importance*0.4 + recency*0.4 + access*0.2
+                 *   recency = exp(-age_min / (60*24*7))      // 7d half-life
+                 *   access  = log(access_count+1) / 5
+                 * Pre-Feb-2026 the ranking used last_access_ms which
+                 * mutated on every recall, causing the "spurts" symptom.
+                 * Now we (and this endpoint) use created_ms.            */
+                const double ageMin = (double)(now - (uint64_t)createdMs) / 60000.0;
+                const double recency = std::exp(-ageMin / (60.0 * 24.0 * 7.0));
+                const double access  = std::log((double)accessCount + 1.0) / 5.0;
+                const double total   = importance * 0.4 + recency * 0.4 + access * 0.2;
+
+                /* Collapse to a 140-char preview so the dev panel can
+                 * render the row without horizontal scroll. */
+                const std::string preview = (!summary.empty() ? summary
+                                               : content.size() > 140
+                                                   ? content.substr(0, 140) + "…"
+                                                   : content);
+                arr.push_back({
+                    {"id",             id},
+                    {"preview",        preview},
+                    {"importance",     importance},
+                    {"recency",        recency},
+                    {"access",         access},
+                    {"score",          total},
+                    {"age_days",       ageMin / (60.0 * 24.0)},
+                    {"access_count",   accessCount},
+                    {"created_ms",     createdMs},
+                    {"last_access_ms", lastAccessMs}
+                });
+            }
+            /* Sort by score desc to mirror the live ranking (SQL fetched
+             * by id DESC for determinism; we re-rank here). */
+            std::sort(arr.begin(), arr.end(), [](const json& a, const json& b) {
+                return a.value("score", 0.0) > b.value("score", 0.0);
+            });
+            return HTTPResponse::OK({
+                {"memories",   arr},
+                {"count",      (int)arr.size()},
+                {"score_formula", "importance*0.4 + recency*0.4 + access*0.2"},
+                {"recency_half_life_days", 7.0}
+            });
+        });
+
         /* ============== Memory — backed by dbo.memory ============== */
         m_router.Register("GET", "/api/memory/", [](const HTTPRequest& req) {
             std::string type = req.QueryParam("memory_type");

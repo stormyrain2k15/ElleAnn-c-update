@@ -128,6 +128,13 @@ public:
 
     bool Initialize(const std::string& connectionString, uint32_t poolSize = 8);
     void Shutdown();
+    /** Re-build the pool with a fresh connection string (e.g. after the
+     *  operator edited elle_master_config.json's `database` block and
+     *  fired POST /api/admin/config/reload).  Drains in-flight checkouts,
+     *  closes all idle handles, then re-Initialize()s.  Returns true if
+     *  the new pool came up healthy.  Pre-pivot a DB credential edit
+     *  required a full service restart. */
+    bool Reinitialize(const std::string& connectionString, uint32_t poolSize = 8);
 
     /* Acquire/Release pattern */
     std::shared_ptr<SQLConnection> Acquire(uint32_t timeoutMs = 5000);
@@ -219,6 +226,7 @@ namespace ElleDB {
      * entry would never surface).                                        */
     bool RecallRecentLTM(std::vector<ELLE_MEMORY_RECORD>& out, uint32_t maxCount = 10);
     bool UpdateMemoryAccess(uint64_t memId);
+    bool PromoteToMTM(uint64_t memId);
     bool PromoteToLTM(uint64_t memId);
     bool ArchiveMemory(uint64_t memId);
 

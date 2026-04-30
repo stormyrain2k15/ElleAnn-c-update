@@ -476,6 +476,16 @@ void ElleSQLPool::Shutdown() {
     m_initialized = false;
 }
 
+bool ElleSQLPool::Reinitialize(const std::string& connectionString, uint32_t poolSize) {
+    /* Two-step: tear down the old pool, then bring up the new one with
+     * the (potentially) new credentials/host.  In-flight requests that
+     * already hold a checked-out connection finish on the old handle —
+     * we only close idle handles in m_available.  The next Acquire()
+     * after this returns will hit the freshly-built pool. */
+    Shutdown();
+    return Initialize(connectionString, poolSize);
+}
+
 bool ElleSQLPool::CreateConnection(std::shared_ptr<SQLConnection>& conn) {
     conn = std::make_shared<SQLConnection>();
     return conn->Connect(m_connStr);

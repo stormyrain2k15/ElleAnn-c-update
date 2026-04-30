@@ -1259,7 +1259,27 @@ private:
 
         /* 7. Call LLM (language surface only) */
         std::vector<LLMMessage> conv;
-        conv.push_back({"system", ctx.str()});
+        /* Hand the assembled context to the model.  We log the system-
+         * prompt length so /api/diag/* (and operator log scans) can
+         * spot the moment a prompt blows past the model's context
+         * window.  Most local models cap around 8K tokens and the
+         * tokenizer ratio is ~4 bytes/token in English, so >32KB of
+         * system prompt is a strong signal we're truncating server-side
+         * — which would manifest exactly as "she remembers some stuff
+         * but not other stuff in the same turn".  Pre-pivot this was
+         * invisible.                                                  */
+        const std::string sysPrompt = ctx.str();
+        const size_t      sysBytes  = sysPrompt.size();
+        ELLE_DEBUG("Cognitive: system prompt = %zu bytes (~%zu tokens), "
+                   "memories=%zu, entities=%zu",
+                   sysBytes, sysBytes / 4, memories.size(), entities.size());
+        if (sysBytes > 32 * 1024) {
+            ELLE_WARN("Cognitive: system prompt is %zu bytes — model "
+                      "context will likely be truncated. Lower "
+                      "memory.recall_top_n or raise model context.",
+                      sysBytes);
+        }
+        conv.push_back({"system", sysPrompt});
         for (auto& h : history) {
             LLMMessage m;
             m.role = (h.role == 1) ? "user" : (h.role == 2 ? "assistant" : "system");
@@ -1348,7 +1368,8 @@ private:
             {"entities", entities},
             {"latency_ms", (uint64_t)elapsed},
             {"provider_used", providerName},
-            {"model_used",    llmResp.model_used}
+            {"model_used",    llmResp.model_used},
+            {"system_prompt_bytes", (uint64_t)sysBytes}
         };
         SendChatReply(reply_to, out);
 
