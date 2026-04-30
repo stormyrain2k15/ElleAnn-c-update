@@ -1529,7 +1529,7 @@ std::string ElleLLMEngine::GetActiveProviderName() const {
             case LLM_PROVIDER_GROQ:        return "groq";
             case LLM_PROVIDER_OPENAI:      return "openai";
             case LLM_PROVIDER_ANTHROPIC:   return "anthropic";
-            case LLM_PROVIDER_LM_STUDIO:   return "lm_studio";
+            case LLM_PROVIDER_LOCAL_LMSTUDIO: return "lm_studio";
             case LLM_PROVIDER_LOCAL_LLAMA: return "local_llama";
             case LLM_PROVIDER_CUSTOM_API:  return "custom_api";
             default:                       return "";
