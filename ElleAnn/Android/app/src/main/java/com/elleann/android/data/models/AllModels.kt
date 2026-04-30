@@ -218,9 +218,13 @@ data class VideoJob(
     val isDone: Boolean get() = status == "done"
     val isFailed: Boolean get() = status == "failed"
     val isRunning: Boolean get() = status == "running" || status == "queued"
-    /** Apache URL to retrieve the completed video file */
-    fun videoUrl(apacheBase: String): String? =
-        if (isDone) "$apacheBase/elle-apache/video/$jobId" else null
+    /** REST URL to retrieve the completed video file. Pre-pivot this
+     *  pointed at the port-8080 Apache stripe; post-pivot the C++ HTTP
+     *  service serves the mp4 directly on the main paired port, so
+     *  callers pass the same `restBase` (host:port) they use for
+     *  every other API call. */
+    fun videoUrl(restBase: String): String? =
+        if (isDone) "$restBase/api/video/file/$jobId" else null
 }
 
 @Serializable

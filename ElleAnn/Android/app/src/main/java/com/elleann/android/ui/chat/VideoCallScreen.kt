@@ -40,7 +40,7 @@ data class VideoCallState(
 class VideoCallViewModel(
     private val callId: Long,
     private val container: AppContainerExtended,
-    private val apacheBaseUrl: String,
+    private val restBaseUrl: String,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(VideoCallState(callId = callId))
@@ -76,7 +76,7 @@ class VideoCallViewModel(
                     .onSuccess { job ->
                         when {
                             job.isDone -> {
-                                val url = job.videoUrl(apacheBaseUrl)
+                                val url = job.videoUrl(restBaseUrl)
                                 _state.update { it.copy(videoUrl = url, status = "Connected", loading = false) }
                                 return@launch
                             }
@@ -108,7 +108,7 @@ class VideoCallViewModel(
 fun VideoCallScreen(
     callId: Long,
     containerExtended: AppContainerExtended,
-    apacheBaseUrl: String,
+    restBaseUrl: String,
     onBack: () -> Unit,
 ) {
     val vm: VideoCallViewModel = viewModel(
@@ -117,7 +117,7 @@ fun VideoCallScreen(
             object : androidx.lifecycle.ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                    VideoCallViewModel(callId, containerExtended, apacheBaseUrl) as T
+                    VideoCallViewModel(callId, containerExtended, restBaseUrl) as T
             }
         }
     )
@@ -145,7 +145,7 @@ fun VideoCallScreen(
             }
 
             state.videoUrl != null -> {
-                // Video WebView — loads mp4 from Apache /elle-apache/video/{job_uuid}
+                // Video WebView — loads mp4 from /api/video/file/{job_id}
                 Column(modifier = Modifier.fillMaxSize()) {
                     AndroidView(
                         modifier = Modifier.weight(1f).fillMaxWidth(),

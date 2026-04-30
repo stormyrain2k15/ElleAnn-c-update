@@ -179,7 +179,7 @@ fun PrivateInnerLifeSection(container: AppContainerExtended, onBack: () -> Unit)
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
-        runCatching { container.apacheApi.getPrivateThoughts(50) }
+        runCatching { container.extendedApi.getPrivateThoughts(50) }
             .onSuccess { r -> thoughts = r.thoughts }
             .onFailure { e -> error = e.message }
         loading = false
@@ -233,7 +233,7 @@ fun AutobiographySection(container: AppContainerExtended, onBack: () -> Unit) {
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
-        runCatching { container.apacheApi.getAutobiography(30) }
+        runCatching { container.extendedApi.getAutobiography(30) }
             .onSuccess { r -> entries = r.entries }
         loading = false
     }
@@ -273,9 +273,9 @@ fun IdentitySection(container: AppContainerExtended, onBack: () -> Unit) {
     var tab by remember { mutableStateOf(0) }
 
     LaunchedEffect(Unit) {
-        runCatching { container.apacheApi.getIdentityTraits() }.onSuccess { traits = it.traits }
-        runCatching { container.apacheApi.getIdentitySnapshots(10) }.onSuccess { snapshots = it.snapshots }
-        runCatching { container.apacheApi.getGrowthLog(30) }.onSuccess { growth = it.log }
+        runCatching { container.extendedApi.getIdentityTraits() }.onSuccess { traits = it.traits }
+        runCatching { container.extendedApi.getIdentitySnapshots(10) }.onSuccess { snapshots = it.snapshots }
+        runCatching { container.extendedApi.getGrowthLog(30) }.onSuccess { growth = it.log }
         loading = false
     }
 
@@ -357,7 +357,7 @@ fun FeltTimeSection(container: AppContainerExtended, onBack: () -> Unit) {
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
-        runCatching { container.apacheApi.getFeltTime() }.onSuccess { ft = it }
+        runCatching { container.extendedApi.getFeltTime() }.onSuccess { ft = it }
         loading = false
     }
 
@@ -407,7 +407,7 @@ fun ConsentLogSection(container: AppContainerExtended, onBack: () -> Unit) {
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
-        runCatching { container.apacheApi.getConsentLog(50) }.onSuccess { r -> log = r.log }
+        runCatching { container.extendedApi.getConsentLog(50) }.onSuccess { r -> log = r.log }
         loading = false
     }
 

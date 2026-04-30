@@ -1718,3 +1718,106 @@ preserved across all touched files.
 - `Deploy/elle_service_manifest.json`     (rewritten: all `depends: []`)
 - `Deploy/Install-ElleServices.ps1`       (parallel-start refactor)
 - `Debug/test_passive_mesh.cpp`           (new, 4-case state-machine test)
+
+## Session Feb-2026 (continued) — v2.x: Apache port 8080 retired, single-port companion
+
+User directive: "any 8080 endpoint needs to be added to the 8000
+endpoints". Goal: the Android companion only needs ONE host:port
+tuple, never two.
+
+### What was on 8080 (Apache reverse-proxy stripe)
+
+`ElleApacheApi.kt` exposed 9 routes (10 on the spec, 1 was a
+WebSocket handled separately by `PixelStreamingView`):
+
+  1. GET /elle-apache/video/{job_uuid}             — mp4 streaming
+  2. GET /elle-apache/identity/private-thoughts
+  3. GET /elle-apache/identity/autobiography
+  4. GET /elle-apache/identity/preferences
+  5. GET /elle-apache/identity/traits
+  6. GET /elle-apache/identity/snapshots
+  7. GET /elle-apache/identity/growth-log
+  8. GET /elle-apache/identity/felt-time
+  9. GET /elle-apache/identity/consent-log
+
+All 9 have been re-implemented natively in `Elle.Service.HTTP/HTTPServer.cpp`
+backed by direct SQL pool reads against the same tables
+(`dbo.identity_*` per `ElleAnn_MemoryDelta.sql`). No more Apache
+reverse-proxy, no more port 8080 in the data plane.
+
+### C++ side (`HTTPServer.cpp`)
+
+- New `HTTPResponse::Binary(contentType, body)` factory — used by
+  the file-streaming endpoint. CORS / Content-Length / status
+  header generation already worked for any Content-Type so this is
+  a 10-line helper, no protocol changes.
+- 1 new file route: `GET /api/video/file/{job_id}` (USER auth).
+  Reads the job's `output_path` from `dbo.video_jobs`, opens with
+  `std::ifstream binary`, dumps via `Binary("video/mp4", ...)`.
+  Returns 404 with the actual reason ("video not yet generated"
+  vs "video file missing on disk") for operator triage.
+- 8 new identity reads, all `USER` auth, all fail-soft against
+  missing tables (return empty arrays / zero-default singletons
+  instead of 500), so a fresh install where the operator hasn't
+  applied MemoryDelta.sql yet still shows usable UI:
+    GET /api/identity/private-thoughts (?limit, ?resolved)
+    GET /api/identity/autobiography     (?limit)
+    GET /api/identity/preferences       (?domain)
+    GET /api/identity/traits
+    GET /api/identity/snapshots         (?limit)
+    GET /api/identity/growth-log        (?limit)
+    GET /api/identity/felt-time         (singleton row)
+    GET /api/identity/consent-log       (?limit)
+- All 9 use `ElleSQLPool::Instance().Query(...)` /
+  `QueryParams(...)`. CONVERT(BIGINT, …) wraps every ms-epoch column
+  to dodge the 32-bit truncation footgun on 2026 timestamps.
+
+### Android side
+
+- `ElleApiExtended.kt`: 9 new methods (`getPrivateThoughts`,
+  `getAutobiography`, `getIdentityPreferences`, `getIdentityTraits`,
+  `getIdentitySnapshots`, `getGrowthLog`, `getFeltTime`,
+  `getConsentLog`, `getVideoFile` with `@Streaming`).
+- `AllModels.kt`: `VideoJob.videoUrl(restBase)` rewritten — now
+  emits `$restBase/api/video/file/$jobId` instead of
+  `$apacheBase/elle-apache/video/$jobId`. Parameter renamed to
+  reflect the new home.
+- `WorldSections.kt`: 5 call sites migrated `container.apacheApi.*`
+  → `container.extendedApi.*` (sed, mechanical).
+- `VideoCallScreen.kt`: `apacheBaseUrl` parameter renamed to
+  `restBaseUrl` (3 sites incl. ViewModel ctor + Composable param +
+  factory). Comment updated to point at the new path.
+- `ElleNavHost.kt`: route wiring now passes
+  `containerExtended.restBaseUrl` instead of `apacheBaseUrl`.
+- `AppContainerExtended.kt`: deleted `apachePort`, `_apacheApi`,
+  `apacheApiFor`, `pairedApacheApi`, `apacheApi`, `apacheBaseUrl`
+  (~25 LOC). New `restBaseUrl` getter (one-liner) emits
+  `http://${host}:${port}` so call sites that need raw URLs
+  (video-call WebView) still work.
+- Deleted `data/ElleApacheApi.kt` entirely. No callers remain.
+
+### Verification
+
+- Brace-balance audit on all 7 touched files: HTTPServer.cpp pre-/
+  post-edit skew matches (+1/+1, regex artefact from string-literal
+  `{` in routes that are unchanged in this batch). Kotlin files all
+  match their pre-edit skew (string-template false positives).
+- `grep -rn "apacheApi\|apacheBaseUrl\|apachePort\|elle-apache\|
+  ElleApacheApi"` against `app/src/main/` finds only doc-comment
+  references in 3 files explaining the migration. Zero live
+  callers.
+- `grep -c '"GET".*"/api/identity/\|"GET".*"/api/video/file"'
+  HTTPServer.cpp` → 9. Every Apache route is accounted for.
+
+### Operator-visible upgrade path
+
+When you next deploy:
+1. Stop and uninstall Apache (no longer needed for the companion).
+   `sc stop W3SVC` / `sc delete W3SVC` — or whatever you're using.
+   (Pixel Streaming WS is separate; check `PixelStreamingView.kt`
+   if you use the 3-D memory map.)
+2. Pull the new APK.
+3. The pair flow is unchanged — same QR / same code / same JWT.
+4. The app will hit `http://<your-host>:<paired-port>/api/identity/*`
+   for every read that used to go to :8080. No config change,
+   no second port, no second cert, no second firewall rule.

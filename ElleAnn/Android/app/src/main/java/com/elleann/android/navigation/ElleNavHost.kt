@@ -263,7 +263,7 @@ private fun TabNavHost(
             VideoCallScreen(
                 callId            = callId,
                 containerExtended = containerExtended,
-                apacheBaseUrl     = containerExtended.apacheBaseUrl ?: "",
+                restBaseUrl       = containerExtended.restBaseUrl ?: "",
                 onBack            = { navController.popBackStack() },
             )
         }

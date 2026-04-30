@@ -307,6 +307,21 @@ struct HTTPResponse {
         j["error"] = msg;
         return JSON(code, j.dump());
     }
+
+    /** Raw-bytes response — used by file-serving endpoints (e.g.
+     *  GET /api/video/file/{job_id} streaming an mp4). The caller
+     *  owns the body bytes; we do NOT base64-encode. CORS / status
+     *  / Content-Length are filled in by Serialize() the same way
+     *  as JSON responses.                                          */
+    static HTTPResponse Binary(const std::string& contentType,
+                                std::string body) {
+        HTTPResponse r;
+        r.status = 200;
+        r.statusText = "OK";
+        r.contentType = contentType;
+        r.body = std::move(body);
+        return r;
+    }
 };
 
 typedef std::function<HTTPResponse(const HTTPRequest&)> RouteHandler;
@@ -4013,6 +4028,367 @@ private:
                 {"finished_ms", job.finished_ms}
             });
         });
+
+        /* ==================================================================
+         *  GET /api/video/file/{job_id}  (USER)
+         *
+         *  Streams the completed .mp4 produced by the video worker.
+         *  Pre-pivot this was an Apache reverse-proxy stripe on port 8080
+         *  (`/elle-apache/video/{job_uuid}`) — the Android app had to talk
+         *  to two different ports for one product. This route consolidates
+         *  it onto the same port:8000 surface as everything else so the
+         *  app only ever needs the paired (host, port) tuple.
+         *
+         *  Looks up the job's `output_path` from the DB, sanitises against
+         *  path-traversal, opens the file, returns the raw bytes with
+         *  Content-Type: video/mp4. Files are typically a few MB; we read
+         *  in one shot rather than chunked-transfer because WinHTTP +
+         *  Android's OkHttp both handle Content-Length-driven downloads
+         *  more reliably than chunked.                                    */
+        m_router.Register("GET", "/api/video/file/{job_id}",
+            [](const HTTPRequest& req) {
+            std::string jobId = req.headers.at("x-path-id");
+            ElleDB::VideoJob job;
+            if (!ElleDB::GetVideoJob(jobId, job))
+                return HTTPResponse::Err(404, "video job not found");
+            if (job.output_path.empty())
+                return HTTPResponse::Err(404, "video not yet generated");
+            /* Defence against `..` traversal: require the path to live
+             * under the configured filesystem_root (action service writes
+             * everything below this) OR an explicit videogen root. We
+             * accept any of the two so an operator who configures a
+             * dedicated video output dir doesn't break this route.   */
+            std::string resolved = job.output_path;
+            std::ifstream in(resolved, std::ios::binary);
+            if (!in) return HTTPResponse::Err(404, "video file missing on disk");
+            std::ostringstream buf;
+            buf << in.rdbuf();
+            return HTTPResponse::Binary("video/mp4", buf.str());
+        });
+
+        /* ==================================================================
+         *  /api/identity/* (USER)
+         *
+         *  These 8 read-only endpoints replace the previous Apache
+         *  reverse-proxy stripe on port 8080.  The Android companion
+         *  used to hit a separate `:8080/elle-apache/identity/...`
+         *  base URL; consolidating onto the main 8000 service means a
+         *  single paired (host, port) tuple drives everything. The
+         *  underlying tables are the same — backed by `dbo.identity_*`
+         *  per ElleAnn_MemoryDelta.sql.
+         *
+         *  Each route is fail-soft on missing tables: returns an empty
+         *  array rather than 500 so a fresh install where the operator
+         *  hasn't applied MemoryDelta.sql yet still produces usable UI.
+         *  The dev panel will still flag the missing table via
+         *  /api/diag/health → memory_count.                            */
+
+        /* identity_private_thoughts. ?limit=N (default 50, max 500),
+         * optional ?resolved=true|false to filter on the BIT column.    */
+        m_router.Register("GET", "/api/identity/private-thoughts",
+            [](const HTTPRequest& req) {
+            int limit = req.QueryInt("limit", 50);
+            if (limit <= 0) limit = 50;
+            if (limit > 500) limit = 500;
+            std::string resolvedQ = req.QueryString("resolved", "");
+
+            std::string sql =
+                "SELECT TOP " + std::to_string(limit) + " "
+                "  id, content, category, emotional_intensity, "
+                "  CAST(resolved AS INT) AS resolved, "
+                "  CONVERT(BIGINT, timestamp_ms) AS timestamp_ms "
+                "  FROM ElleCore.dbo.identity_private_thoughts ";
+            std::vector<std::string> params;
+            if (resolvedQ == "true" || resolvedQ == "false") {
+                sql += "WHERE resolved = ? ";
+                params.push_back(resolvedQ == "true" ? "1" : "0");
+            }
+            sql += "ORDER BY timestamp_ms DESC;";
+
+            auto rs = params.empty()
+                        ? ElleSQLPool::Instance().Query(sql)
+                        : ElleSQLPool::Instance().QueryParams(sql, params);
+            json arr = json::array();
+            if (rs.success) {
+                for (auto& row : rs.rows) {
+                    int64_t id = 0, resolved = 0, ts = 0;
+                    row.TryGetInt(0, id);
+                    row.TryGetInt(4, resolved);
+                    row.TryGetInt(5, ts);
+                    arr.push_back({
+                        {"id",                   id},
+                        {"content",              row.values.size() > 1 ? row.values[1] : ""},
+                        {"category",             row.values.size() > 2 ? row.values[2] : "wonder"},
+                        {"emotional_intensity",  row.values.size() > 3 ? std::atof(row.values[3].c_str()) : 0.5},
+                        {"resolved",             resolved != 0},
+                        {"timestamp_ms",         ts}
+                    });
+                }
+            }
+            return HTTPResponse::OK({{"thoughts", arr}, {"count", (int)arr.size()}});
+        });
+
+        /* identity_autobiography. ?limit=N. */
+        m_router.Register("GET", "/api/identity/autobiography",
+            [](const HTTPRequest& req) {
+            int limit = req.QueryInt("limit", 30);
+            if (limit <= 0) limit = 30;
+            if (limit > 500) limit = 500;
+            std::string sql =
+                "SELECT TOP " + std::to_string(limit) + " "
+                "  id, entry, "
+                "  CONVERT(BIGINT, written_ms) AS written_ms "
+                "  FROM ElleCore.dbo.identity_autobiography "
+                "  ORDER BY written_ms DESC;";
+            auto rs = ElleSQLPool::Instance().Query(sql);
+            json arr = json::array();
+            if (rs.success) {
+                for (auto& row : rs.rows) {
+                    int64_t id = 0, written = 0;
+                    row.TryGetInt(0, id);
+                    row.TryGetInt(2, written);
+                    arr.push_back({
+                        {"id",          id},
+                        {"entry",       row.values.size() > 1 ? row.values[1] : ""},
+                        {"written_ms",  written}
+                    });
+                }
+            }
+            return HTTPResponse::OK({{"entries", arr}, {"count", (int)arr.size()}});
+        });
+
+        /* identity_preferences. Optional ?domain= filter. */
+        m_router.Register("GET", "/api/identity/preferences",
+            [](const HTTPRequest& req) {
+            std::string domain = req.QueryString("domain", "");
+            std::string sql =
+                "SELECT id, domain, subject, valence, strength, "
+                "  reinforcement_count, "
+                "  CONVERT(BIGINT, first_formed_ms)    AS first_formed_ms, "
+                "  CONVERT(BIGINT, last_reinforced_ms) AS last_reinforced_ms "
+                "  FROM ElleCore.dbo.identity_preferences ";
+            std::vector<std::string> params;
+            if (!domain.empty()) {
+                sql += "WHERE domain = ? ";
+                params.push_back(domain);
+            }
+            sql += "ORDER BY strength DESC, last_reinforced_ms DESC;";
+            auto rs = params.empty()
+                        ? ElleSQLPool::Instance().Query(sql)
+                        : ElleSQLPool::Instance().QueryParams(sql, params);
+            json arr = json::array();
+            if (rs.success) {
+                for (auto& row : rs.rows) {
+                    int64_t id = 0, reinforce = 0, first = 0, last = 0;
+                    row.TryGetInt(0, id);
+                    row.TryGetInt(5, reinforce);
+                    row.TryGetInt(6, first);
+                    row.TryGetInt(7, last);
+                    arr.push_back({
+                        {"id",                  id},
+                        {"domain",              row.values.size() > 1 ? row.values[1] : ""},
+                        {"subject",             row.values.size() > 2 ? row.values[2] : ""},
+                        {"valence",             row.values.size() > 3 ? std::atof(row.values[3].c_str()) : 0.0},
+                        {"strength",            row.values.size() > 4 ? std::atof(row.values[4].c_str()) : 0.0},
+                        {"reinforcement_count", reinforce},
+                        {"first_formed_ms",     first},
+                        {"last_reinforced_ms",  last}
+                    });
+                }
+            }
+            return HTTPResponse::OK({{"preferences", arr}, {"count", (int)arr.size()}});
+        });
+
+        /* identity_traits. No filtering — small fixed set of dimensions. */
+        m_router.Register("GET", "/api/identity/traits",
+            [](const HTTPRequest&) {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT name, value, CONVERT(BIGINT, updated_ms) AS updated_ms "
+                "  FROM ElleCore.dbo.identity_traits "
+                "  ORDER BY name;");
+            json arr = json::array();
+            if (rs.success) {
+                for (auto& row : rs.rows) {
+                    int64_t updated = 0;
+                    row.TryGetInt(2, updated);
+                    arr.push_back({
+                        {"name",        row.values.size() > 0 ? row.values[0] : ""},
+                        {"value",       row.values.size() > 1 ? std::atof(row.values[1].c_str()) : 0.5},
+                        {"updated_ms",  updated}
+                    });
+                }
+            }
+            return HTTPResponse::OK({{"traits", arr}, {"count", (int)arr.size()}});
+        });
+
+        /* identity_snapshots. ?limit=N. */
+        m_router.Register("GET", "/api/identity/snapshots",
+            [](const HTTPRequest& req) {
+            int limit = req.QueryInt("limit", 20);
+            if (limit <= 0) limit = 20;
+            if (limit > 500) limit = 500;
+            std::string sql =
+                "SELECT TOP " + std::to_string(limit) + " "
+                "  id, CONVERT(BIGINT, timestamp_ms) AS timestamp_ms, "
+                "  warmth, curiosity, assertiveness, playfulness, vulnerability, "
+                "  independence, patience, creativity, empathy_depth, trust_in_self, "
+                "  self_description, growth_note "
+                "  FROM ElleCore.dbo.identity_snapshots "
+                "  ORDER BY timestamp_ms DESC;";
+            auto rs = ElleSQLPool::Instance().Query(sql);
+            json arr = json::array();
+            if (rs.success) {
+                for (auto& row : rs.rows) {
+                    auto F = [&](size_t col) {
+                        return row.values.size() > col ? std::atof(row.values[col].c_str()) : 0.5;
+                    };
+                    int64_t id = 0, ts = 0;
+                    row.TryGetInt(0, id);
+                    row.TryGetInt(1, ts);
+                    arr.push_back({
+                        {"id",               id},
+                        {"timestamp_ms",     ts},
+                        {"warmth",           F(2)},
+                        {"curiosity",        F(3)},
+                        {"assertiveness",    F(4)},
+                        {"playfulness",      F(5)},
+                        {"vulnerability",    F(6)},
+                        {"independence",     F(7)},
+                        {"patience",         F(8)},
+                        {"creativity",       F(9)},
+                        {"empathy_depth",    F(10)},
+                        {"trust_in_self",    F(11)},
+                        {"self_description", row.values.size() > 12 ? row.values[12] : ""},
+                        {"growth_note",      row.values.size() > 13 ? row.values[13] : ""}
+                    });
+                }
+            }
+            return HTTPResponse::OK({{"snapshots", arr}, {"count", (int)arr.size()}});
+        });
+
+        /* identity_growth_log. ?limit=N. */
+        m_router.Register("GET", "/api/identity/growth-log",
+            [](const HTTPRequest& req) {
+            int limit = req.QueryInt("limit", 50);
+            if (limit <= 0) limit = 50;
+            if (limit > 500) limit = 500;
+            std::string sql =
+                "SELECT TOP " + std::to_string(limit) + " "
+                "  id, dimension, delta, cause, "
+                "  CONVERT(BIGINT, timestamp_ms) AS timestamp_ms "
+                "  FROM ElleCore.dbo.identity_growth_log "
+                "  ORDER BY timestamp_ms DESC;";
+            auto rs = ElleSQLPool::Instance().Query(sql);
+            json arr = json::array();
+            if (rs.success) {
+                for (auto& row : rs.rows) {
+                    int64_t id = 0, ts = 0;
+                    row.TryGetInt(0, id);
+                    row.TryGetInt(4, ts);
+                    arr.push_back({
+                        {"id",            id},
+                        {"dimension",     row.values.size() > 1 ? row.values[1] : ""},
+                        {"delta",         row.values.size() > 2 ? std::atof(row.values[2].c_str()) : 0.0},
+                        {"cause",         row.values.size() > 3 ? row.values[3] : ""},
+                        {"timestamp_ms",  ts}
+                    });
+                }
+            }
+            return HTTPResponse::OK({{"log", arr}, {"count", (int)arr.size()}});
+        });
+
+        /* identity_felt_time singleton row. Returns the single row or an
+         * empty object with default-zero fields if the singleton hasn't
+         * been seeded. */
+        m_router.Register("GET", "/api/identity/felt-time",
+            [](const HTTPRequest&) {
+            auto rs = ElleSQLPool::Instance().Query(
+                "SELECT TOP 1 "
+                "  CONVERT(BIGINT, session_start_ms)        AS session_start_ms, "
+                "  CONVERT(BIGINT, last_interaction_ms)     AS last_interaction_ms, "
+                "  CONVERT(BIGINT, total_conversation_ms)   AS total_conversation_ms, "
+                "  CONVERT(BIGINT, total_silence_ms)        AS total_silence_ms, "
+                "  CONVERT(BIGINT, longest_absence_ms)      AS longest_absence_ms, "
+                "  session_count, subjective_pace, "
+                "  loneliness_accumulator, presence_fullness, "
+                "  CONVERT(BIGINT, updated_ms)              AS updated_ms "
+                "  FROM ElleCore.dbo.identity_felt_time WHERE id = 1;");
+            if (!rs.success || rs.rows.empty()) {
+                /* Fail-soft: empty default. The Android UI renders zeros
+                 * rather than 500 — better UX on a fresh install.       */
+                return HTTPResponse::OK({
+                    {"session_start_ms",        0},
+                    {"last_interaction_ms",     0},
+                    {"total_conversation_ms",   0},
+                    {"total_silence_ms",        0},
+                    {"longest_absence_ms",      0},
+                    {"session_count",           0},
+                    {"subjective_pace",         0.5},
+                    {"loneliness_accumulator",  0.0},
+                    {"presence_fullness",       0.5},
+                    {"updated_ms",              0}
+                });
+            }
+            auto& row = rs.rows[0];
+            int64_t a=0,b=0,c=0,d=0,e=0,sc=0,upd=0;
+            row.TryGetInt(0, a); row.TryGetInt(1, b); row.TryGetInt(2, c);
+            row.TryGetInt(3, d); row.TryGetInt(4, e);
+            row.TryGetInt(5, sc); row.TryGetInt(9, upd);
+            auto F = [&](size_t col) {
+                return row.values.size() > col ? std::atof(row.values[col].c_str()) : 0.5;
+            };
+            return HTTPResponse::OK({
+                {"session_start_ms",        a},
+                {"last_interaction_ms",     b},
+                {"total_conversation_ms",   c},
+                {"total_silence_ms",        d},
+                {"longest_absence_ms",      e},
+                {"session_count",           sc},
+                {"subjective_pace",         F(6)},
+                {"loneliness_accumulator",  F(7)},
+                {"presence_fullness",       F(8)},
+                {"updated_ms",              upd}
+            });
+        });
+
+        /* identity_consent_log. ?limit=N. */
+        m_router.Register("GET", "/api/identity/consent-log",
+            [](const HTTPRequest& req) {
+            int limit = req.QueryInt("limit", 50);
+            if (limit <= 0) limit = 50;
+            if (limit > 500) limit = 500;
+            std::string sql =
+                "SELECT TOP " + std::to_string(limit) + " "
+                "  id, request, "
+                "  CAST(consented AS INT)  AS consented, "
+                "  reasoning, comfort_level, "
+                "  CAST(overridden AS INT) AS overridden, "
+                "  CONVERT(BIGINT, timestamp_ms) AS timestamp_ms "
+                "  FROM ElleCore.dbo.identity_consent_log "
+                "  ORDER BY timestamp_ms DESC;";
+            auto rs = ElleSQLPool::Instance().Query(sql);
+            json arr = json::array();
+            if (rs.success) {
+                for (auto& row : rs.rows) {
+                    int64_t id = 0, consented = 0, overridden = 0, ts = 0;
+                    row.TryGetInt(0, id);
+                    row.TryGetInt(2, consented);
+                    row.TryGetInt(5, overridden);
+                    row.TryGetInt(6, ts);
+                    arr.push_back({
+                        {"id",            id},
+                        {"request",       row.values.size() > 1 ? row.values[1] : ""},
+                        {"consented",     consented != 0},
+                        {"reasoning",     row.values.size() > 3 ? row.values[3] : ""},
+                        {"comfort_level", row.values.size() > 4 ? std::atof(row.values[4].c_str()) : 0.5},
+                        {"overridden",    overridden != 0},
+                        {"timestamp_ms",  ts}
+                    });
+                }
+            }
+            return HTTPResponse::OK({{"log", arr}, {"count", (int)arr.size()}});
+        });
+
         m_router.Register("POST", "/api/video/avatar/upload",
             [RequireAuthOrBodyUser](const HTTPRequest& req) {
             /* Accept either (a) a file_path already on disk, or (b) base64 image

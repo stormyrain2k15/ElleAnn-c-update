@@ -496,6 +496,65 @@ interface ElleApiExtended {
     @GET("/api/memory/why")
     suspend fun getMemoryWhy(@Query("entities") entities: String): MemoryWhyResponse
 
+    // ── IDENTITY (migrated from the port-8080 Apache stripe — Feb 2026) ──────
+    //
+    // Pre-pivot these 8 reads lived on a separate Apache reverse-proxy at
+    // port 8080 (`/elle-apache/identity/...`). Consolidated onto the main
+    // C++ HTTP service so the companion app only needs the paired
+    // (host, port) tuple. Same SQL tables (`dbo.identity_*`), same JSON
+    // shapes — just a single base URL now.
+
+    /** GET /api/identity/private-thoughts — internal monologue */
+    @GET("/api/identity/private-thoughts")
+    suspend fun getPrivateThoughts(
+        @Query("limit") limit: Int = 50,
+        @Query("resolved") resolved: Boolean? = null,
+    ): PrivateThoughtsResponse
+
+    /** GET /api/identity/autobiography — Elle's self-written life story */
+    @GET("/api/identity/autobiography")
+    suspend fun getAutobiography(@Query("limit") limit: Int = 30): AutobiographyResponse
+
+    /** GET /api/identity/preferences — learned likes/dislikes */
+    @GET("/api/identity/preferences")
+    suspend fun getIdentityPreferences(
+        @Query("domain") domain: String? = null,
+    ): IdentityPreferencesResponse
+
+    /** GET /api/identity/traits — 10-axis personality trait values */
+    @GET("/api/identity/traits")
+    suspend fun getIdentityTraits(): IdentityTraitsResponse
+
+    /** GET /api/identity/snapshots — identity over time */
+    @GET("/api/identity/snapshots")
+    suspend fun getIdentitySnapshots(@Query("limit") limit: Int = 20): IdentitySnapshotsResponse
+
+    /** GET /api/identity/growth-log — what changed and why */
+    @GET("/api/identity/growth-log")
+    suspend fun getGrowthLog(@Query("limit") limit: Int = 50): GrowthLogResponse
+
+    /** GET /api/identity/felt-time — subjective time singleton */
+    @GET("/api/identity/felt-time")
+    suspend fun getFeltTime(): FeltTime
+
+    /** GET /api/identity/consent-log — consent decisions with reasoning */
+    @GET("/api/identity/consent-log")
+    suspend fun getConsentLog(@Query("limit") limit: Int = 50): ConsentLogResponse
+
+    /**
+     * GET /api/video/file/{job_id} — streams the completed mp4.
+     *
+     * Replaces the previous port-8080 Apache stripe at
+     * /elle-apache/video/{job_uuid}. Same on-disk artefact, same
+     * Content-Type: video/mp4, but served by the main HTTP service so
+     * the app never has to talk to two ports.
+     */
+    @retrofit2.http.Streaming
+    @GET("/api/video/file/{job_id}")
+    suspend fun getVideoFile(
+        @retrofit2.http.Path("job_id") jobId: String,
+    ): retrofit2.Response<okhttp3.ResponseBody>
+
     /** POST /api/admin/reload — hot-reload config (ADMIN) */
     @POST("/api/admin/reload")
     suspend fun reloadConfig(): OkResponse

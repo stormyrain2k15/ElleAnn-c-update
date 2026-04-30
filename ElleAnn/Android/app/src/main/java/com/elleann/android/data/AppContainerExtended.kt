@@ -15,8 +15,9 @@ import java.util.concurrent.TimeUnit
 
 /**
  * AppContainerExtended — extends the locked AppContainer with:
- *   - ElleApiExtended (all additional REST endpoints)
- *   - ElleApacheApi (10 Apache endpoints on port 8080, Named Pipes SQL)
+ *   - ElleApiExtended (full REST surface incl. /api/identity/* and
+ *     /api/video/file/* — the 9 routes formerly on the port-8080
+ *     Apache stripe were folded back here Feb 2026)
  *   - AdminKeyStore (encrypted x-admin-key)
  *   - ElleWebSocket (real-time events)
  *   - Re-auth callback for JWT expiry
@@ -105,31 +106,20 @@ class AppContainerExtended(
         get() = _extendedApi ?: (pairedExtendedApi()
             ?: error("No paired server."))
 
-    // ── Apache API (Named Pipes SQL on server side) ───────────────────────────
-    private val apachePort = 8080
-    private var _apacheApi: ElleApacheApi? = null
-
-    fun apacheApiFor(host: String): ElleApacheApi {
-        PrivateLanValidator.require(host)
-        return Retrofit.Builder()
-            .baseUrl("http://$host:$apachePort/")
-            .client(okHttpClient)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-            .create(ElleApacheApi::class.java)
-    }
-
-    fun pairedApacheApi(): ElleApacheApi? {
-        val stored = tokenStore.load() ?: return null
-        return apacheApiFor(stored.host).also { _apacheApi = it }
-    }
-
-    val apacheApi: ElleApacheApi
-        get() = _apacheApi ?: (pairedApacheApi()
-            ?: error("No paired server."))
-
-    val apacheBaseUrl: String?
-        get() = tokenStore.load()?.let { "http://${it.host}:$apachePort" }
+    /**
+     * Base URL (e.g. `http://192.168.1.50:8000`) for the paired
+     * Elle.Service.HTTP REST surface. Used by call-sites that need to
+     * construct raw URLs themselves — the video-call screen pulls the
+     * mp4 by string URL, for example. Returns null when not paired.
+     *
+     * Pre-pivot the app also tracked an `apacheBaseUrl` on port 8080
+     * for the Apache reverse-proxy stripe; that was retired Feb 2026
+     * after the 9 endpoints it served were folded into the main
+     * `/api/identity/*` + `/api/video/file/*` surface. Single pair,
+     * single port, single base URL.
+     */
+    val restBaseUrl: String?
+        get() = tokenStore.load()?.let { "http://${it.host}:${it.port}" }
 
 
     // ── Separate admin OkHttp client — x-admin-key only on admin calls ──
