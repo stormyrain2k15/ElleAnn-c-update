@@ -1821,3 +1821,84 @@ When you next deploy:
 4. The app will hit `http://<your-host>:<paired-port>/api/identity/*`
    for every read that used to go to :8080. No config change,
    no second port, no second cert, no second firewall rule.
+
+## Session Feb-2026 (continued) — v2.x: Full llama.cpp embedding wired (gated)
+
+User directive: "wire the full llama.cpp embedding while keeping it
+gated behind enabled: false"
+
+### What changed in `Shared/ElleLLM.cpp`
+
+Pre-pivot, the local provider had:
+- An `Initialize()` that pretended to load the model (literally a
+  comment block of llama.cpp calls, plus an unconditional return
+  true).
+- An `IsAvailable()` that just returned `m_config.enabled` regardless
+  of whether a model was actually loaded.
+- A `Generate()` that spawned `llama-cli.exe` as a subprocess on
+  every call — paying the full model-load cost per turn.
+
+Post-pivot, with `ELLE_HAVE_LLAMA` defined at compile time + libllama
+linked, the provider now does **real in-process inference**:
+
+- `EnsureBackendInit()` / `ReleaseBackend()` ref-counted wrapper
+  around `llama_backend_init` / `llama_backend_free` (process-global,
+  must be called exactly once across all provider instances).
+- `Initialize()`: real `llama_model_load_from_file` + `llama_init_from_model`
+  with the user's `gpu_layers`, `mlock`, `mmap`, `context_size`,
+  `batch_size`, `threads` config. Returns false on load failure so
+  the engine cascade picks something else; without this guard a
+  missing GGUF used to surface as silent empty completions.
+- `Shutdown()`: `llama_free` → `llama_model_free` → `ReleaseBackend`
+  in that order. Resets `m_loadProgress`.
+- `IsAvailable()`: `m_config.enabled && m_model && m_ctx`.
+- `Generate()`: full tokenize → `llama_kv_cache_clear` →
+  `llama_decode(prompt)` → sampler-chain (top_p → temp → dist) →
+  per-token `llama_sampler_sample` + `llama_token_to_piece` +
+  callback streaming + `llama_decode(token)` loop, until EOG or
+  `maxTokens`. Sampler chain is freed at the end.
+
+### The runtime gate stays in place
+
+`elle_master_config.json` `local_llama.enabled` is now **`false`**
+(was `true`). With the gate down:
+- `Initialize()` short-circuits before touching libllama at all.
+- `IsAvailable()` returns false.
+- The cascade in `ElleLLMEngine::Chat()` skips the provider entirely.
+
+To activate later, the operator flips ONE config line + (optionally)
+adds the `ELLE_HAVE_LLAMA` define at compile time. No code changes.
+
+### The compile-time gate (ELLE_HAVE_LLAMA)
+
+The real `llama.h` calls are wrapped in `#ifdef ELLE_HAVE_LLAMA`
+blocks. Without the macro:
+- `Initialize()` falls back to verifying the model file is readable
+  and marks the provider available (subprocess path).
+- `Generate()` runs the existing `llama-cli.exe` subprocess code
+  exactly as before — same handle restriction, same 2-min wedge
+  watchdog, same prompt-echo strip.
+
+This means **a build without llama.cpp linked still compiles and
+runs**. The user can ship the new code today and turn on real
+embedding tomorrow.
+
+`Shared/ElleCore.Shared.vcxproj` got a documented header comment
+listing the exact MSBuild lines to flip on (PreprocessorDefinitions,
+AdditionalIncludeDirectories, AdditionalDependencies). XML still
+valid.
+
+### Verification
+
+- `#ifdef`/`#endif` balance: 5/5 in `ElleLLM.cpp`.
+- C++ brace skew: matches the documented pre-edit skew (+2/-1 in
+  `ElleLLM.cpp` from existing string-literal `{` chars in routes —
+  unchanged by this batch).
+- `elle_master_config.json` parses.
+- `ElleCore.Shared.vcxproj` parses as XML.
+
+### Files this batch
+
+- `Shared/ElleLLM.cpp`             (real init/shutdown/generate; backend ref-counter; ~120 LOC delta)
+- `Shared/ElleCore.Shared.vcxproj` (docs how to flip on)
+- `elle_master_config.json`         (`local_llama.enabled: false`, added `binary_path: ""`)

@@ -11,11 +11,67 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <sstream>
+#include <fstream>
 #include <algorithm>
 #include <numeric>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
+
+/*══════════════════════════════════════════════════════════════════════════════
+ * EMBEDDED llama.cpp INTEGRATION — compile-time gated
+ *
+ *  Define ELLE_HAVE_LLAMA at build time AND link against `llama.lib` +
+ *  `ggml.lib` to enable in-process GGUF inference. Without the macro,
+ *  `LLMLocalProvider::Generate()` falls back to spawning `llama-cli.exe`
+ *  as a subprocess (the path that's been carrying us through Feb 2026).
+ *
+ *  Header / lib instructions:
+ *    1. Build llama.cpp upstream:
+ *         cmake -B build -DLLAMA_CUDA=ON -DBUILD_SHARED_LIBS=OFF
+ *         cmake --build build --config Release
+ *    2. In ElleCore.Shared.vcxproj add to <ItemDefinitionGroup><ClCompile>:
+ *         <PreprocessorDefinitions>ELLE_HAVE_LLAMA;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+ *         <AdditionalIncludeDirectories>$(LlamaCppRoot)\include;$(LlamaCppRoot)\ggml\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+ *    3. In every consuming Service .vcxproj add to <Link>:
+ *         <AdditionalLibraryDirectories>$(LlamaCppRoot)\build\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+ *         <AdditionalDependencies>llama.lib;ggml.lib;ggml-base.lib;ggml-cpu.lib;%(AdditionalDependencies)</AdditionalDependencies>
+ *
+ *  NB: The llama.cpp API stabilised on the sampler-chain model in late
+ *      2024. We target that surface (`llama_model_load_from_file`,
+ *      `llama_init_from_model`, `llama_sampler_chain_*`). Older builds
+ *      should be upgraded; the legacy `llama_load_model_from_file`
+ *      symbols are still in upstream as deprecated aliases as of Q1 2026.
+ *  ══════════════════════════════════════════════════════════════════════════*/
+#ifdef ELLE_HAVE_LLAMA
+#include "llama.h"
+
+namespace {
+    /* Backend init/free is process-global. Multiple LLMLocalProvider
+     * instances should share one init; track with a counter so the
+     * last instance shutting down also releases backend.            */
+    static std::mutex            s_backendMutex;
+    static int                   s_backendRefCount = 0;
+    static bool                  s_backendInited   = false;
+
+    void EnsureBackendInit() {
+        std::lock_guard<std::mutex> lk(s_backendMutex);
+        if (!s_backendInited) {
+            llama_backend_init();
+            s_backendInited = true;
+        }
+        s_backendRefCount++;
+    }
+    void ReleaseBackend() {
+        std::lock_guard<std::mutex> lk(s_backendMutex);
+        if (--s_backendRefCount <= 0 && s_backendInited) {
+            llama_backend_free();
+            s_backendInited   = false;
+            s_backendRefCount = 0;
+        }
+    }
+}
+#endif
 
 /*══════════════════════════════════════════════════════════════════════════════
  * LLM API PROVIDER (Groq / OpenAI / Anthropic / LM Studio / Custom)
@@ -593,46 +649,114 @@ bool LLMLocalProvider::Initialize(const LLMProviderConfig& config) {
     m_modelPath = config.model_path;
     m_contextSize = config.context_size;
 
-    /* Note: Actual llama.cpp initialization would happen here.
-       The user compiles against llama.cpp headers/lib.
-       We provide the scaffold and API contract. */
+    /* Hard-gate at the runtime level FIRST. The user wants the local
+     * provider available as a fallback path but NOT auto-active —
+     * `enabled: false` short-circuits the whole init pipeline so the
+     * embedded llama.cpp library doesn't even allocate.              */
+    if (!m_config.enabled) {
+        ELLE_INFO("Local LLM disabled in config (enabled:false) — skipping load");
+        return false;
+    }
+
+    if (m_modelPath.empty()) {
+        ELLE_WARN("Local LLM enabled but model_path is empty");
+        return false;
+    }
 
     ELLE_INFO("Local LLM: Loading model from %s...", m_modelPath.c_str());
-    ELLE_INFO("  Context: %d, GPU layers: %d, Threads: %d",
-              config.context_size, config.gpu_layers, config.threads);
+    ELLE_INFO("  Context: %u, GPU layers: %u, Threads: %u, Batch: %u",
+              config.context_size, config.gpu_layers, config.threads,
+              config.batch_size);
 
-    /* llama_model_params params = llama_model_default_params();
-       params.n_gpu_layers = config.gpu_layers;
-       params.use_mlock = config.mlock;
-       params.use_mmap = config.mmap;
-       m_model = llama_load_model_from_file(m_modelPath.c_str(), params);
-       
-       if (!m_model) {
-           ELLE_ERROR("Failed to load model: %s", m_modelPath.c_str());
-           return false;
-       }
+#ifdef ELLE_HAVE_LLAMA
+    /* In-process llama.cpp embedding (compile-time gated).  Loads the
+     * GGUF directly into our address space — no llama-cli spawn, no
+     * stdout-pipe parsing, model stays warm across requests so the
+     * second turn doesn't pay the load cost again.                    */
+    EnsureBackendInit();
 
-       llama_context_params ctx_params = llama_context_default_params();
-       ctx_params.n_ctx = config.context_size;
-       ctx_params.n_threads = config.threads;
-       ctx_params.n_batch = config.batch_size;
-       m_ctx = llama_new_context_with_model(m_model, ctx_params);
-    */
+    llama_model_params mp = llama_model_default_params();
+    mp.n_gpu_layers = config.use_gpu ? (int)config.gpu_layers : 0;
+    mp.use_mmap     = config.mmap;
+    mp.use_mlock    = config.mlock;
 
-    ELLE_INFO("Local LLM model loaded successfully");
+    m_model = llama_model_load_from_file(m_modelPath.c_str(), mp);
+    if (!m_model) {
+        ELLE_ERROR("llama_model_load_from_file failed for %s "
+                   "(file missing, corrupt, or unsupported quant?)",
+                   m_modelPath.c_str());
+        ReleaseBackend();
+        return false;
+    }
+
+    llama_context_params cp = llama_context_default_params();
+    cp.n_ctx     = config.context_size;
+    cp.n_batch   = config.batch_size;
+    cp.n_threads = (int)config.threads;
+    cp.n_threads_batch = (int)config.threads;
+
+    m_ctx = llama_init_from_model(m_model, cp);
+    if (!m_ctx) {
+        ELLE_ERROR("llama_init_from_model failed (n_ctx=%u, n_batch=%u). "
+                   "Likely OOM — try lowering context_size in config.",
+                   config.context_size, config.batch_size);
+        llama_model_free(m_model);
+        m_model = nullptr;
+        ReleaseBackend();
+        return false;
+    }
+
+    m_loadProgress = 1.0f;
+    ELLE_INFO("Local LLM model loaded into process (in-proc llama.cpp)");
     return true;
+#else
+    /* No compile-time embed — the subprocess path inside Generate()
+     * picks this up. We mark the provider "available" if the model
+     * file exists on disk. Pre-pivot Initialize() returned true
+     * unconditionally, which meant a missing GGUF only surfaced at
+     * first chat-time as an empty completion.                       */
+    {
+        std::ifstream probe(m_modelPath, std::ios::binary);
+        if (!probe.good()) {
+            ELLE_ERROR("Local LLM model file not readable: %s",
+                       m_modelPath.c_str());
+            return false;
+        }
+    }
+    m_loadProgress = 1.0f;
+    ELLE_INFO("Local LLM ready (subprocess llama-cli path; "
+              "rebuild with ELLE_HAVE_LLAMA + libllama for in-process)");
+    return true;
+#endif
 }
 
 void LLMLocalProvider::Shutdown() {
     std::lock_guard<std::mutex> lock(m_inferenceMutex);
-    /* llama_free(m_ctx); m_ctx = nullptr;
-       llama_free_model(m_model); m_model = nullptr; */
+#ifdef ELLE_HAVE_LLAMA
+    if (m_ctx)   { llama_free(m_ctx);          m_ctx = nullptr; }
+    if (m_model) { llama_model_free(m_model);  m_model = nullptr; }
+    if (s_backendInited) ReleaseBackend();
+#else
+    /* Subprocess path holds nothing process-resident across calls —
+     * no per-call llama-cli.exe is alive at this point.            */
     m_model = nullptr;
-    m_ctx = nullptr;
+    m_ctx   = nullptr;
+#endif
+    m_loadProgress = 0.0f;
 }
 
 bool LLMLocalProvider::IsAvailable() const {
-    return m_config.enabled; /* m_model != nullptr in real impl */
+    if (!m_config.enabled) return false;
+#ifdef ELLE_HAVE_LLAMA
+    /* In-process: model must actually be loaded. */
+    return m_model != nullptr && m_ctx != nullptr;
+#else
+    /* Subprocess: we rely on the model file existing — Initialize()
+     * already verified that. Anything that goes wrong from here
+     * (binary missing on PATH, OOM) surfaces as an empty completion
+     * and triggers cascade-fallback at the engine layer.           */
+    return !m_modelPath.empty();
+#endif
 }
 
 std::string LLMLocalProvider::FormatChatPrompt(const std::vector<LLMMessage>& messages) {
@@ -691,6 +815,110 @@ std::string LLMLocalProvider::Generate(const std::string& prompt, uint32_t maxTo
                                         float temperature, LLMStreamCallback callback) {
     std::lock_guard<std::mutex> lock(m_inferenceMutex);
 
+#ifdef ELLE_HAVE_LLAMA
+    /*══════════════════════════════════════════════════════════════════════════
+     *  IN-PROCESS llama.cpp path
+     *
+     *  Tokenize → decode → sampler-chain sample → detokenize loop. No
+     *  subprocess, no stdout-pipe parsing — model stays warm across
+     *  requests so the second turn doesn't pay the load cost again.
+     *
+     *  Design choices:
+     *   - Sampler chain is built per call. The chain is small (4 nodes)
+     *     and llama.cpp's sampler creation is allocation-free for the
+     *     primitive samplers we use; persisting it across calls would
+     *     save ~microseconds vs. the multi-second decode budget.
+     *   - We call `llama_kv_cache_clear()` at the START of each call so
+     *     the conversation history we pass in the prompt is what the
+     *     model sees, NOT a residual KV cache from the last turn that
+     *     was for a different (or now-rotated) chat history.
+     *   - Sampling order matters: top_p → temp → dist. Putting temp
+     *     before top_p flattens the distribution before truncating it,
+     *     which produces noisy output at low temps. The order below
+     *     matches the reference llama.cpp examples.
+     *  ══════════════════════════════════════════════════════════════════*/
+    if (!m_model || !m_ctx) {
+        ELLE_WARN("LLMLocalProvider::Generate called with no loaded model");
+        return "";
+    }
+
+    const llama_vocab* vocab = llama_model_get_vocab(m_model);
+    if (!vocab) return "";
+
+    /* Tokenize prompt. First call with size=0 returns the negative of
+     * the required length — standard llama.cpp idiom.                */
+    int needed = -llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(),
+                                  nullptr, 0, /*add_special*/true,
+                                  /*parse_special*/true);
+    if (needed <= 0) {
+        ELLE_WARN("llama_tokenize sizing call returned %d", needed);
+        return "";
+    }
+    std::vector<llama_token> tokens(needed);
+    int ntokens = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(),
+                                  tokens.data(), needed, true, true);
+    if (ntokens != needed) {
+        ELLE_WARN("llama_tokenize: expected %d tokens, got %d", needed, ntokens);
+        return "";
+    }
+
+    /* Reset KV cache so each Complete() call sees only the prompt we
+     * just supplied — Elle's chat history is rebuilt on every turn
+     * from SQL anyway.                                               */
+    llama_kv_cache_clear(m_ctx);
+
+    /* Decode the full prompt in one batch. llama.cpp will internally
+     * shard if it exceeds n_batch.                                   */
+    llama_batch batch = llama_batch_get_one(tokens.data(), ntokens);
+    if (llama_decode(m_ctx, batch) != 0) {
+        ELLE_WARN("llama_decode(prompt) failed");
+        return "";
+    }
+
+    /* Sampler chain: top_p → temp → dist (probabilistic).            */
+    auto sparams = llama_sampler_chain_default_params();
+    llama_sampler* smpl = llama_sampler_chain_init(sparams);
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(m_config.top_p, /*min_keep*/1));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(/*seed*/LLAMA_DEFAULT_SEED));
+
+    std::string output;
+    output.reserve(maxTokens * 4);  /* rough avg bytes-per-token */
+
+    for (uint32_t i = 0; i < maxTokens; ++i) {
+        llama_token t = llama_sampler_sample(smpl, m_ctx, -1);
+        if (llama_vocab_is_eog(vocab, t)) break;
+
+        char piece[256];
+        int pn = llama_token_to_piece(vocab, t, piece, sizeof(piece),
+                                       /*lstrip*/0, /*special*/false);
+        if (pn < 0) {
+            /* Buffer too small for this single piece — extremely rare
+             * (would need a multi-byte rune token > 256B). Bail rather
+             * than risk a broken UTF-8 fragment in the output.       */
+            ELLE_WARN("llama_token_to_piece overflow (n=%d), stopping", pn);
+            break;
+        }
+        std::string chunk(piece, pn);
+        output.append(chunk);
+        if (callback) callback(chunk, false);
+
+        /* Append the just-sampled token and decode the next step. */
+        batch = llama_batch_get_one(&t, 1);
+        if (llama_decode(m_ctx, batch) != 0) {
+            ELLE_WARN("llama_decode(step %u) failed", i);
+            break;
+        }
+    }
+
+    llama_sampler_free(smpl);
+    if (callback) callback("", true);
+    return output;
+#else
+    /*══════════════════════════════════════════════════════════════════════════
+     *  Subprocess fallback path — spawns llama-cli.exe and reads stdout.
+     *  Same code that's been carrying us; preserved verbatim so a build
+     *  without ELLE_HAVE_LLAMA still works.                                */
     /* Real implementation: spawn an external llama.cpp CLI (llama-cli.exe)
      * with the model path from config. This avoids the linking/compilation
      * overhead of embedding libllama while still giving genuine local inference.
@@ -835,6 +1063,7 @@ std::string LLMLocalProvider::Generate(const std::string& prompt, uint32_t maxTo
                                 output.front() == ' '  || output.front() == '\t'))
         output.erase(0, 1);
     return output;
+#endif /* ELLE_HAVE_LLAMA */
 }
 
 uint32_t LLMLocalProvider::EstimateTokens(const std::string& text) const {

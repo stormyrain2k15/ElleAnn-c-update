@@ -51,9 +51,11 @@
                 "timeout_ms": 60000
             },
             "local_llama": {
-                "enabled": true,
+                "_comment": "In-process llama.cpp embedding. Wired Feb-2026. Stays gated behind enabled:false until you point model_path at a real GGUF and rebuild ElleCore.Shared with ELLE_HAVE_LLAMA + libllama. Without those, the engine falls back to the llama-cli.exe subprocess path inside Generate().",
+                "enabled": false,
                 "mode": "llamacpp",
                 "model_path": "C:\\Models\\llama-3-8b-instruct.gguf",
+                "binary_path": "",
                 "context_size": 8192,
                 "gpu_layers": 35,
                 "threads": 8,
