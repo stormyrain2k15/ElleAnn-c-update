@@ -119,21 +119,19 @@ ELSE PRINT '[memory_entity_links] already exists.';
 GO
 
 -- -----------------------------------------------------------------------------
--- Seed a default anchor user/conversation so C++ writes never FK-fail.
--- Elle uses conversation_id = 1 as fallback when the app doesn't send one.
+-- Default anchor seed
+--
+-- Pre-Feb-2026 this seeded a `users` row with id=1 so C++ writes never
+-- FK-failed. The Feb 2026 pivot (see SCHEMA_FIX_NOTES.md) removed
+-- `dbo.Users` from ElleCore entirely — auth identity is now owned by
+-- `Account.dbo.tUser` and tables key on `nUserNo INT NULL` with no FK.
+-- This block previously ran INSERT INTO [dbo].[users]; that target no
+-- longer exists, so the seed has been removed.  The default
+-- `conversations` row is still seeded (user_id=1) for backwards-compat
+-- with the C++ fallback that uses conversation_id=1 when no JWT-bound
+-- user is on the request.  Once every handler has been migrated to
+-- ResolveAuthenticatedUser this seed can go too.
 -- -----------------------------------------------------------------------------
-IF NOT EXISTS (SELECT 1 FROM [dbo].[users] WHERE [id] = 1)
-BEGIN
-    SET IDENTITY_INSERT [dbo].[users] ON;
-    INSERT INTO [dbo].[users]
-        ([id], [username], [email], [password_hash], [salt], [role], [verified], [banned], [created_at])
-    VALUES
-        (1, 'elle_default', 'default@elle.local', '', '', 'user', 1, 0, GETUTCDATE());
-    SET IDENTITY_INSERT [dbo].[users] OFF;
-    PRINT 'Seeded default user id=1.';
-END
-GO
-
 IF NOT EXISTS (SELECT 1 FROM [dbo].[conversations] WHERE [id] = 1)
 BEGIN
     SET IDENTITY_INSERT [dbo].[conversations] ON;
@@ -535,6 +533,30 @@ BEGIN
     /* Singleton row so UPSERT is a plain UPDATE. */
     INSERT INTO [dbo].[identity_felt_time] (id, updated_ms) VALUES (1, 0);
     PRINT '[identity_felt_time] created + seeded singleton.';
+END
+GO
+
+-- -----------------------------------------------------------------------------
+-- reconnection_greetings — LLM-rendered "welcome back" phrase per session.
+--
+-- Read by GET /api/session/greeting (the first call the Android app
+-- makes after pairing).  Pre-pivot this table was missing entirely,
+-- causing 500s on the home screen of the companion app on every fresh
+-- install.  Empty table is fine — the handler returns
+-- {"greeting": null} which the UI treats as "no welcome to show".
+-- -----------------------------------------------------------------------------
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'reconnection_greetings')
+BEGIN
+    CREATE TABLE [dbo].[reconnection_greetings] (
+        [id]            BIGINT IDENTITY(1,1) PRIMARY KEY,
+        [greeting]      NVARCHAR(MAX) NOT NULL,
+        [context_json]  NVARCHAR(MAX) NULL,
+        [consumed]      BIT NOT NULL DEFAULT 0,
+        [created_ms]    BIGINT NOT NULL
+    );
+    CREATE INDEX IX_reconnect_consumed_id
+        ON [dbo].[reconnection_greetings] ([consumed], [id] DESC);
+    PRINT '[reconnection_greetings] created.';
 END
 GO
 

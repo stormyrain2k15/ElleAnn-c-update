@@ -26,6 +26,34 @@ LLMAPIProvider::~LLMAPIProvider() { Shutdown(); }
 bool LLMAPIProvider::Initialize(const LLMProviderConfig& config) {
     m_config = config;
     if (!config.enabled) return false;
+
+    /* Cloud providers REQUIRE an API key. Pre-Feb-2026 we'd accept an
+     * empty key, init the WinHTTP handles, and only fail at first
+     * request time with a 401 — which then propagated up as an opaque
+     * "LLM call failed" in the chat handler.  Refuse to init now and
+     * log a clear actionable warning so the operator sees exactly
+     * which provider is misconfigured and where to fix it.
+     *
+     * lm_studio / custom_api are exempt — local OpenAI-compatible
+     * servers typically don't require an Authorization header.
+     * (LM_STUDIO id is reused for any local OpenAI-compatible endpoint
+     * the operator points us at.)                                    */
+    const bool requiresKey =
+        (m_providerId == LLM_PROVIDER_GROQ ||
+         m_providerId == LLM_PROVIDER_OPENAI ||
+         m_providerId == LLM_PROVIDER_ANTHROPIC);
+    if (requiresKey && config.api_key.empty()) {
+        ELLE_WARN("LLM provider '%s' is enabled but has an empty api_key. "
+                  "This provider will be SKIPPED. Edit "
+                  "elle_master_config.json -> llm.providers.<name>.api_key, "
+                  "or set enabled=false to silence this warning.",
+                  m_providerId == LLM_PROVIDER_GROQ      ? "groq" :
+                  m_providerId == LLM_PROVIDER_OPENAI    ? "openai" :
+                  m_providerId == LLM_PROVIDER_ANTHROPIC ? "anthropic" : "?");
+        m_available = false;
+        return false;
+    }
+
     m_available = InitWinHTTP();
     return m_available;
 }
@@ -883,6 +911,24 @@ bool ElleLLMEngine::Initialize() {
         for (auto& p : m_providers) if (p->GetProviderId() == id) return true;
         return false;
     };
+    /* Validate primary/fallback provider references.  Logic (Feb 2026
+     * graceful-degradation pivot):
+     *
+     *   - Unknown name in config → hard fail (typo, operator sees it).
+     *   - Primary named but failed to init AND fallback also failed
+     *     (or wasn't named) → hard fail; engine has no path forward.
+     *   - Primary named but failed to init AND fallback DID init →
+     *     log a warning, keep going. SelectProvider() will pick the
+     *     fallback. This is the path that lights up when the operator
+     *     left their groq api_key empty: warn loudly, run on local.
+     *
+     *   The pre-pivot logic refused to start the engine the moment
+     *   primary_provider's init failed, even if fallback was perfectly
+     *   healthy — which meant a missing api_key killed the entire LLM
+     *   subsystem instead of falling through to the local model.   */
+    bool primaryHealthy  = cfg.primary_provider.empty()  || nameInitialised(cfg.primary_provider);
+    bool fallbackHealthy = cfg.fallback_provider.empty() || nameInitialised(cfg.fallback_provider);
+
     for (const char* role : { "primary_provider", "fallback_provider" }) {
         const std::string& n =
             std::string(role) == "primary_provider" ? cfg.primary_provider
@@ -895,12 +941,23 @@ bool ElleLLMEngine::Initialize() {
                        role, n.c_str());
             m_initialized = false;
         } else if (!nameInitialised(n)) {
-            ELLE_ERROR("Config llm.%s = '%s' refers to a provider that "
-                       "has not been initialised (is it listed under "
-                       "llm.providers with enabled=true and a valid "
-                       "api_key / model_path?).",
-                       role, n.c_str());
-            m_initialized = false;
+            const bool isPrimary = (std::string(role) == "primary_provider");
+            const bool fatal     = isPrimary ? !fallbackHealthy : !primaryHealthy;
+            if (fatal) {
+                ELLE_ERROR("Config llm.%s = '%s' refers to a provider that "
+                           "has not been initialised (is it listed under "
+                           "llm.providers with enabled=true and a valid "
+                           "api_key / model_path?). No usable provider "
+                           "left — LLM subsystem will be DOWN.",
+                           role, n.c_str());
+                m_initialized = false;
+            } else {
+                ELLE_WARN("Config llm.%s = '%s' failed to initialise — "
+                          "running on the other configured provider.  "
+                          "Fix the api_key/model_path to restore the "
+                          "intended primary/fallback chain.",
+                          role, n.c_str());
+            }
         }
     }
 

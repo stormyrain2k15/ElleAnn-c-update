@@ -222,6 +222,8 @@ fun IsyaInputField(
         androidx.compose.foundation.text.KeyboardOptions.Default,
     enabled: Boolean = true,
     isError: Boolean = false,
+    visualTransformation: androidx.compose.ui.text.input.VisualTransformation =
+        androidx.compose.ui.text.input.VisualTransformation.None,
 ) {
     Column(modifier = modifier) {
         Text(
@@ -236,6 +238,7 @@ fun IsyaInputField(
             placeholder = { Text(placeholder, color = IsyaMuted) },
             singleLine = singleLine, enabled = enabled, isError = isError,
             keyboardOptions = keyboardOptions,
+            visualTransformation = visualTransformation,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(8.dp),
             colors = OutlinedTextFieldDefaults.colors(

@@ -22,6 +22,66 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 
 ## Completed (this session — Feb 2026)
 
+### Feb-2026 Schema + Auth Pivot (THIS SESSION)
+**Trigger**: operator reported 95% of the dev panel/Android UI broken,
+most ElleCore tables empty, `dbo.Users` redundant with `Account.tUser`.
+
+- **Rewrote `SQL/ElleAnn_Schema.sql`** to be the source-of-truth — declares
+  the actual lowercase tables the C++ code writes to (`conversations`,
+  `messages`, `memory`, `goals`, `voice_calls`, `user_avatars`,
+  `action_queue`, `emotion_snapshots`, `dictionary_words`, `world_entity`,
+  `IntentQueue`, `UserPresence`, `CrystalProfile`, `ElleThreads` …).
+  Pre-pivot the schema declared PascalCase shells (`Conversations`,
+  `Messages`, `Memories`) that the code never wrote to — a runner who
+  followed the README ended up with a database where every write either
+  silently created a side-table or 500'd against a missing column.
+- **Created `SQL/ElleAnn_SchemaSync_FebPivot.sql`** — corrective delta
+  that drops the legacy PascalCase shells (only when empty), drops
+  `dbo.Users`, and surgically removes FKs to those tables. Idempotent.
+- **`SQL/ElleAnn_MemoryDelta.sql`** — removed the `dbo.users` seed (the
+  table is gone), added `reconnection_greetings` (referenced by
+  `/api/session/greeting`, never declared anywhere — 500 on every fresh
+  install).
+- **`HTTPServer.cpp`**: added `ResolveAuthenticatedUser` (JWT → device →
+  `PairedDevices.nUserNo`). New `RequireAuthOrBodyUser` helper makes
+  every user-scoped endpoint JWT-first; body `user_id` only honored for
+  admin/CLI callers. Added `GET /api/me` so the Android app can resolve
+  identity once at session start. Wired into
+  `/api/tokens/conversations`, `/api/tokens/video-calls`,
+  `/api/video/avatar(s)`.
+- **`SCHEMA_FIX_NOTES.md`** rewritten — explains the root cause, the fix,
+  and the run order for both fresh installs and upgrades.
+
+### Android Companion (THIS SESSION)
+- **`PairScreen.kt`** rewritten with a dual-mode toggle:
+  - **Sign In** (default, Feb 2026): user types game username + password,
+    posts as `{ game_user, game_pass, device_id, device_name }` to
+    `/api/auth/pair`. The backend already accepts this shape (no server
+    change needed). Resolves directly against `Account.dbo.tUser`.
+  - **Pair Code** (legacy): unchanged — still works for hardware pairing
+    where a 6-digit code from the admin device-manager is the credential.
+- **`PairRequest`** model gained optional `gameUser`/`gamePass`.
+- **`IsyaInputField`** gained a `visualTransformation` parameter so the
+  password field can mask its content.
+- Error surfacing: `Retrofit.HttpException.errorBody()` is now read and
+  shown verbatim to the user instead of opaque "HTTP 401" — this was the
+  "we can't tell what's wrong on the device" complaint.
+
+### LLM Fallback Chain (THIS SESSION)
+- **`LLMAPIProvider::Initialize`**: refuses to init Groq/OpenAI/Anthropic
+  with empty `api_key`. Logs a clear, actionable warning that names the
+  provider and the config key to fix. Pre-pivot it accepted empty keys
+  and only failed at first request time with a generic 401, which then
+  bubbled up as "LLM call failed" with no context.
+- **`ElleLLMEngine::Initialize`** validation rewritten for graceful
+  degradation: if `primary_provider` (e.g. `groq`) failed to init but
+  `fallback_provider` (e.g. `local_llama`) succeeded, log a warning and
+  KEEP RUNNING on the fallback. Hard-fail only when neither is healthy.
+  Pre-pivot a missing groq key killed the entire LLM subsystem even
+  though the local Llama model was perfectly configured.
+
+## Completed (previous sessions — Feb 2026)
+
 ### P0 — Security / Data Integrity (DONE, previous session)
 - CNG bcrypt SHA-256 IdentityGuard, atomic OUTPUT.inserted.id for StoreMemory,
   route-level auth metadata, strict parse-or-400 on all HTTP numerics,

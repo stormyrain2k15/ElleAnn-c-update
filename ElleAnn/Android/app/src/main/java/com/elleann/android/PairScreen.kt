@@ -1,17 +1,21 @@
 package com.elleann.android
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -23,14 +27,20 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+// ─── Pairing modes ───────────────────────────────────────────────────────────
+enum class PairMode { SIGN_IN, PAIR_CODE }
+
 // ─── ViewModel ───────────────────────────────────────────────────────────────
 data class PairState(
-    val host: String    = "",
-    val port: String    = "8000",
-    val code: String    = "",
-    val loading: Boolean = false,
-    val error: String?  = null,
-    val success: Boolean = false,
+    val mode:     PairMode = PairMode.SIGN_IN,
+    val host:     String   = "",
+    val port:     String   = "8000",
+    val code:     String   = "",
+    val username: String   = "",
+    val password: String   = "",
+    val loading:  Boolean  = false,
+    val error:    String?  = null,
+    val success:  Boolean  = false,
 )
 
 class PairViewModel(
@@ -43,15 +53,28 @@ class PairViewModel(
             host = prefill?.host ?: "",
             port = prefill?.port?.toString() ?: "8000",
             code = prefill?.code ?: "",
+            /* If a pair-code was scanned from the QR, default to that
+             * mode so the scan-to-finish path stays one tap. Otherwise
+             * Sign-In is the canonical Feb 2026 path. */
+            mode = if (!prefill?.code.isNullOrBlank()) PairMode.PAIR_CODE else PairMode.SIGN_IN,
         )
     )
     val state: StateFlow<PairState> = _state.asStateFlow()
 
-    fun onHost(v: String)  = _state.update { it.copy(host = v, error = null) }
-    fun onPort(v: String)  = _state.update { it.copy(port = v, error = null) }
-    fun onCode(v: String)  = _state.update { it.copy(code = v, error = null) }
+    fun onMode(m: PairMode) = _state.update { it.copy(mode = m, error = null) }
+    fun onHost(v: String)     = _state.update { it.copy(host = v, error = null) }
+    fun onPort(v: String)     = _state.update { it.copy(port = v, error = null) }
+    fun onCode(v: String)     = _state.update { it.copy(code = v, error = null) }
+    fun onUsername(v: String) = _state.update { it.copy(username = v, error = null) }
+    fun onPassword(v: String) = _state.update { it.copy(password = v, error = null) }
 
-    fun pair(deviceId: String, onSuccess: () -> Unit) {
+    /** Submit the pair/login request. The body shape depends on [state.mode]:
+     *   - SIGN_IN   → { game_user, game_pass, device_id, device_name }
+     *   - PAIR_CODE → { code, device_id, device_name }
+     *
+     *  Both hit POST /api/auth/pair — the backend distinguishes by which
+     *  fields are populated.                                               */
+    fun submit(deviceId: String, onSuccess: () -> Unit) {
         val s = _state.value
         val port = s.port.toIntOrNull() ?: run {
             _state.update { it.copy(error = "Invalid port number") }; return
@@ -59,21 +82,40 @@ class PairViewModel(
         if (s.host.isBlank()) {
             _state.update { it.copy(error = "Server host is required") }; return
         }
-        if (s.code.length != 6 || !s.code.all { it.isDigit() }) {
-            _state.update { it.copy(error = "Pair code must be 6 digits") }; return
+        when (s.mode) {
+            PairMode.SIGN_IN -> {
+                if (s.username.isBlank() || s.password.isBlank()) {
+                    _state.update { it.copy(error = "Username and password are required") }
+                    return
+                }
+            }
+            PairMode.PAIR_CODE -> {
+                if (s.code.length != 6 || !s.code.all { c -> c.isDigit() }) {
+                    _state.update { it.copy(error = "Pair code must be 6 digits") }
+                    return
+                }
+            }
         }
 
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = null) }
             runCatching {
                 val api = container.apiFor(s.host, port)
-                val resp = api.pair(
-                    com.elleann.android.data.models.PairRequest(
+                val body = when (s.mode) {
+                    PairMode.SIGN_IN -> com.elleann.android.data.models.PairRequest(
+                        code       = "",
+                        deviceName = android.os.Build.MODEL ?: "ElleAnn Android",
+                        deviceId   = deviceId,
+                        gameUser   = s.username,
+                        gamePass   = s.password,
+                    )
+                    PairMode.PAIR_CODE -> com.elleann.android.data.models.PairRequest(
                         code       = s.code,
                         deviceName = android.os.Build.MODEL ?: "ElleAnn Android",
                         deviceId   = deviceId,
                     )
-                )
+                }
+                val resp = api.pair(body)
                 container.tokenStore.save(
                     StoredToken(
                         jwt       = resp.jwt,
@@ -86,7 +128,16 @@ class PairViewModel(
                 _state.update { it.copy(loading = false, success = true) }
                 onSuccess()
             }.onFailure { e ->
-                _state.update { it.copy(loading = false, error = e.message ?: "Pair failed") }
+                /* Surface HTTP error body when Retrofit packed one —
+                 * otherwise the user sees "HTTP 401" with no context. */
+                val msg = when (e) {
+                    is retrofit2.HttpException -> {
+                        val raw = runCatching { e.response()?.errorBody()?.string() }.getOrNull()
+                        if (!raw.isNullOrBlank()) "${e.code()}: $raw" else "${e.code()}: ${e.message()}"
+                    }
+                    else -> e.message ?: "Request failed"
+                }
+                _state.update { it.copy(loading = false, error = msg) }
             }
         }
     }
@@ -110,9 +161,8 @@ fun PairScreen(
     )
     val state by vm.state.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
-    /* Stable per-install device id for the pair handshake. ANDROID_ID
-     * is a 64-bit value tied to the user/app-signing-key/device tuple
-     * — exactly what the server's PairedDevices table wants as PK. */
+    /* Stable per-install device id. ANDROID_ID is tied to (user, signing key,
+     * device) — exactly what PairedDevices wants as its primary key.       */
     val deviceId = remember {
         @Suppress("HardwareIds")
         android.provider.Settings.Secure.getString(
@@ -132,11 +182,10 @@ fun PairScreen(
                 .fillMaxWidth(0.9f)
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment  = Alignment.CenterHorizontally,
-            verticalArrangement  = Arrangement.spacedBy(24.dp),
+            verticalArrangement  = Arrangement.spacedBy(20.dp),
         ) {
             Spacer(Modifier.height(48.dp))
 
-            // Logo / title
             Text(
                 text       = "ElleAnn",
                 style      = MaterialTheme.typography.displaySmall,
@@ -151,11 +200,17 @@ fun PairScreen(
                 textAlign = TextAlign.Center,
             )
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
 
-            // Pair form
             IsyaPanel(title = "CONNECT TO SERVER", flowingBorder = true) {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    // Mode selector
+                    ModeSwitch(
+                        current = state.mode,
+                        onChange = vm::onMode,
+                    )
+
+                    // Server coords (both modes)
                     IsyaInputField(
                         value         = state.host,
                         onValueChange = vm::onHost,
@@ -168,26 +223,53 @@ fun PairScreen(
                         label         = "Port",
                         placeholder   = "8000",
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                            keyboardType = KeyboardType.Number,
                         ),
                     )
-                    IsyaInputField(
-                        value         = state.code,
-                        onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) vm.onCode(it) },
-                        label         = "6-digit pair code",
-                        placeholder   = "123456",
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                            keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword
-                        ),
-                    )
+
+                    when (state.mode) {
+                        PairMode.SIGN_IN -> {
+                            IsyaInputField(
+                                value         = state.username,
+                                onValueChange = vm::onUsername,
+                                label         = "Username",
+                                placeholder   = "same as your in-game account",
+                            )
+                            IsyaInputField(
+                                value         = state.password,
+                                onValueChange = vm::onPassword,
+                                label         = "Password",
+                                placeholder   = "••••••••",
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = KeyboardType.Password,
+                                ),
+                                visualTransformation = PasswordVisualTransformation(),
+                            )
+                        }
+                        PairMode.PAIR_CODE -> {
+                            IsyaInputField(
+                                value         = state.code,
+                                onValueChange = { v ->
+                                    if (v.length <= 6 && v.all { it.isDigit() }) vm.onCode(v)
+                                },
+                                label         = "6-digit pair code",
+                                placeholder   = "123456",
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = KeyboardType.NumberPassword,
+                                ),
+                            )
+                        }
+                    }
 
                     state.error?.let { err ->
                         Text(err, color = IsyaError, style = MaterialTheme.typography.bodySmall)
                     }
 
                     IsyaButton(
-                        text     = if (state.loading) "Connecting…" else "CONNECT",
-                        onClick  = { vm.pair(deviceId, onPaired) },
+                        text     = if (state.loading) "Connecting…"
+                                   else if (state.mode == PairMode.SIGN_IN) "SIGN IN"
+                                   else "REDEEM CODE",
+                        onClick  = { vm.submit(deviceId, onPaired) },
                         loading  = state.loading,
                         variant  = IsyaButtonVariant.PRIMARY_GOLD,
                         modifier = Modifier.fillMaxWidth(),
@@ -196,13 +278,51 @@ fun PairScreen(
             }
 
             Text(
-                text  = "Scan ellepair:// QR code from Elle's device manager\nor enter server details manually above.",
+                text  = when (state.mode) {
+                    PairMode.SIGN_IN   -> "Uses your game account (Account.dbo.tUser).\nNo separate Elle account needed."
+                    PairMode.PAIR_CODE -> "Admin generates a 6-digit code via\nElle's device manager. Codes expire quickly."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = IsyaMuted,
                 textAlign = TextAlign.Center,
             )
 
-            Spacer(Modifier.height(48.dp))
+            Spacer(Modifier.height(32.dp))
+        }
+    }
+}
+
+@Composable
+private fun ModeSwitch(current: PairMode, onChange: (PairMode) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(IsyaSlot),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        PairMode.values().forEach { m ->
+            val selected = m == current
+            val label = when (m) {
+                PairMode.SIGN_IN   -> "Sign In"
+                PairMode.PAIR_CODE -> "Pair Code"
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (selected) IsyaGold.copy(alpha = 0.15f) else androidx.compose.ui.graphics.Color.Transparent)
+                    .clickable { onChange(m) }
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text       = label,
+                    style      = MaterialTheme.typography.bodyMedium,
+                    color      = if (selected) IsyaGold else IsyaMuted,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
         }
     }
 }

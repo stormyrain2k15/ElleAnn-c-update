@@ -1032,9 +1032,27 @@ data class CreateModelWorkerRequest(
 /** POST /api/auth/pair — typed companion-app pairing payload. */
 @Serializable
 data class PairRequest(
-    val code:                                 String,
+    /* Mode A (legacy): admin issues a 6-digit code via /api/auth/pair-code,
+     * the device redeems it. `code` is the only credential.
+     *
+     * Mode B (game-account, Feb 2026): the device signs in with the
+     * user's actual game account — the same `sUserID`/`sUserPW` they
+     * use for the Fiesta client. Server authenticates against
+     * `Account.dbo.tUser`, then mints a JWT bound to this device.
+     * `code` is ignored (send "" or omit).
+     *
+     * Pick ONE of:
+     *   - set `code` (6 digits)     → Mode A
+     *   - set `gameUser + gamePass` → Mode B
+     *
+     * The backend's /api/auth/pair handler accepts both shapes on the
+     * same endpoint (Feb 2026 unification), so there's no separate
+     * "login" route the device has to learn. */
+    val code:                                 String = "",
     @SerialName("device_name") val deviceName: String,
     @SerialName("device_id")   val deviceId:   String,
+    @SerialName("game_user")   val gameUser:   String? = null,
+    @SerialName("game_pass")   val gamePass:   String? = null,
 )
 
 // ════════════════════════════════════════════════════════════════════════════
