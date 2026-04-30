@@ -11,6 +11,7 @@
 #include <tlhelp32.h>        /* CreateToolhelp32Snapshot / PROCESSENTRY32 */
 #include <iostream>
 #include <sstream>
+#include <chrono>
 
 ElleServiceBase* ElleServiceBase::s_instance = nullptr;
 
@@ -664,30 +665,73 @@ void ElleServiceBase::ConnectDependenciesNonBlocking() {
 }
 
 void ElleServiceBase::RunReconnectorLoop() {
-    /* Wakes every kReconnectIntervalMs (or earlier if shutdown is
-     * requested via m_stopCv) and tries to (re-)connect to every
-     * declared dependency that isn't currently wired. ConnectTo is
-     * idempotent: it short-circuits when already connected, and the
-     * pipe-side `EllePipeConnection` tracks `m_connected` so a peer
-     * that crashed and respawned on the same pipe name is detected
-     * here and re-wired without restarting our service.              */
+    /* First pass IMMEDIATELY — if a peer came up between the
+     * non-blocking init attempt (1500ms) and now, we want it bound
+     * within sub-second latency, not after the 5s reconnect interval.
+     * Subsequent passes are throttled to kReconnectIntervalMs.       */
+    if (m_running.load()) TickReconnector();
+
     while (m_running.load()) {
         InterruptibleSleep(kReconnectIntervalMs);
         if (!m_running.load()) break;
+        TickReconnector();
+    }
 
-        auto deps = GetDependencies();
-        for (auto dep : deps) {
-            if (!m_running.load()) break;
-            /* ConnectTo holds m_clientMutex internally; cheap on the
-             * already-connected path (one map lookup + IsConnected).  */
-            if (m_ipcHub.ConnectTo(dep, 1000)) {
-                /* Only log when this is a *new* connection (i.e. we
-                 * had no live client for this peer before this call).
-                 * The hub doesn't currently expose that, so we suppress
-                 * the chatter and rely on the StampLastSeen path on
-                 * actual traffic to surface liveness in /api/diag/wires.
-                 * Logging here would print "connected to X" every 5 s
-                 * forever once everyone is up.                          */
+    /* Final tick on shutdown is intentionally skipped — we don't want
+     * to open new pipes while the hub is being torn down. The existing
+     * connections drain via m_ipcHub.Shutdown() in ShutdownCore.     */
+}
+
+void ElleServiceBase::TickReconnector() {
+    /* One pass over declared dependencies. For each peer, classify:
+     *   was-up + still-up   → no-op (silent)
+     *   was-up + now-down   → "lost peer X" + remove from tracker
+     *                         (next ConnectTo call will rebuild)
+     *   was-down + now-up   → "first contact with X" + remember
+     *   was-down + still-down → silent (don't spam the log every 5s
+     *                          for a peer that's still booting)
+     *
+     * The mutex on m_everConnectedTo guards against a future caller
+     * (e.g. a status endpoint) wanting to read the live set.        */
+    auto deps = GetDependencies();
+    for (auto dep : deps) {
+        if (!m_running.load()) break;
+
+        const bool wasUp = [&]() {
+            std::lock_guard<std::mutex> lk(m_reconnectMutex);
+            return m_everConnectedTo.find(dep) != m_everConnectedTo.end();
+        }();
+        const bool aliveNow = m_ipcHub.IsConnectedTo(dep);
+
+        if (wasUp && !aliveNow) {
+            ELLE_WARN("Lost connection to %s — will reattempt",
+                      ElleIPC::GetServiceName(dep));
+            std::lock_guard<std::mutex> lk(m_reconnectMutex);
+            m_everConnectedTo.erase(dep);
+            /* Fall through to the ConnectTo attempt below so we rebuild
+             * on the same tick — no need to wait another 5s.          */
+        }
+
+        if (aliveNow) continue;
+
+        /* 1s timeout: short enough that all 20 peers fit in a single
+         * tick budget even if every one of them is missing.          */
+        if (m_ipcHub.ConnectTo(dep, 1000)) {
+            bool first = false;
+            {
+                std::lock_guard<std::mutex> lk(m_reconnectMutex);
+                first = m_everConnectedTo.insert(dep).second;
+            }
+            if (first) {
+                const uint64_t now = (uint64_t)std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                /* The "+T" is local elapsed time since this service
+                 * started, not wall clock — operator-friendly for
+                 * watching the mesh converge. */
+                ELLE_INFO("Mesh: first contact with %s (epoch %llu)",
+                          ElleIPC::GetServiceName(dep),
+                          (unsigned long long)now);
             }
         }
     }

@@ -1623,3 +1623,98 @@ process restarted. Cold-boot order was load-bearing.
   smoke test.
 - Resume Fiesta C++ headless client once private-server buffer
   issues are resolved (still on hold per user).
+
+## Session Feb-2026 (continued) — v2.x: True passive mesh, no startup ordering
+
+User directive: "the services should all connect as they come online no
+matter what order it is. Once all services are online then the entire
+stack runs but it shouldnt block start restart or stop"
+
+### Three layers of ordering coupling — all eliminated
+
+**Layer 1 — Windows SCM `depends=` chain** (the OS-level
+prerequisite enforcement). Pre-pivot every Elle service had a chain
+like `ElleCognitive depend= ElleHeartbeat/ElleMemory/ElleEmotional/
+ElleIdentity`. SCM refuses to even attempt `sc start ElleCognitive`
+until all four prereqs report RUNNING. A single failing prereq could
+silently block the entire stack.
+
+→ `Deploy/elle_service_manifest.json`: every `depends` array set to
+  `[]`. Each service can be `sc start`ed independently of every
+  other. The C++ reconnector binds peers as they appear.
+
+**Layer 2 — Sequential install/start script**. Pre-pivot
+`Install-ElleServices.ps1` iterated services in manifest order and
+WAITED for each to reach RUNNING before starting the next, throwing
+on any timeout. One slow service serialised the entire boot.
+
+→ `Deploy/Install-ElleServices.ps1`: `sc.exe start` calls now fan out
+  in a single pass; the script then waits on the *set* to converge.
+  A service that fails to start is warned about, not fatal — the
+  rest of the mesh continues to boot, the operator can fix and
+  `sc start <name>` later.
+
+**Layer 3 — `ConnectDependencies()` blocking-with-give-up**. The
+previous session already replaced this with a non-blocking attempt
+plus a 5s reconnector loop. This session strengthens it:
+
+→ `Shared/ElleServiceBase.{h,cpp}`:
+  - `RunReconnectorLoop()` now does an **immediate first pass** on
+    thread start (sub-second latency for peers that came up between
+    the 1500ms init attempt and the reconnector spinning up).
+  - New `TickReconnector()` extracted method exposes the per-tick
+    state machine. Tracks `m_everConnectedTo` (mutex-guarded
+    `std::set`) so:
+    - peer comes up → "Mesh: first contact with X" emitted ONCE,
+      operator can watch the convergence trace in the log.
+    - peer drops → "Lost connection to X — will reattempt" emitted,
+      tracker entry removed, ConnectTo retried on the same tick.
+    - steady state (all peers up or all peers down) → silent. No
+      polling chatter in the log.
+  - 1s ConnectTo timeout (down from 1500ms init attempt) keeps the
+    full per-tick budget bounded even when every peer is missing.
+
+→ `Shared/ElleQueueIPC.{h,cpp}`: new `ElleIPCHub::IsConnectedTo(id)`
+  cheap probe — mutex-guarded map lookup + `IsConnected()` check.
+  Lets the reconnector detect drops without forcing a reconnect
+  attempt.
+
+### Boot-stop-restart symmetry
+
+The mesh now has true symmetry:
+- **start any service at any time, in any order** — no other
+  service blocks waiting for it; when it appears, peers bind to it
+  within ≤ 5s + 1s connect timeout
+- **stop any service at any time** — peers detect the drop within
+  ≤ 5s, log it, and continue trying to reconnect; their own
+  `OnTick`/IPC paths degrade gracefully (the `Send` path already
+  has lazy-reconnect-on-send fallback from a prior pivot)
+- **restart any service** — the reconnector's `LOST → first contact`
+  flow handles it as a single sequence of two log lines
+
+`ShutdownCore` flips `m_running` under `m_stopMutex`, notifies
+`m_stopCv`, joins `m_reconnectThread` BEFORE tearing down the IPC
+hub. Stop latency bounded by tick interval (≤ 5s), not the full
+ConnectTo budget.
+
+### Verification
+
+`Debug/test_passive_mesh.cpp` (new) — portable g++17 unit test of
+the state machine that drives `TickReconnector`, with 4 cases:
+1. Cold boot (all peers down) → silent.
+2. Peers come up in arbitrary order → exactly one FIRST_CONTACT per peer.
+3. Crash-and-recover → LOST then FIRST_CONTACT, set entry tracked correctly.
+4. Idempotent steady state → exactly one FIRST_CONTACT per peer over
+   100 ticks.
+
+All 4 pass under `-Wall -Wextra -Werror`. C++/Kotlin brace balance
+preserved across all touched files.
+
+### Files this batch
+- `Shared/ElleServiceBase.h`              (+12 LOC: m_everConnectedTo, m_reconnectMutex, TickReconnector)
+- `Shared/ElleServiceBase.cpp`            (+50 LOC: rewritten RunReconnectorLoop + new TickReconnector)
+- `Shared/ElleQueueIPC.h`                 (+5 LOC:  IsConnectedTo decl)
+- `Shared/ElleQueueIPC.cpp`               (+6 LOC:  IsConnectedTo impl)
+- `Deploy/elle_service_manifest.json`     (rewritten: all `depends: []`)
+- `Deploy/Install-ElleServices.ps1`       (parallel-start refactor)
+- `Debug/test_passive_mesh.cpp`           (new, 4-case state-machine test)

@@ -4,16 +4,20 @@
 
 .DESCRIPTION
     Reads elle_service_manifest.json and for each entry runs:
-        sc.exe create <Name> binPath= "<abs exe>" DisplayName= "<...>" start= auto depend= <deps>
+        sc.exe create <Name> binPath= "<abs exe>" DisplayName= "<...>" start= auto
         sc.exe description <Name> "<desc>"
-    Then starts them in manifest order (dependency-respecting).
+    Then starts them ALL IN PARALLEL — no SCM-level dependency chain.
 
-    This installer is STRICT: a missing executable, a non-zero `sc.exe`
-    exit code, or a service that fails to reach RUNNING within
-    `-StartTimeoutSec` will abort the whole install and emit a clear
-    error. Previously the install would happily print a warning and
-    continue — deploys shipped to production with broken services
-    until an operator noticed at runtime.
+    Feb-2026 pivot: SCM `depends=` are intentionally empty in the
+    manifest. The C++ reconnector loop in Shared/ElleServiceBase.cpp
+    binds peers as they appear, in any order. A single failing
+    service can no longer block the whole stack.
+
+    This installer is STRICT for *missing* binaries: a missing executable
+    or a non-zero `sc.exe create` exit code aborts the whole install
+    with a clear error. Services that fail to *start* are warned about
+    but no longer abort — the rest of the mesh keeps running, fix and
+    `sc start <name>` later.
 
     Must be run elevated. The companion Install.bat elevates automatically.
 
@@ -212,9 +216,14 @@ if ($missing.Count -gt 0) {
     exit 2
 }
 
-# --- start in manifest order ---------------------------------------------
+# --- start in parallel — passive mesh, no ordering required ---------------
+# Feb-2026 pivot: services no longer have SCM-level `depends=` chains and
+# the C++ reconnector loop binds peers as they appear (in any order). So
+# we kick off every `sc.exe start` immediately and only wait for the set
+# to converge. A single slow service can no longer block the whole stack.
 if (-not $NoStart) {
-    Write-Host "`nStarting services in dependency order..." -ForegroundColor Cyan
+    Write-Host "`nStarting services in parallel (passive mesh, no ordering)..." -ForegroundColor Cyan
+    $toStart = @()
     foreach ($svc in $manifest.services) {
         if ($WhatIf) {
             Write-Host "WhatIf: sc.exe start $($svc.name)"
@@ -226,10 +235,24 @@ if (-not $NoStart) {
             continue
         }
         Write-Host "[$($svc.name)] starting..." -ForegroundColor Green
-        [void](Invoke-Sc -Arguments @('start', $svc.name))
-        if (-not (Wait-ServiceState -Name $svc.name -DesiredState 'RUNNING' -TimeoutSec $StartTimeoutSec)) {
-            throw "[$($svc.name)] failed to reach RUNNING within $StartTimeoutSec seconds."
+        # `sc.exe start` returns immediately after submitting the request
+        # to SCM, so this loop fans out without blocking.
+        [void](Invoke-Sc -Arguments @('start', $svc.name) -TolerateNonZero)
+        $toStart += $svc.name
+    }
+
+    # Wait for the set to converge. Each service has its own deadline; a
+    # slow Heartbeat no longer pushes Memory's deadline out.
+    $failed = @()
+    foreach ($name in $toStart) {
+        if (-not (Wait-ServiceState -Name $name -DesiredState 'RUNNING' -TimeoutSec $StartTimeoutSec)) {
+            $failed += $name
+            Write-Warning "[$name] failed to reach RUNNING within $StartTimeoutSec s — the rest of the mesh will keep running and re-attempt connections."
         }
+    }
+    if ($failed.Count -gt 0) {
+        Write-Warning ("$($failed.Count) service(s) did not start: " + ($failed -join ', ') +
+                      ". The mesh continues — fix and re-run `sc.exe start <name>` for each.")
     }
 }
 

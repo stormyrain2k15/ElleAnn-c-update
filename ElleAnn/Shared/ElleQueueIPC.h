@@ -207,6 +207,11 @@ public:
     /* Connect to another service */
     bool ConnectTo(ELLE_SERVICE_ID target, uint32_t timeoutMs = 5000);
 
+    /** Cheap probe — does this hub have a live client pipe to `target`?
+     *  Returns false for a dead-but-not-yet-cleaned connection so the
+     *  reconnector can rebuild it. Mutex-protected. */
+    bool IsConnectedTo(ELLE_SERVICE_ID target) const;
+
     /* Send message to specific service or broadcast */
     bool Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg);
     void Broadcast(const ElleIPCMessage& msg);

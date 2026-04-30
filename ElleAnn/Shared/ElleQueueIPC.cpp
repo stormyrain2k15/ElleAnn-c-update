@@ -724,6 +724,12 @@ bool ElleIPCHub::ConnectTo(ELLE_SERVICE_ID target, uint32_t timeoutMs) {
     return true;
 }
 
+bool ElleIPCHub::IsConnectedTo(ELLE_SERVICE_ID target) const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_clientMutex));
+    auto it = m_clients.find(target);
+    return it != m_clients.end() && it->second->IsConnected();
+}
+
 bool ElleIPCHub::Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg) {
     m_sent++;
     /* Stamp the target so /api/diag/wires can show "we last spoke to

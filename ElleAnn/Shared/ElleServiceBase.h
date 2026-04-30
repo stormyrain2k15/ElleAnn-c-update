@@ -24,6 +24,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -176,9 +177,21 @@ private:
      * joined during shutdown). Wakes every kReconnectIntervalMs
      * and re-attempts ConnectTo for any declared dependency we
      * are not currently connected to. Idempotent — m_ipcHub.ConnectTo
-     * short-circuits when already wired.                             */
+     * short-circuits when already wired.
+     *
+     * Tracks `m_everConnectedTo` so a peer's first successful contact
+     * gets a single log line ("first contact with Memory at T+12s"),
+     * giving operators a visible boot-to-mesh-converged trace without
+     * the chatter of logging every poll. Drop detection: a peer that
+     * was up and is now `!IsConnected()` gets a "lost X" log line and
+     * is rebuilt on the same pass.                                  */
     std::thread        m_reconnectThread;
+    std::set<ELLE_SERVICE_ID> m_everConnectedTo;
+    std::mutex         m_reconnectMutex;
     void RunReconnectorLoop();
+    /** One pass over GetDependencies(): try each peer; emit
+     *  "first contact" / "lost peer" log lines on transitions. */
+    void TickReconnector();
     static constexpr uint32_t kReconnectIntervalMs = 5000;
 };
 
