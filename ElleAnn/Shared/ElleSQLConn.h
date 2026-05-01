@@ -281,6 +281,52 @@ namespace ElleDB {
      * JWT verification is wired through the gate. Noop-safe.              */
     bool TouchPairedDeviceLastSeen(const std::string& device_id);
 
+    /*──────────────────────────────────────────────────────────────────────
+     * OPAQUE SESSION TOKENS — ElleSystem.dbo.Sessions
+     *
+     *   Post-Feb-2026 pivot auth: each POST /api/auth/login creates one
+     *   session row with a 64-hex-char token.  Tokens NEVER expire;
+     *   invalidation is by DELETE (explicit logout) or by tUser block/
+     *   delete (checked at gate time).  No JWT, no signing, no secret
+     *   key, no refresh flow — one row per live login.
+     *──────────────────────────────────────────────────────────────────────*/
+    struct SessionRow {
+        std::string token;            /* 64 hex chars (32 random bytes) */
+        int64_t     nUserNo      = 0;
+        std::string sUserID;
+        std::string sUserName;
+        int32_t     nAuthID      = 0; /* cached from tUser at login     */
+        uint64_t    created_ms   = 0;
+        uint64_t    last_seen_ms = 0;
+        std::string device_name;
+        std::string peer_addr;
+    };
+
+    /* Create + insert.  Caller supplies the token (opaque string from
+     * ElleCrypto::RandomHex).  Returns false on SQL failure; row is
+     * rejected if a token collision somehow occurs (vanishingly
+     * unlikely for 256-bit random — but explicit > implicit).         */
+    bool CreateSession(const SessionRow& row);
+
+    /* Token → row lookup.  Returns false when the token is unknown
+     * (token was logged out, or never existed).                       */
+    bool GetSessionByToken(const std::string& token, SessionRow& out);
+
+    /* Best-effort LastSeenMs touch.  Called from the auth gate after
+     * a successful token resolution.  Failure is logged but swallowed
+     * — we don't 5xx a live request over a stats update.              */
+    bool TouchSessionLastSeen(const std::string& token);
+
+    /* Explicit logout — delete the row.  Idempotent. */
+    bool DeleteSession(const std::string& token);
+
+    /* Mass logout by user (e.g. admin revokes an account).  Returns
+     * rowcount for logging. */
+    int  DeleteSessionsForUser(int64_t nUserNo);
+
+    /* Admin listing — for the dev-panel "active sessions" strip. */
+    bool ListSessions(std::vector<SessionRow>& out, uint32_t limit = 50);
+
 
     /* Goals */
     bool StoreGoal(const ELLE_GOAL_RECORD& goal);

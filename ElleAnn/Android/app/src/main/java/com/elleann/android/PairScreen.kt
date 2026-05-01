@@ -101,27 +101,26 @@ class PairViewModel(
             _state.update { it.copy(loading = true, error = null) }
             runCatching {
                 val api = container.apiFor(s.host, port)
-                val body = when (s.mode) {
-                    PairMode.SIGN_IN -> com.elleann.android.data.models.PairRequest(
-                        code       = "",
-                        deviceName = android.os.Build.MODEL ?: "ElleAnn Android",
-                        deviceId   = deviceId,
-                        gameUser   = s.username,
-                        gamePass   = s.password,
-                    )
-                    PairMode.PAIR_CODE -> com.elleann.android.data.models.PairRequest(
-                        code       = s.code,
-                        deviceName = android.os.Build.MODEL ?: "ElleAnn Android",
-                        deviceId   = deviceId,
-                    )
-                }
-                val resp = api.pair(body)
+                /* Feb 2026 pivot: only one auth path now — username/password
+                 * straight through to usp_GetLogin.  The pair-code mode is
+                 * retired and the server returns 410 Gone for /api/auth/pair,
+                 * so both UI modes funnel into /api/auth/login here.  For
+                 * users coming in via the PAIR_CODE mode we treat the code
+                 * as the username — the backend will 401 it, which is the
+                 * right signal that pair codes are dead.                   */
+                val body = com.elleann.android.data.models.LoginRequest(
+                    username   = if (s.mode == PairMode.SIGN_IN) s.username else s.code,
+                    password   = s.password,
+                    deviceId   = deviceId,
+                    deviceName = android.os.Build.MODEL ?: "ElleAnn Android",
+                )
+                val resp = api.login(body)
                 container.tokenStore.save(
                     StoredToken(
                         jwt       = resp.jwt,
                         host      = s.host,
                         port      = port,
-                        expiresMs = resp.expiresMs,
+                        expiresMs = Long.MAX_VALUE,
                     )
                 )
             }.onSuccess {

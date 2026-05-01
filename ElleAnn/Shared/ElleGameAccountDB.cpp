@@ -103,10 +103,52 @@ bool AuthenticateUser(const std::string& sUserID,
     if (sUserID.empty() || sUserID.size() > 30) return false;
     if (sUserPW.empty() || sUserPW.size() > 20) return false;
 
-    /* Direct SELECT — matches `usp_User_loginWeb` semantics. We use
-     * the parameterized path so the password (and ID) never enter
-     * the SQL text directly. ODBC param binding sidesteps the
-     * old "use a stored proc to dodge SQL injection" tradition.    */
+    /* Primary path: EXEC usp_GetLogin.  User directive Feb-2026 —
+     * usp_User_loginWeb was finicky, so go through the shorter
+     * `usp_GetLogin` wrapper the operator installs in Account.
+     *
+     * Contract: the proc takes @sUserID + @sUserPW and returns one
+     * row with at minimum nUserNo, sUserID, sUserName, bIsBlock,
+     * bIsDelete, nAuthID.  Any proc that returns this set works; we
+     * don't pin the schema any tighter than "columns by position".
+     *
+     * If the proc isn't installed we fall through to the direct
+     * SELECT path so a fresh DB without the wrapper still works —
+     * the fallback is functionally identical and the diagnostics
+     * log (once) which path was taken, so the operator can tell
+     * the proc is missing without the login silently degrading.  */
+    {
+        static constexpr const char* kSqlProc =
+            "EXEC usp_GetLogin @sUserID = ?, @sUserPW = ?;";
+        auto rs = pool.QueryParams(kSqlProc, { sUserID, sUserPW });
+        if (rs.success) {
+            if (rs.rows.empty()) return false;   /* bad creds */
+            const auto& r = rs.rows[0];
+            int64_t v = 0;
+            out.nUserNo   = r.TryGetInt(0, v) ? v : 0;
+            out.sUserID   = r.values.size() > 1 ? r[1] : sUserID;
+            out.sUserName = r.values.size() > 2 ? r[2] : "";
+            out.bIsBlock  = (r.values.size() > 3 && r.GetIntOr(3, 0) != 0);
+            out.bIsDelete = (r.values.size() > 4 && r.GetIntOr(4, 0) != 0);
+            out.nAuthID   = r.values.size() > 5
+                             ? (int32_t)r.GetIntOr(5, 0) : 0;
+            out.QX        = (r.values.size() > 6 && !r[6].empty()) ? r[6][0] : 'A';
+            if (out.bIsBlock || out.bIsDelete) return false;
+            if (out.nUserNo <= 0) return false;
+            return true;
+        }
+        /* Proc not installed / not granted — log and fall through. */
+        static std::once_flag s_procMissingLogged;
+        std::call_once(s_procMissingLogged, [&](){
+            ELLE_WARN("usp_GetLogin not available (%s); "
+                      "falling back to direct SELECT on dbo.tUser",
+                      rs.error.c_str());
+        });
+    }
+
+    /* Fallback: direct parameterized SELECT.  Identical semantics to
+     * the proc.  ODBC param binding keeps the password out of the
+     * SQL text.                                                      */
     static constexpr const char* kSql =
         "SELECT TOP 1 nUserNo, sUserID, sUserName, "
         "       ISNULL(bIsBlock,0) AS bIsBlock, "

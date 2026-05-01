@@ -61,6 +61,12 @@ std::string RandomDigits(uint32_t digits);
  *  encoded. Suitable for device_id / session nonce.                          */
 std::string RandomUrlToken(size_t bytes);
 
+/** Generate `bytes` cryptographically-random bytes as a lowercase hex
+ *  string (output length = bytes*2). Suitable for opaque session
+ *  tokens stored in SQL; the hex encoding keeps the token ASCII-safe
+ *  across ODBC / HTTP headers without needing base64url escaping.    */
+std::string RandomHex(size_t bytes);
+
 /*──────── Constant-time compare (timing-safe) ────────────────────────────────*/
 
 /** Compare two byte buffers in constant time relative to the compared length.

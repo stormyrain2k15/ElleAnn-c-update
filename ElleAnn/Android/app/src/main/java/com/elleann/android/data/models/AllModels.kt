@@ -1191,6 +1191,22 @@ data class PairRequest(
     @SerialName("game_pass")   val gamePass:   String? = null,
 )
 
+/**
+ * POST /api/auth/login — canonical auth endpoint post Feb 2026.
+ *
+ * Sends the user's game-account credentials straight to
+ * `Account.dbo.tUser` (via `usp_GetLogin`); receives an opaque 64-hex
+ * session token that never expires.  See ElleAnn_Sessions_Delta.sql
+ * for the server-side storage.
+ */
+@Serializable
+data class LoginRequest(
+    val username: String,
+    val password: String,
+    @SerialName("device_id")   val deviceId:   String? = null,
+    @SerialName("device_name") val deviceName: String? = null,
+)
+
 // ════════════════════════════════════════════════════════════════════════════
 // COMMON RESPONSE WRAPPERS
 // ════════════════════════════════════════════════════════════════════════════

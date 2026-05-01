@@ -47,15 +47,23 @@ data class EmotionsResponse(
 )
 
 // ─── PairResponse ─────────────────────────────────────────────────────────────
+/**
+ * Login response — Feb 2026 pivot.  `token` is an opaque 64-hex session
+ * token (never expires server-side).  The legacy field name `jwt` is
+ * preserved so existing call-sites (AuthInterceptor, TokenStore) keep
+ * working without ripple-edits; semantically it's just a bearer string.
+ * `expiresMs` defaults to Long.MAX_VALUE so clients that still read it
+ * never see an "expired" state.
+ */
 @Serializable
 data class PairResponse(
-    val jwt: String,
-    @kotlinx.serialization.SerialName("expires_ms")    val expiresMs:   Long = Long.MAX_VALUE,
-    @kotlinx.serialization.SerialName("paired_at_ms") val pairedAtMs:  Long = 0,
-    /** Present only when game-account auth was used (sign-in path).
-     *  Pair-code path leaves these null. */
-    val nUserNo:   Int?    = null,
-    val sUserName: String? = null,
+    @kotlinx.serialization.SerialName("token") val jwt: String,
+    @kotlinx.serialization.SerialName("expires_ms")  val expiresMs:  Long = Long.MAX_VALUE,
+    @kotlinx.serialization.SerialName("created_ms")  val pairedAtMs: Long = 0,
+    @kotlinx.serialization.SerialName("nUserNo")     val nUserNo:    Int? = null,
+    @kotlinx.serialization.SerialName("sUserID")     val sUserID:    String? = null,
+    @kotlinx.serialization.SerialName("sUserName")   val sUserName:  String? = null,
+    @kotlinx.serialization.SerialName("nAuthID")     val nAuthID:    Int? = null,
 )
 
 // ─── TokenStore ───────────────────────────────────────────────────────────────
@@ -99,6 +107,14 @@ interface ElleApi {
 
     @retrofit2.http.POST("/api/auth/pair")
     suspend fun pair(@retrofit2.http.Body body: com.elleann.android.data.models.PairRequest): PairResponse
+
+    /** Feb 2026 pivot: the canonical auth endpoint.
+     *  POST /api/auth/login with game-account sUserID/sUserPW and an
+     *  optional device_name/device_id; receive an opaque session token
+     *  (re-used as PairResponse.jwt for continuity with existing call
+     *  sites).  See ElleAnn_Sessions_Delta.sql.                       */
+    @retrofit2.http.POST("/api/auth/login")
+    suspend fun login(@retrofit2.http.Body body: com.elleann.android.data.models.LoginRequest): PairResponse
 }
 
 // ─── AppContainer — locked base container ─────────────────────────────────────

@@ -315,6 +315,8 @@
         "cors_enabled": true,
         "cors_origins": ["http://localhost:3000"],
         "auth_enabled": true,
+        "_auth_comment": "Feb-2026 pivot: jwt_secret/admin_key are IGNORED. Auth is session-token only — POST /api/auth/login returns an opaque 64-hex Bearer token that never expires. Admin gating is by tUser.nAuthID >= admin_auth_id_threshold.",
+        "admin_auth_id_threshold": 1,
         "admin_key": "",
         "jwt_secret": "",
         "jwt_expiry_hours": 24,

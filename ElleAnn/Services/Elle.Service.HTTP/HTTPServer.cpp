@@ -632,23 +632,42 @@ public:
         if (req.method == "OPTIONS") return HTTPResponse::OK(json::object());
 
         if (httpCfg.auth_enabled && matched && matched->auth != AUTH_PUBLIC) {
+            /*══════════════════════════════════════════════════════════════════
+             * AUTH GATE — post-Feb-2026 simplification.
+             *
+             *   Prior to this pivot the gate juggled:
+             *     - HS256 JWTs (with mint / verify / exp check / revocation
+             *       cache / signature downgrade protection)
+             *     - A shared-secret `jwt_secret` Bearer compare
+             *     - A separate `x-admin-key` header path
+             *     - A pair-code intermediate exchange
+             *
+             *   All of that is now gone.  Per user directive: opaque Bearer
+             *   tokens, NO expiry, admin gated by `tUser.nAuthID` (cached on
+             *   the session row at login time so we don't hammer the Account
+             *   DB on every request).
+             *
+             *   The only things this gate does:
+             *     1. Pull Bearer token from Authorization.
+             *     2. Look it up in ElleSystem.dbo.Sessions.
+             *     3. If missing → 401.
+             *     4. For AUTH_ADMIN, require session.nAuthID ≥ threshold
+             *        (config `http_server.admin_auth_id_threshold`, default 1;
+             *        matches Fiesta convention: 0 = normal user, ≥1 = GM).
+             *     5. For AUTH_INTERNAL_ONLY, same + loopback-only peer.
+             *     6. Stash identity columns on the request for handlers.
+             *     7. Best-effort LastSeenMs touch.
+             *
+             *   The brute-force lockout on /api/auth/login stays (same table,
+             *   same logic) — it only fires on FAILED logins, never
+             *   interferes with legitimate traffic.
+             *══════════════════════════════════════════════════════════════════*/
             HttpAuthLevel need = matched->auth;
-            const std::string& secret = httpCfg.jwt_secret;
-            std::string adminKey = ElleConfig::Instance().GetString(
-                "http_server.admin_key", secret);
-            if (secret.empty() && adminKey.empty()) {
-                return HTTPResponse::Err(503,
-                    "auth_enabled=true but no jwt_secret/admin_key configured");
-            }
-            auto constTimeEq = [](const std::string& a, const std::string& b) {
-                if (a.size() != b.size()) return false;
-                unsigned diff = 0;
-                for (size_t i = 0; i < a.size(); ++i)
-                    diff |= (unsigned char)a[i] ^ (unsigned char)b[i];
-                return diff == 0;
-            };
-            bool haveBearer = false, haveAdmin = false;
-            std::string jwtSub;               /* device_id from verified JWT */
+            const int adminThreshold = (int)ElleConfig::Instance().GetInt(
+                "http_server.admin_auth_id_threshold", 1);
+
+            /* Extract Bearer token from Authorization header.           */
+            std::string token;
             auto authIt = req.headers.find("authorization");
             if (authIt != req.headers.end()) {
                 static const std::string kBearer = "Bearer ";
@@ -659,71 +678,16 @@ public:
                                    return std::tolower((unsigned char)x) ==
                                           std::tolower((unsigned char)y);
                                })) {
-                    std::string tok = v.substr(kBearer.size());
-                    while (!tok.empty() && (tok.front() == ' ' ||
-                                            tok.front() == '\t'))
-                        tok.erase(0, 1);
-
-                    /*──────────────────────────────────────────────────────
-                     * JWT-first path.
-                     *   A real HS256 JWT always has exactly two dots. If
-                     *   the presented token has two dots, run the full
-                     *   verify (header/alg/signature/exp). On success, hit
-                     *   PairedDevices to check Revoked — revocation is the
-                     *   out-of-band escape hatch the audit table enables.
-                     *   On failure, fall through to the legacy shared-
-                     *   secret path so admin CLIs presenting the raw
-                     *   secret as a Bearer continue to work.
-                     *──────────────────────────────────────────────────────*/
-                    if (std::count(tok.begin(), tok.end(), '.') == 2 &&
-                        !secret.empty()) {
-                        uint64_t now_ms = (uint64_t)ELLE_MS_NOW();
-                        auto vr = VerifyJwtHs256(tok, secret, now_ms);
-                        if (vr.valid) {
-                            auto status = PairedDeviceStatusCached(vr.sub, now_ms);
-                            bool exists = status.first;
-                            bool revoked = status.second;
-                            if (exists && !revoked) {
-                                haveBearer = true;
-                                jwtSub = vr.sub;
-                                /* Async touch — ignore failure; this is
-                                 * best-effort observability, not a gate.
-                                 * Bypasses the cache (we WANT fresh DB
-                                 * state for "last seen").               */
-                                ElleDB::TouchPairedDeviceLastSeen(vr.sub);
-                            } else {
-                                /* Valid signature but device revoked or
-                                 * missing from the audit table → refuse.
-                                 * Don't fall through to shared-secret
-                                 * because the signature PROVES they used
-                                 * a device-issued JWT, and we've marked
-                                 * that device untrusted.                 */
-                                ELLE_WARN("JWT verify ok but device revoked/missing: sub=%s",
-                                          vr.sub.c_str());
-                                return HTTPResponse::Err(401,
-                                    "device revoked — re-pair required");
-                            }
-                        } else {
-                            ELLE_DEBUG("JWT verify failed: %s",
-                                       vr.failureReason.c_str());
-                            /* Fall through to shared-secret compare.    */
-                        }
-                    }
-
-                    if (!haveBearer) {
-                        if (!secret.empty()   && constTimeEq(tok, secret))   haveBearer = true;
-                        if (!adminKey.empty() && constTimeEq(tok, adminKey)) haveAdmin  = true;
-                    }
+                    token = v.substr(kBearer.size());
+                    while (!token.empty() && (token.front() == ' ' ||
+                                              token.front() == '\t'))
+                        token.erase(0, 1);
                 }
             }
-            auto keyIt = req.headers.find("x-admin-key");
-            if (keyIt != req.headers.end() && !adminKey.empty() &&
-                constTimeEq(keyIt->second, adminKey)) {
-                haveAdmin = true;
-            }
-            bool ok = false;
-            if (need == AUTH_USER)  ok = haveBearer || haveAdmin;
-            if (need == AUTH_ADMIN) ok = haveAdmin;
+
+            /* Internal-only routes are loopback-gated BEFORE session
+             * lookup — a valid token on a LAN request must still 403
+             * on an internal-only route.                              */
             if (need == AUTH_INTERNAL_ONLY) {
                 auto peerIt = req.headers.find("x-peer-addr");
                 std::string peer = (peerIt != req.headers.end())
@@ -733,20 +697,40 @@ public:
                 if (!isLoop) {
                     return HTTPResponse::Err(403, "internal-only route");
                 }
-                ok = haveAdmin;
             }
-            if (!ok) {
+
+            if (token.empty()) {
                 return HTTPResponse::Err(401, "authentication required");
             }
 
-            /* Expose the verified device_id (if any) to handlers via a
-             * synthetic x-* header. This is the same stash-on-request
-             * pattern the path-param dispatcher uses. Handlers that want
-             * to personalise by device read `x-auth-device-id`; routes
-             * that don't care can ignore it entirely.                  */
-            if (!jwtSub.empty()) {
-                req.headers["x-auth-device-id"] = jwtSub;
+            ElleDB::SessionRow sess;
+            if (!ElleDB::GetSessionByToken(token, sess)) {
+                return HTTPResponse::Err(401, "invalid or expired session");
             }
+
+            if ((need == AUTH_ADMIN || need == AUTH_INTERNAL_ONLY) &&
+                sess.nAuthID < adminThreshold) {
+                ELLE_INFO("admin-gate refused nUserNo=%lld nAuthID=%d "
+                          "(threshold=%d) for %s %s",
+                          (long long)sess.nUserNo, sess.nAuthID,
+                          adminThreshold, req.method.c_str(), req.path.c_str());
+                return HTTPResponse::Err(403, "insufficient privilege");
+            }
+
+            /* Best-effort last-seen touch.  Failure is swallowed —
+             * we don't 5xx a live request over a stats update.      */
+            ElleDB::TouchSessionLastSeen(token);
+
+            /* Stash identity columns for handlers.  These synthetic
+             * x-auth-* headers are the new single source of truth
+             * for "who made this request"; handlers that used to
+             * read x-auth-device-id keep working (it now carries
+             * the session token, which is functionally equivalent).  */
+            req.headers["x-auth-nuserno"]   = std::to_string(sess.nUserNo);
+            req.headers["x-auth-user-id"]   = sess.sUserID;
+            req.headers["x-auth-user-name"] = sess.sUserName;
+            req.headers["x-auth-id-level"]  = std::to_string(sess.nAuthID);
+            req.headers["x-auth-device-id"] = sess.token;
         }
 
         if (matched) {
@@ -1185,26 +1169,20 @@ protected:
                   cfg.bind_address.c_str(), cfg.port, m_router.Count(), workers);
 
         /* Emit the runtime-active HTTP knobs so config drift is visible in
-         * logs. Previously we loaded every knob into HTTPConfig but never
-         * acknowledged at startup which ones were actually on — making
-         * "is CORS really enabled?" a spelunking exercise through code.  */
-        const std::string& adm = ElleConfig::Instance().GetString(
-            "http_server.admin_key", cfg.jwt_secret);
+         * logs. Post-pivot (Feb 2026) auth is session-token only — no
+         * jwt_secret, no admin_key — so we just surface the core gate
+         * toggles.  `game_db_dsn` is still logged further below since
+         * AuthenticateUser requires it for /api/auth/login to work.   */
         ELLE_INFO("HTTP policy: auth=%s cors=%s(%s) rate=%u/min "
                   "maxConn=%u maxWsFrame=%u maxUpload=%u "
-                  "jwt_secret=%s admin_key=%s",
+                  "admin_auth_id_threshold=%lld",
                   cfg.auth_enabled ? "ON" : "OFF",
                   cfg.cors_enabled ? "ON" : "OFF",
                   cfg.cors_origins.empty() ? "*" : cfg.cors_origins.c_str(),
                   cfg.rate_limit_rpm, cfg.max_concurrent_connections,
                   cfg.max_ws_frame_bytes, cfg.max_upload_bytes,
-                  cfg.jwt_secret.empty() ? "UNSET" : "set",
-                  adm.empty() ? "UNSET" : "set");
-        if (cfg.auth_enabled && cfg.jwt_secret.empty() && adm.empty()) {
-            ELLE_WARN("auth_enabled=true but neither jwt_secret nor admin_key "
-                      "is configured — every mutating request will be rejected "
-                      "with 503. Set one in elle_master_config.json.");
-        }
+                  (long long)ElleConfig::Instance().GetInt(
+                      "http_server.admin_auth_id_threshold", 1));
 
         /* Optional game-DB integration. When `http_server.game_db_dsn` is
          * set, Elle accepts the game's own (sUserID, sUserPW) on the
@@ -2322,261 +2300,33 @@ private:
             return HTTPResponse::OK(j);
         }, AUTH_PUBLIC);
 
+
         /* ==================================================================
-         *  /api/auth/pair-code  (ADMIN)  —  issue a 6-digit pairing code.
-         *  /api/auth/pair       (PUBLIC) —  redeem code → real HS256 JWT.
+         *  /api/auth/pair-code  (GONE)
+         *  /api/auth/pair       (GONE)
          *
-         *  Flow matches the contract in Android/spec/Auth.kt. The code is
-         *  single-use and expires 5 minutes after issuance. The resulting
-         *  JWT is stored in the client's Keystore and is authoritative for
-         *  that device_id going forward; revocation lives in
-         *  ElleCore.dbo.PairedDevices.Revoked.
+         *  Retired Feb 2026 — the opaque-token /api/auth/login flow is
+         *  the one-and-only auth path now.  Stubs return 410 Gone so
+         *  any stale client gets an unambiguous "stop calling this"
+         *  instead of mysterious 404s.  The old 300+ lines of
+         *  PairingCode state machine, in-memory code map, JWT mint,
+         *  PairedDevices fingerprint audit trail — all gone.
          * ================================================================== */
         m_router.Register("POST", "/api/auth/pair-code",
-            [this](const HTTPRequest& req) -> HTTPResponse {
-                /* Optional TTL override (seconds), capped at 15 min.       */
-                uint32_t ttlSec = 300;  /* default 5 min */
-                try {
-                    if (!req.body.empty()) {
-                        auto j = json::parse(req.body);
-                        if (j.contains("ttl_seconds") && j["ttl_seconds"].is_number_integer()) {
-                            int64_t t = j["ttl_seconds"].get<int64_t>();
-                            if (t >= 30 && t <= 900) ttlSec = (uint32_t)t;
-                        }
-                    }
-                } catch (const json::exception&) {
-                    /* Malformed body — stick with defaults rather than
-                     * failing the whole request; the TTL is a convenience
-                     * and admin uses the endpoint from a trusted session. */
-                }
-
-                std::string code = ElleCrypto::RandomDigits(6);
-                if (code.size() != 6) {
-                    return HTTPResponse::Err(500, "rng failure");
-                }
-                uint64_t now   = (uint64_t)ELLE_MS_NOW();
-                uint64_t expMs = now + (uint64_t)ttlSec * 1000ull;
-
-                {
-                    std::lock_guard<std::mutex> lk(m_pairingMutex);
-                    PairingGcLocked(now);
-                    /* Extremely unlikely collision (6-digit space, minutes
-                     * TTL) — just refuse so admin can retry.               */
-                    if (m_pairingCodes.find(code) != m_pairingCodes.end()) {
-                        return HTTPResponse::Err(503, "code collision — retry");
-                    }
-                    m_pairingCodes[code] = PairingCode{ expMs, now, false };
-                }
-
-                ELLE_INFO("Pairing code issued (ttl=%us, expires_ms=%llu)",
-                          ttlSec, (unsigned long long)expMs);
-
-                return HTTPResponse::OK({
-                    {"code",        code},
-                    {"expires_ms",  (int64_t)expMs},
-                    {"issued_ms",   (int64_t)now},
-                    {"ttl_seconds", (int64_t)ttlSec}
-                });
-            }, AUTH_ADMIN);
+            [](const HTTPRequest&) -> HTTPResponse {
+                return HTTPResponse::Err(410,
+                    "pair-code flow retired; use POST /api/auth/login");
+            }, AUTH_PUBLIC);
 
         m_router.Register("POST", "/api/auth/pair",
-            [this](const HTTPRequest& req) -> HTTPResponse {
-                /* Parse body. Fail-closed on any malformed field.
-                 *
-                 * TWO PAIRING MODES (both supported):
-                 *
-                 *   1. Pair-code mode (legacy)
-                 *        body: { code, device_id, device_name }
-                 *        admin issues a 6-digit code via /api/auth/pair-code,
-                 *        the companion device redeems it. JWT sub = device_id.
-                 *
-                 *   2. Game-account mode (new — Feb 2026)
-                 *        body: { device_id, device_name, game_user, game_pass }
-                 *        device authenticates with the same Mischief account
-                 *        credentials it uses for the in-game client. We
-                 *        validate against the game's `Account.dbo.tUser`
-                 *        directly (read-only) and link the device to the
-                 *        resulting `nUserNo`. JWT sub = device_id, but the
-                 *        bound nUserNo is persisted in PairedDevices and
-                 *        UserContinuity for relationship continuity.
-                 *
-                 * If both `code` and `game_user` arrive, game-account mode
-                 * wins (it's the stronger proof). If neither arrives, we
-                 * keep the original pair-code requirement.                */
-                std::string code, device_name, device_id;
-                std::string game_user, game_pass;
-                try {
-                    auto j = json::parse(req.body);
-                    if (j.contains("code")        && j["code"].is_string())
-                        code = j["code"].get<std::string>();
-                    if (j.contains("device_name") && j["device_name"].is_string())
-                        device_name = j["device_name"].get<std::string>();
-                    if (j.contains("device_id")   && j["device_id"].is_string())
-                        device_id = j["device_id"].get<std::string>();
-                    if (j.contains("game_user")   && j["game_user"].is_string())
-                        game_user = j["game_user"].get<std::string>();
-                    if (j.contains("game_pass")   && j["game_pass"].is_string())
-                        game_pass = j["game_pass"].get<std::string>();
-                } catch (const json::exception&) {
-                    return HTTPResponse::Err(400, "malformed JSON body");
-                }
-
-                if (device_id.empty() || device_id.size() > 128) {
-                    return HTTPResponse::Err(400, "device_id required (<=128 chars)");
-                }
-                if (device_name.empty() || device_name.size() > 256) {
-                    return HTTPResponse::Err(400, "device_name required (<=256 chars)");
-                }
-
-                uint64_t now = (uint64_t)ELLE_MS_NOW();
-                int64_t  bound_user_no = 0;
-                std::string bound_user_id_cached;
-                std::string bound_user_name_cached;
-                bool game_auth_used = false;
-
-                /* ── MODE A: game-account auth ─────────────────────── */
-                if (!game_user.empty() && !game_pass.empty()) {
-                    if (!ElleGameAccountPool::Instance().IsAvailable()) {
-                        return HTTPResponse::Err(503,
-                            "game-account auth not configured "
-                            "(set http_server.game_db_dsn)");
-                    }
-                    ElleGameAuth::UserIdentity id;
-                    if (!ElleGameAuth::AuthenticateUser(game_user, game_pass, id)) {
-                        /* NEVER include the password in any log line. */
-                        ELLE_INFO("game-auth: refused user=\"%s\"", game_user.c_str());
-                        return HTTPResponse::Err(401, "game credentials refused");
-                    }
-                    bound_user_no          = id.nUserNo;
-                    bound_user_id_cached   = id.sUserID;
-                    bound_user_name_cached = id.sUserName;
-                    game_auth_used         = true;
-                    ELLE_INFO("game-auth: user=\"%s\" nUserNo=%lld → device=%s",
-                              id.sUserID.c_str(), (long long)id.nUserNo,
-                              device_id.c_str());
-
-                /* ── MODE B: pair-code (existing flow) ─────────────── */
-                } else {
-                    if (code.size() != 6) {
-                        return HTTPResponse::Err(400, "code must be 6 digits");
-                    }
-                    /* Accept only ASCII digits. Guards against unicode lookalikes
-                     * that would otherwise bypass the timing-safe compare.      */
-                    for (char c : code) {
-                        if (c < '0' || c > '9') {
-                            return HTTPResponse::Err(400, "code must be 6 digits");
-                        }
-                    }
-
-                    /* Timing-safe code lookup: iterate ALL outstanding codes
-                     * and compare constant-time. Lookup time is independent
-                     * of which code matched (no map.find shortcut) so an
-                     * attacker can't learn about the set of valid codes by
-                     * timing the response. The map stays small (admin
-                     * issues < 10 codes/minute in practice) so the O(n)
-                     * scan is still microseconds.                           */
-                    bool matched = false;
-                    {
-                        std::lock_guard<std::mutex> lk(m_pairingMutex);
-                        PairingGcLocked(now);
-                        for (auto& [stored, rec] : m_pairingCodes) {
-                            if (rec.consumed) continue;
-                            if (rec.expires_ms <= now) continue;
-                            if (stored.size() != code.size()) continue;
-                            if (ElleCrypto::ConstantTimeEquals(stored.data(),
-                                                                 code.data(),
-                                                                 stored.size())) {
-                                /* Consume exactly once, even under concurrent
-                                 * redeem attempts.                           */
-                                rec.consumed = true;
-                                matched = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!matched) {
-                        return HTTPResponse::Err(401, "invalid or expired code");
-                    }
-                }
-
-                const auto& http = ElleConfig::Instance().GetHTTP();
-                const std::string& secret = http.jwt_secret;
-                if (secret.empty()) {
-                    return HTTPResponse::Err(503,
-                        "http_server.jwt_secret not configured");
-                }
-
-                /* JWT lifetime: 90 days. Matches the Android/spec/Auth.kt
-                 * "long-lived" contract. Re-pair flow handles expiry.   */
-                const uint64_t kJwtTtlMs = 90ull * 24 * 60 * 60 * 1000;
-                uint64_t exp_ms = now + kJwtTtlMs;
-
-                std::string jwt = MintJwt(device_id, device_name, now, exp_ms, secret);
-                if (jwt.empty()) {
-                    return HTTPResponse::Err(500, "jwt signing failed");
-                }
-
-                /* First 32 hex chars of SHA-256(jwt) — enough to identify
-                 * the token for revocation / audit without storing the
-                 * token itself anywhere but the device.                  */
-                std::string fp = ElleCrypto::Sha256Hex(jwt).substr(0, 32);
-
-                ElleDB::PairedDeviceRow row;
-                row.device_id       = device_id;
-                row.device_name     = device_name;
-                row.paired_at_ms    = now;
-                row.expires_ms      = exp_ms;
-                row.jwt_fingerprint = fp;
-                if (!ElleDB::UpsertPairedDevice(row)) {
-                    /* The DB persist failing does NOT invalidate the JWT
-                     * (it's already signed) but it DOES mean we can't
-                     * audit / revoke it later, which is a P0 guarantee.
-                     * Fail-closed and let admin retry.                   */
-                    return HTTPResponse::Err(500, "failed to persist paired device");
-                }
-
-                /* Game-account mode: link the device row to the user we
-                 * just authenticated, and bump UserContinuity so Elle
-                 * remembers this user across pairings / devices /
-                 * reinstalls. The schema delta in
-                 * SQL/ElleAnn_GameUnification.sql added the nUserNo
-                 * column + the UserContinuity table.                    */
-                if (game_auth_used && bound_user_no > 0) {
-                    auto& pool = ElleSQLPool::Instance();
-                    auto upd = pool.QueryParams(
-                        "UPDATE ElleCore.dbo.PairedDevices "
-                        "   SET nUserNo = ? WHERE device_id = ?;",
-                        { std::to_string(bound_user_no), device_id });
-                    if (!upd.success) {
-                        ELLE_WARN("paired-device nUserNo link failed: %s",
-                                  upd.error.c_str());
-                    }
-                    ElleDB::TouchUserContinuityOnPair(
-                        bound_user_no, bound_user_id_cached,
-                        bound_user_name_cached);
-                }
-
-                ELLE_INFO("Device paired: name=\"%s\" id=%s exp=%llu mode=%s nUserNo=%lld",
-                          device_name.c_str(), device_id.c_str(),
-                          (unsigned long long)exp_ms,
-                          game_auth_used ? "game" : "code",
-                          (long long)bound_user_no);
-
-                json resp = {
-                    {"jwt",          jwt},
-                    {"expires_ms",   (int64_t)exp_ms},
-                    {"paired_at_ms", (int64_t)now}
-                };
-                if (game_auth_used) {
-                    resp["nUserNo"]   = bound_user_no;
-                    resp["sUserName"] = bound_user_name_cached;
-                }
-                return HTTPResponse::OK(resp);
+            [](const HTTPRequest&) -> HTTPResponse {
+                return HTTPResponse::Err(410,
+                    "pair flow retired; use POST /api/auth/login");
             }, AUTH_PUBLIC);
 
         /* ==================================================================
          *  /api/auth/login   (PUBLIC)  —  game-account username/password →
-         *                                  long-lived HS256 JWT.
+         *                                  opaque never-expire session token.
          *
          *  This is the canonical "log into the companion app" endpoint.
          *  No admin pre-step, no 6-digit hardware code: a phone client
@@ -2695,9 +2445,7 @@ private:
                     /* Deterministic per-account key.  Stable across
                      * re-logins from the same app on the same account,
                      * so the device list shows ONE row per (user, app)
-                     * instead of a fresh row every login.  The user can
-                     * still pass an explicit device_id if they want
-                     * device-bound revocation. */
+                     * instead of a fresh row every login.              */
                     device_id = "app:" + id.sUserID;
                 }
                 if (device_id.size() > 128) {
@@ -2710,61 +2458,96 @@ private:
                     device_name.resize(256);
                 }
 
-                const auto& http = ElleConfig::Instance().GetHTTP();
-                const std::string& secret = http.jwt_secret;
-                if (secret.empty()) {
-                    return HTTPResponse::Err(503,
-                        "http_server.jwt_secret not configured");
+                /* ── Mint opaque session token & persist. ──────────
+                 * 32 random bytes ⇒ 64 hex chars ⇒ 256 bits of entropy.
+                 * No expiry by design.  Invalidated only by explicit
+                 * logout (DELETE session row) or admin action.     */
+                std::string token = ElleCrypto::RandomHex(32);
+                if (token.empty() || token.size() != 64) {
+                    return HTTPResponse::Err(500, "random token generation failed");
                 }
 
-                /* JWT lifetime: 90 days — matches /api/auth/pair. */
-                const uint64_t kJwtTtlMs = 90ull * 24 * 60 * 60 * 1000;
-                const uint64_t exp_ms    = now + kJwtTtlMs;
-
-                std::string jwt = MintJwt(device_id, device_name, now, exp_ms, secret);
-                if (jwt.empty()) {
-                    return HTTPResponse::Err(500, "jwt signing failed");
-                }
-                std::string fp = ElleCrypto::Sha256Hex(jwt).substr(0, 32);
-
-                ElleDB::PairedDeviceRow row;
-                row.device_id       = device_id;
-                row.device_name     = device_name;
-                row.paired_at_ms    = now;
-                row.expires_ms      = exp_ms;
-                row.jwt_fingerprint = fp;
-                if (!ElleDB::UpsertPairedDevice(row)) {
-                    return HTTPResponse::Err(500, "failed to persist paired device");
+                ElleDB::SessionRow sess;
+                sess.token        = token;
+                sess.nUserNo      = id.nUserNo;
+                sess.sUserID      = id.sUserID;
+                sess.sUserName    = id.sUserName;
+                sess.nAuthID      = id.nAuthID;
+                sess.created_ms   = now;
+                sess.last_seen_ms = now;
+                sess.device_name  = device_name;
+                sess.peer_addr    = peer;
+                if (!ElleDB::CreateSession(sess)) {
+                    return HTTPResponse::Err(500, "failed to persist session");
                 }
 
-                /* Link device → nUserNo + bump UserContinuity, same as
-                 * /api/auth/pair MODE A. */
+                /* Continuity bump — same hook the old JWT path used to
+                 * keep UserContinuity fresh on (re-)login.            */
                 if (id.nUserNo > 0) {
-                    auto& pool = ElleSQLPool::Instance();
-                    auto upd = pool.QueryParams(
-                        "UPDATE ElleCore.dbo.PairedDevices "
-                        "   SET nUserNo = ? WHERE device_id = ?;",
-                        { std::to_string(id.nUserNo), device_id });
-                    if (!upd.success) {
-                        ELLE_WARN("login: nUserNo link failed: %s",
-                                  upd.error.c_str());
-                    }
                     ElleDB::TouchUserContinuityOnPair(
                         id.nUserNo, id.sUserID, id.sUserName);
                 }
 
-                ELLE_INFO("login: user=\"%s\" nUserNo=%lld device=%s peer=%s",
+                ELLE_INFO("login: user=\"%s\" nUserNo=%lld nAuthID=%d "
+                          "device=%s peer=%s",
                           id.sUserID.c_str(), (long long)id.nUserNo,
-                          device_id.c_str(), peer.c_str());
+                          id.nAuthID, device_id.c_str(), peer.c_str());
 
                 return HTTPResponse::OK({
-                    {"jwt",          jwt},
-                    {"expires_ms",   (int64_t)exp_ms},
-                    {"paired_at_ms", (int64_t)now},
+                    {"token",        token},
                     {"nUserNo",      id.nUserNo},
-                    {"sUserName",    id.sUserName}
+                    {"sUserID",      id.sUserID},
+                    {"sUserName",    id.sUserName},
+                    {"nAuthID",      id.nAuthID},
+                    {"created_ms",   (int64_t)now}
                 });
             }, AUTH_PUBLIC);
+
+        /* ==================================================================
+         *  POST /api/auth/logout  (USER)
+         *
+         *  Deletes the caller's session row.  Idempotent — unknown token
+         *  still returns 200 so a client with a stale token can clear its
+         *  local store without having to handle a special error case.
+         *  The gate has already validated the token before this handler
+         *  runs (it's AUTH_USER), so `x-auth-device-id` carries the
+         *  session token verbatim.
+         * ================================================================== */
+        m_router.Register("POST", "/api/auth/logout",
+            [](const HTTPRequest& req) -> HTTPResponse {
+                auto it = req.headers.find("x-auth-device-id");
+                if (it != req.headers.end() && !it->second.empty()) {
+                    ElleDB::DeleteSession(it->second);
+                }
+                return HTTPResponse::OK({{"ok", true}});
+            }, AUTH_USER);
+
+        /* ==================================================================
+         *  GET /api/auth/me  (USER)
+         *
+         *  Minimal identity echo for the client to confirm its token is
+         *  still valid + pick up nAuthID changes without a logout/login
+         *  round trip.
+         * ================================================================== */
+        m_router.Register("GET", "/api/auth/me",
+            [](const HTTPRequest& req) -> HTTPResponse {
+                auto pick = [&](const char* key) -> std::string {
+                    auto it = req.headers.find(key);
+                    return it == req.headers.end() ? "" : it->second;
+                };
+                int64_t nUserNo = 0;
+                try { nUserNo = std::stoll(pick("x-auth-nuserno")); }
+                catch (...) {}
+                int nAuthID = 0;
+                try { nAuthID = std::stoi(pick("x-auth-id-level")); }
+                catch (...) {}
+                return HTTPResponse::OK({
+                    {"nUserNo",   nUserNo},
+                    {"sUserID",   pick("x-auth-user-id")},
+                    {"sUserName", pick("x-auth-user-name")},
+                    {"nAuthID",   nAuthID}
+                });
+            }, AUTH_USER);
 
         /* ==================================================================
          *  /api/auth/devices          (ADMIN, GET)    — list paired devices

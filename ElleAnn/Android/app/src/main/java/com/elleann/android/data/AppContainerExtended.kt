@@ -122,34 +122,17 @@ class AppContainerExtended(
         get() = tokenStore.load()?.let { "http://${it.host}:${it.port}" }
 
 
-    // ── Separate admin OkHttp client — x-admin-key only on admin calls ──
-    // The main okHttpClient no longer attaches x-admin-key (see AuthInterceptorExtended).
-    // Use adminApi for any route requiring x-admin-key (ADMIN auth level).
-    private val adminOkHttpClient = OkHttpClient.Builder()
-        .addInterceptor(authInterceptor)
-        .addInterceptor { chain ->
-            val key = adminKeyStore.getKey()
-            val req = if (key.isNotEmpty())
-                chain.request().newBuilder().addHeader("x-admin-key", key).build()
-            else chain.request()
-            chain.proceed(req)
-        }
-        .addInterceptor(loggingInterceptor)
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
+    // ── Admin-scoped API (post Feb-2026: just an alias) ────────────────
+    // Pre-pivot this used a dedicated OkHttp client that appended
+    // x-admin-key on every admin route. Admin privilege is now derived
+    // from the logged-in user's tUser.nAuthID server-side, so the Bearer
+    // token alone authorises admin routes when the user has sufficient
+    // nAuthID. We keep `adminApi` as a straight alias so call sites
+    // (WorldSections, SystemHealthScreen, etc.) don't have to change —
+    // they just work or get a 403, which they already handle.
 
-    /** Admin-scoped API — carries x-admin-key. Use for ADMIN auth-level endpoints only. */
-    fun adminApiFor(host: String, port: Int): ElleApiExtended {
-        PrivateLanValidator.require(host)
-        return Retrofit.Builder()
-            .baseUrl("http://$host:$port/")
-            .client(adminOkHttpClient)
-            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-            .build()
-            .create(ElleApiExtended::class.java)
-    }
+    /** Admin-scoped API — identical to `extendedApi` post-pivot. */
+    fun adminApiFor(host: String, port: Int): ElleApiExtended = extendedApiFor(host, port)
 
     val adminApi: ElleApiExtended?
         get() = tokenStore.load()?.let { adminApiFor(it.host, it.port) }
@@ -185,19 +168,11 @@ class AppContainerExtended(
     }
 
     // ── QR SVG retrieval ─────────────────────────────────────────────────────
-    suspend fun getPairingQrSvg(code: String, host: String, port: Int): String? {
-        val stored = tokenStore.load() ?: return null
-        val url = "http://${stored.host}:${stored.port}/api/auth/qr?code=$code&host=$host&port=$port"
-        return runCatching {
-            val req = okhttp3.Request.Builder().url(url)
-                .addHeader("Authorization", "Bearer ${stored.jwt}")
-                .addHeader("x-admin-key", adminKeyStore.getKey())
-                .build()
-            rawHttpClient.newCall(req).execute().use { r ->
-                if (r.isSuccessful) r.body?.string() else null
-            }
-        }.getOrNull()
-    }
+    // NOTE: post Feb-2026 the pair-code flow is gone, so the QR endpoint
+    // this helper used to hit now returns 410. Kept as a thin shim so
+    // SettingsScreen.kt still compiles; always returns null.
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun getPairingQrSvg(code: String, host: String, port: Int): String? = null
 
     // ── Dev PIN — SHA-256 ─────────────────────────────────────────────────────
     companion object {

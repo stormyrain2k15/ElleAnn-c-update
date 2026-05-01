@@ -656,6 +656,119 @@ bool TouchPairedDeviceLastSeen(const std::string& device_id) {
         { std::to_string((int64_t)ELLE_MS_NOW()), device_id }).success;
 }
 
+/*──────────────────────────────────────────────────────────────────────────────
+ *  SESSIONS — opaque bearer-token store (Feb 2026 auth simplification).
+ *
+ *   See ElleAnn_Sessions_Delta.sql for the table.  All paths live on
+ *   the ElleSystem database so a wipe of game state (ElleCore) doesn't
+ *   auto-log-everyone-out; Sessions is deliberately independent.
+ *──────────────────────────────────────────────────────────────────────────────*/
+bool CreateSession(const SessionRow& row) {
+    if (row.token.empty() || row.nUserNo <= 0) return false;
+    auto& pool = ElleSQLPool::Instance();
+    auto rs = pool.QueryParams(
+        "INSERT INTO ElleSystem.dbo.Sessions "
+        "(Token, nUserNo, sUserID, sUserName, nAuthID, CreatedMs, LastSeenMs, DeviceName, PeerAddr) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        {
+            row.token,
+            std::to_string(row.nUserNo),
+            row.sUserID,
+            row.sUserName,
+            std::to_string((int64_t)row.nAuthID),
+            std::to_string((int64_t)row.created_ms),
+            std::to_string((int64_t)row.last_seen_ms),
+            row.device_name,
+            row.peer_addr
+        });
+    return rs.success;
+}
+
+bool GetSessionByToken(const std::string& token, SessionRow& out) {
+    if (token.empty() || token.size() > 64) return false;
+    auto& pool = ElleSQLPool::Instance();
+    auto rs = pool.QueryParams(
+        "SELECT TOP 1 Token, nUserNo, sUserID, sUserName, nAuthID, "
+        "       CONVERT(BIGINT, CreatedMs)  AS CreatedMs, "
+        "       CONVERT(BIGINT, LastSeenMs) AS LastSeenMs, "
+        "       ISNULL(DeviceName,'') AS DeviceName, "
+        "       ISNULL(PeerAddr,'')   AS PeerAddr "
+        "  FROM ElleSystem.dbo.Sessions WHERE Token = ?;",
+        { token });
+    if (!rs.success || rs.rows.empty()) return false;
+    const auto& r = rs.rows[0];
+    int64_t v = 0;
+    out.token      = r.values.size() > 0 ? r[0] : "";
+    out.nUserNo    = r.TryGetInt(1, v) ? v : 0;
+    out.sUserID    = r.values.size() > 2 ? r[2] : "";
+    out.sUserName  = r.values.size() > 3 ? r[3] : "";
+    out.nAuthID    = (int32_t)r.GetIntOr(4, 0);
+    int64_t cms = 0, lms = 0;
+    r.TryGetInt(5, cms); r.TryGetInt(6, lms);
+    out.created_ms    = (uint64_t)cms;
+    out.last_seen_ms  = (uint64_t)lms;
+    out.device_name   = r.values.size() > 7 ? r[7] : "";
+    out.peer_addr     = r.values.size() > 8 ? r[8] : "";
+    return out.nUserNo > 0;
+}
+
+bool TouchSessionLastSeen(const std::string& token) {
+    if (token.empty()) return false;
+    return ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleSystem.dbo.Sessions SET LastSeenMs = ? WHERE Token = ?;",
+        { std::to_string((int64_t)ELLE_MS_NOW()), token }).success;
+}
+
+bool DeleteSession(const std::string& token) {
+    if (token.empty()) return true;  /* idempotent no-op */
+    return ElleSQLPool::Instance().QueryParams(
+        "DELETE FROM ElleSystem.dbo.Sessions WHERE Token = ?;",
+        { token }).success;
+}
+
+int DeleteSessionsForUser(int64_t nUserNo) {
+    if (nUserNo <= 0) return 0;
+    auto& pool = ElleSQLPool::Instance();
+    auto rs = pool.QueryParams(
+        "DELETE FROM ElleSystem.dbo.Sessions WHERE nUserNo = ?;",
+        { std::to_string(nUserNo) });
+    return rs.success ? (int)rs.rows_affected : 0;
+}
+
+bool ListSessions(std::vector<SessionRow>& out, uint32_t limit) {
+    if (limit == 0) limit = 50;
+    if (limit > 500) limit = 500;
+    auto& pool = ElleSQLPool::Instance();
+    auto rs = pool.Query(
+        "SELECT TOP " + std::to_string(limit) + " "
+        "       Token, nUserNo, sUserID, sUserName, nAuthID, "
+        "       CONVERT(BIGINT, CreatedMs)  AS CreatedMs, "
+        "       CONVERT(BIGINT, LastSeenMs) AS LastSeenMs, "
+        "       ISNULL(DeviceName,'') AS DeviceName, "
+        "       ISNULL(PeerAddr,'')   AS PeerAddr "
+        "  FROM ElleSystem.dbo.Sessions ORDER BY LastSeenMs DESC;");
+    if (!rs.success) return false;
+    out.clear();
+    out.reserve(rs.rows.size());
+    for (auto& r : rs.rows) {
+        SessionRow s;
+        int64_t v = 0;
+        s.token     = r.values.size() > 0 ? r[0] : "";
+        s.nUserNo   = r.TryGetInt(1, v) ? v : 0;
+        s.sUserID   = r.values.size() > 2 ? r[2] : "";
+        s.sUserName = r.values.size() > 3 ? r[3] : "";
+        s.nAuthID   = (int32_t)r.GetIntOr(4, 0);
+        int64_t cms = 0, lms = 0;
+        r.TryGetInt(5, cms); r.TryGetInt(6, lms);
+        s.created_ms   = (uint64_t)cms;
+        s.last_seen_ms = (uint64_t)lms;
+        s.device_name  = r.values.size() > 7 ? r[7] : "";
+        s.peer_addr    = r.values.size() > 8 ? r[8] : "";
+        out.push_back(std::move(s));
+    }
+    return true;
+}
+
 bool RegisterWorker(ELLE_SERVICE_ID svc, const std::string& name) {
     auto& pool = ElleSQLPool::Instance();
     return pool.QueryParams(

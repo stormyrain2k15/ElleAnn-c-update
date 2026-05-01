@@ -5,21 +5,26 @@ import okhttp3.Interceptor
 import okhttp3.Response
 
 /**
- * AuthInterceptorExtended — OkHttp interceptor that attaches both the
- * Bearer JWT (for AUTH_USER routes) and the optional x-admin-key header
- * (for AUTH_ADMIN routes) to every outgoing request.
+ * AuthInterceptorExtended — attaches the opaque session Bearer token to
+ * every outgoing request and triggers a re-auth callback on 401.
  *
- * The x-admin-key is stored encrypted in EncryptedSharedPreferences via
- * AdminKeyStore and is optional — if not set, it is omitted. Admin routes
- * will return HTTP 403 if the key is missing or incorrect.
- *
- * JWT token refresh: on HTTP 401, the token is cleared and a
- * REAUTH_REQUIRED event is emitted via [onReauthRequired] so the host
- * Activity can navigate back to PairScreen.
+ * Feb 2026 pivot:
+ *  - No JWT, no expiry check, no x-admin-key header.
+ *  - A session token is an opaque 64-hex string minted by
+ *    POST /api/auth/login and stored verbatim via TokenStore.
+ *  - Admin privilege is server-side only: if the logged-in user's
+ *    tUser.nAuthID meets the server's admin_auth_id_threshold, the
+ *    SAME Bearer token authorises every admin route. No separate
+ *    client-side secret to juggle.
+ *  - On 401 (token deleted server-side, or never valid), the store
+ *    is cleared and `onReauthRequired()` fires so the host Activity
+ *    can bounce the user to the login screen.
  */
 class AuthInterceptorExtended(
     private val tokenStore: TokenStore,
-    private val adminKeyStore: AdminKeyStore,
+    // Kept as a constructor-signature shim so AppContainerExtended
+    // wiring doesn't need to change. The value is ignored.
+    @Suppress("UNUSED_PARAMETER") adminKeyStore: AdminKeyStore? = null,
     private val onReauthRequired: () -> Unit,
 ) : Interceptor {
 
@@ -27,18 +32,15 @@ class AuthInterceptorExtended(
         val stored = tokenStore.load()
         val requestBuilder = chain.request().newBuilder()
 
-        // Attach Bearer JWT if available and not expired
-        if (stored != null && stored.expiresMs > System.currentTimeMillis()) {
+        // Single header, always the session token when we have one.
+        // No expiry math — the server is the only thing that knows
+        // whether a token is still valid.
+        if (stored != null && stored.jwt.isNotEmpty()) {
             requestBuilder.addHeader("Authorization", "Bearer ${stored.jwt}")
         }
 
-        // x-admin-key is NOT attached here.
-        // It is only added by the dedicated adminOkHttpClient in AppContainerExtended.
-        // This prevents the admin key from leaking onto every user-level request.
-
         val response = chain.proceed(requestBuilder.build())
 
-        // JWT expired or invalid — clear and trigger re-pair flow
         if (response.code == 401) {
             tokenStore.clear()
             onReauthRequired()
@@ -49,30 +51,20 @@ class AuthInterceptorExtended(
 }
 
 /**
- * AdminKeyStore — encrypted storage for the x-admin-key shared secret.
- * The key is configured in Dev Settings → Admin Key and stored in the
- * same EncryptedSharedPreferences instance as the JWT.
+ * AdminKeyStore — retained as an empty shim for the Feb-2026 pivot.
+ *
+ * Prior to the pivot this stored an encrypted x-admin-key in
+ * EncryptedSharedPreferences.  That shared secret has been retired —
+ * admin routes are now gated by the logged-in user's tUser.nAuthID on
+ * the server side.  The class stays present (empty) so call sites
+ * that haven't been migrated yet still compile; all methods report
+ * "no key" and writes are swallowed.  Safe to delete once the last
+ * reference in the UI is gone.
  */
-class AdminKeyStore(
-    private val prefs: android.content.SharedPreferences,
-) {
-    companion object {
-        private const val KEY_ADMIN = "elle_admin_key"
-    }
-
-    /** Retrieve the stored admin key, or empty string if not configured */
-    fun getKey(): String = prefs.getString(KEY_ADMIN, "") ?: ""
-
-    /** Save the admin key (encrypted at rest via EncryptedSharedPreferences) */
-    fun setKey(key: String) {
-        prefs.edit().putString(KEY_ADMIN, key).apply()
-    }
-
-    /** Remove the stored admin key */
-    fun clearKey() {
-        prefs.edit().remove(KEY_ADMIN).apply()
-    }
-
-    /** True if an admin key is currently configured */
-    fun hasKey(): Boolean = getKey().isNotEmpty()
+@Suppress("UNUSED_PARAMETER")
+class AdminKeyStore(prefs: android.content.SharedPreferences? = null) {
+    fun getKey(): String = ""
+    fun setKey(key: String) { /* no-op — admin is tUser.nAuthID now */ }
+    fun clearKey() { /* no-op */ }
+    fun hasKey(): Boolean = false
 }

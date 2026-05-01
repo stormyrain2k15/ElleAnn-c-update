@@ -178,6 +178,23 @@ std::string RandomUrlToken(size_t bytes) {
     return Base64UrlEncode(buf.data(), bytes);
 }
 
+std::string RandomHex(size_t bytes) {
+    /* Produce `bytes` secure random bytes, return lowercase hex.
+     * Used for opaque Bearer session tokens: 32 bytes ⇒ 64 hex chars
+     * ⇒ 256 bits of entropy, trivially ASCII-safe in HTTP headers
+     * and SQL NVARCHAR columns without escape or encode overhead.  */
+    std::vector<uint8_t> buf(bytes);
+    if (!RandomBytes(buf.data(), bytes)) return {};
+    static const char* kHex = "0123456789abcdef";
+    std::string out;
+    out.resize(bytes * 2);
+    for (size_t i = 0; i < bytes; i++) {
+        out[i * 2 + 0] = kHex[(buf[i] >> 4) & 0xF];
+        out[i * 2 + 1] = kHex[buf[i] & 0xF];
+    }
+    return out;
+}
+
 /*══════════════ Constant-time compare ════════════════════════════════════════*/
 
 bool ConstantTimeEquals(const void* a, const void* b, size_t len) {
