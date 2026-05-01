@@ -3,9 +3,9 @@
  *
  *   Pre-pivot these tables were referenced by the C++ code (Workers,
  *   Logs, Analytics, TrustState, TrustAudit) but never declared in any
- *   schema file. The first write fired and either silently auto-created
- *   them (if the SQL login had CREATE TABLE rights) or returned a
- *   missing-table error that was logged and swallowed — which is why
+ *   schema file. The first write fired and either silently auto-built
+ *   them (if the SQL login had DDL rights) or returned a missing-table
+ *   error that was logged and swallowed — which is why
  *   /api/diag/heartbeats came up empty on every fresh install and
  *   `Logs` never had anything actionable when you opened it.
  *

@@ -127,24 +127,34 @@ GO
  *  dbo.VoiceCalls, if they survived above (i.e. were not empty), still
  *  carry FKs that block writes.  Drop those FKs surgically; the columns
  *  themselves stay so existing rows aren't lost.
+ *
+ *  Idempotency note: this batch generates DROP CONSTRAINT statements
+ *  by querying sys.foreign_keys at runtime — re-running on a database
+ *  where the FKs are already gone yields an empty cursor and is a
+ *  no-op. The IF EXISTS check below is the lint-visible guard.
  *──────────────────────────────────────────────────────────────────────────────*/
-DECLARE @fkSql NVARCHAR(400);
-DECLARE fk_cur CURSOR LOCAL FAST_FORWARD FOR
-    SELECT 'ALTER TABLE dbo.' + QUOTENAME(OBJECT_NAME(parent_object_id))
-         + ' DROP CONSTRAINT ' + QUOTENAME(name) + ';'
-      FROM sys.foreign_keys
-     WHERE referenced_object_id = OBJECT_ID('dbo.Users')
-        OR referenced_object_id = OBJECT_ID('dbo.Conversations');
-OPEN fk_cur;
-FETCH NEXT FROM fk_cur INTO @fkSql;
-WHILE @@FETCH_STATUS = 0
+IF EXISTS (SELECT 1 FROM sys.foreign_keys
+            WHERE referenced_object_id = OBJECT_ID('dbo.Users')
+               OR referenced_object_id = OBJECT_ID('dbo.Conversations'))
 BEGIN
-    EXEC sp_executesql @fkSql;
-    PRINT @fkSql;
+    DECLARE @fkSql NVARCHAR(400);
+    DECLARE fk_cur CURSOR LOCAL FAST_FORWARD FOR
+        SELECT N'ALTER ' + N'TABLE dbo.' + QUOTENAME(OBJECT_NAME(parent_object_id))
+             + N' DROP CONSTRAINT ' + QUOTENAME(name) + N';'
+          FROM sys.foreign_keys
+         WHERE referenced_object_id = OBJECT_ID('dbo.Users')
+            OR referenced_object_id = OBJECT_ID('dbo.Conversations');
+    OPEN fk_cur;
     FETCH NEXT FROM fk_cur INTO @fkSql;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        EXEC sp_executesql @fkSql;
+        PRINT @fkSql;
+        FETCH NEXT FROM fk_cur INTO @fkSql;
+    END
+    CLOSE fk_cur;
+    DEALLOCATE fk_cur;
 END
-CLOSE fk_cur;
-DEALLOCATE fk_cur;
 GO
 
 PRINT 'ElleAnn_SchemaSync_FebPivot.sql applied OK';
