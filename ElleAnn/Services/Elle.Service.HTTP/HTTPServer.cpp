@@ -2535,12 +2535,17 @@ private:
                     auto it = req.headers.find(key);
                     return it == req.headers.end() ? "" : it->second;
                 };
+                /* Safe integer parse — the x-auth-* headers are set by
+                 * our own gate so invalid values shouldn't happen, but
+                 * std::stoll/stoi throw on malformed or empty input and
+                 * the lint policy (catch(...) is forbidden) means we
+                 * handle the std::exception explicitly.                */
                 int64_t nUserNo = 0;
                 try { nUserNo = std::stoll(pick("x-auth-nuserno")); }
-                catch (...) {}
+                catch (const std::exception&) { nUserNo = 0; }
                 int nAuthID = 0;
                 try { nAuthID = std::stoi(pick("x-auth-id-level")); }
-                catch (...) {}
+                catch (const std::exception&) { nAuthID = 0; }
                 return HTTPResponse::OK({
                     {"nUserNo",   nUserNo},
                     {"sUserID",   pick("x-auth-user-id")},
