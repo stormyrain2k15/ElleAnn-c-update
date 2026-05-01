@@ -652,8 +652,14 @@ public:
              *     2. Look it up in ElleSystem.dbo.Sessions.
              *     3. If missing → 401.
              *     4. For AUTH_ADMIN, require session.nAuthID ≥ threshold
-             *        (config `http_server.admin_auth_id_threshold`, default 1;
-             *        matches Fiesta convention: 0 = normal user, ≥1 = GM).
+             *        (config `http_server.admin_auth_id_threshold`, default 9).
+             *        nAuthID convention on this server:
+             *          1 = normal user (login allowed)
+             *          5 = admin
+             *          9 = dev
+             *        Threshold defaults to 9 so /api/diag/* is dev-only;
+             *        drop it to 5 in elle_master_config.json if your
+             *        operations admins also need diagnostic endpoints.
              *     5. For AUTH_INTERNAL_ONLY, same + loopback-only peer.
              *     6. Stash identity columns on the request for handlers.
              *     7. Best-effort LastSeenMs touch.
@@ -664,7 +670,7 @@ public:
              *══════════════════════════════════════════════════════════════════*/
             HttpAuthLevel need = matched->auth;
             const int adminThreshold = (int)ElleConfig::Instance().GetInt(
-                "http_server.admin_auth_id_threshold", 1);
+                "http_server.admin_auth_id_threshold", 9);
 
             /* Extract Bearer token from Authorization header.           */
             std::string token;
@@ -1182,7 +1188,7 @@ protected:
                   cfg.rate_limit_rpm, cfg.max_concurrent_connections,
                   cfg.max_ws_frame_bytes, cfg.max_upload_bytes,
                   (long long)ElleConfig::Instance().GetInt(
-                      "http_server.admin_auth_id_threshold", 1));
+                      "http_server.admin_auth_id_threshold", 9));
 
         /* Optional game-DB integration. When `http_server.game_db_dsn` is
          * set, Elle accepts the game's own (sUserID, sUserPW) on the
