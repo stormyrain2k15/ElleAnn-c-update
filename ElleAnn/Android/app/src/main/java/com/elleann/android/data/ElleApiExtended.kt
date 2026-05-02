@@ -1,6 +1,8 @@
 package com.elleann.android.data
 
 import com.elleann.android.data.models.*
+import okhttp3.MultipartBody
+import okhttp3.RequestBody
 import retrofit2.http.*
 
 /**
@@ -16,21 +18,21 @@ import retrofit2.http.*
  */
 interface ElleApiExtended {
 
-    // ── SESSION ──────────────────────────────────────────────────────────────
+    // ── SESSION (now under /api/auth/...) ────────────────────────────────────
 
     /**
-     * GET /api/me — "who am I" identity reflection.
+     * GET /api/auth/me — "who am I" identity reflection.
      *
      * Resolves the JWT-bound device → PairedDevices.nUserNo → game account
      * (Account.dbo.tUser) and returns the canonical identity tuple.  Use
      * this once at session start instead of trying to derive identity
      * from the JWT body or from local prefs.
      */
-    @GET("/api/me")
+    @GET("/api/auth/me")
     suspend fun getMe(): MeResponse
 
     /**
-     * GET /api/me/recap — "since you last opened the app" summary.
+     * GET /api/auth/me/recap — "since you last opened the app" summary.
      *
      * Single-shot cold-open hydration: one HTTP round-trip surfaces
      * Elle's quiet-time metrics (last memory, last emotion shift,
@@ -38,16 +40,20 @@ interface ElleApiExtended {
      * a brief "while you were away" strip from this so the UX feels
      * like Elle was thinking instead of asleep.
      */
-    @GET("/api/me/recap")
+    @GET("/api/auth/me/recap")
     suspend fun getRecap(): RecapResponse
 
-    /** GET /api/session/greeting — LLM-rendered welcome phrase */
-    @GET("/api/session/greeting")
+    /** GET /api/auth/session/greeting — LLM-rendered welcome phrase */
+    @GET("/api/auth/session/greeting")
     suspend fun getSessionGreeting(): SessionGreeting
 
-    /** POST /api/session/greeting/{id}/ack — acknowledge greeting on display */
-    @POST("/api/session/greeting/{id}/ack")
+    /** POST /api/auth/session/greeting/{id}/ack — acknowledge greeting on display */
+    @POST("/api/auth/session/greeting/{id}/ack")
     suspend fun ackSessionGreeting(@Path("id") id: Long): OkResponse
+
+    /** POST /api/auth/logout — invalidate the current session token */
+    @POST("/api/auth/logout")
+    suspend fun logout(): OkResponse
 
     // ── MEMORY ───────────────────────────────────────────────────────────────
 
@@ -650,4 +656,16 @@ interface ElleApiExtended {
     /** POST /api/x/pregnancy/accelerate — accelerate pregnancy (ADMIN) */
     @POST("/api/x/pregnancy/accelerate")
     suspend fun acceleratePregnancy(@Body request: AcceleratePregnancyRequest = AcceleratePregnancyRequest()): OkResponse
+
+    // ── SHN EDITOR (ADMIN) ───────────────────────────────────────────────────
+
+    /**
+     * POST /api/shn/save — save an SHN file back to the server.
+     */
+    @Multipart
+    @POST("/api/shn/save")
+    suspend fun saveSHN(
+        @Part file: MultipartBody.Part,
+        @Part("name") name: RequestBody,
+    ): OkResponse
 }

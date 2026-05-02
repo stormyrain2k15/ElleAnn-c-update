@@ -14,24 +14,25 @@
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
-
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <ProjectGuid>{C1000000-0000-0000-0000-000000000001}</ProjectGuid>
     <RootNamespace>ElleLuaBehavioral</RootNamespace>
     <ProjectName>Elle.Lua.Behavioral</ProjectName>
   </PropertyGroup>
-
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-
   <PropertyGroup Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
     <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
   </PropertyGroup>
-
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-
   <ItemDefinitionGroup>
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -44,11 +45,9 @@
       <AdditionalLibraryDirectories>$(LuaDir)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
-
   <ItemGroup>
     <ClCompile Include="LuaHost.cpp" />
   </ItemGroup>
-
   <!-- Inline Lua 5.4 source compilation. Harmless no-op if files don't exist
        (MSBuild's Include with wildcard only captures present files). When
        the user drops the Lua 5.4 tarball at Lua/lua54/src, these get built
@@ -220,19 +219,16 @@
       <WarningLevel>Level3</WarningLevel>
     </ClCompile>
   </ItemGroup>
-
   <!-- Deploy behavioural scripts next to the exe so LuaHost can load them. -->
   <ItemGroup>
     <None Include="scripts\**\*.lua">
       <DeploymentContent>true</DeploymentContent>
     </None>
   </ItemGroup>
-
   <ItemGroup>
     <ProjectReference Include="..\..\Shared\ElleCore.Shared.vcxproj">
       <Project>{a1000000-0000-0000-0000-000000000001}</Project>
     </ProjectReference>
   </ItemGroup>
-
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

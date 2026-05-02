@@ -10,6 +10,36 @@
 #include <vector>
 #include <algorithm>
 #include <sstream>
+#include <fstream>
+#include <filesystem>
+#include <chrono>
+
+static std::string GoalsFallbackPath() {
+    const std::string base = ElleConfig::Instance().GetString(
+        "goals.fallback_dir", "C:\\ElleAnn\\Goals");
+    const std::string prefix = ElleConfig::Instance().GetString(
+        "goals.fallback_prefix", "Goals");
+    const uint64_t ms = (uint64_t)ELLE_MS_NOW();
+    const uint64_t day = ms / 86400000ULL;
+    const uint64_t chunk = (ms / 1000ULL) / (100000ULL); /* ~100k lines heuristic slot */
+    std::ostringstream fn;
+    fn << prefix << "-" << day << "-" << chunk << ".txt";
+    std::filesystem::path p(base);
+    p /= fn.str();
+    return p.string();
+}
+
+static void AppendGoalFallback(const std::string& line) {
+    try {
+        const std::string path = GoalsFallbackPath();
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+        std::ofstream out(path, std::ios::app);
+        if (!out) return;
+        out << line << "\n";
+    } catch (...) {
+        /* best-effort */
+    }
+}
 
 class GoalEngine {
 public:
@@ -66,10 +96,14 @@ public:
          * didn't exist or belonged to a different goal.                */
         uint64_t dbId = ElleDB::StoreGoalReturningId(goal);
         if (dbId == 0) {
-            ELLE_WARN("StoreGoal failed for '%s'", description.c_str());
-            return 0;
+            /* SQL optional: fall back to file persistence. */
+            goal.id = ELLE_MS_NOW();
+            ELLE_WARN("StoreGoal failed; falling back to file (id=%llu)",
+                      (unsigned long long)goal.id);
+            AppendGoalFallback(std::string("CREATE ") + std::to_string(goal.id) + " " + description);
+        } else {
+            goal.id = dbId;
         }
-        goal.id = dbId;
         m_goals.push_back(goal);
 
         ELLE_INFO("Goal created: [%llu] %s (priority: %d)", goal.id, description.c_str(), priority);
@@ -82,7 +116,9 @@ public:
             if (g.id == goalId) {
                 g.progress = ELLE_CLAMP(progress, 0.0f, 1.0f);
                 g.last_progress_ms = ELLE_MS_NOW();
-                ElleDB::UpdateGoalProgress(goalId, progress);
+                if (!ElleDB::UpdateGoalProgress(goalId, progress)) {
+                    AppendGoalFallback(std::string("PROGRESS ") + std::to_string(goalId) + " " + std::to_string(progress));
+                }
 
                 if (progress >= 1.0f) {
                     g.status = GOAL_COMPLETED;
@@ -92,8 +128,7 @@ public:
                      * restart and UpdateProgress would happily push them
                      * over 100% again.                                   */
                     if (!ElleDB::UpdateGoalStatus(goalId, GOAL_COMPLETED)) {
-                        ELLE_WARN("Goal %llu UpdateGoalStatus(COMPLETED) failed",
-                                  (unsigned long long)goalId);
+                        AppendGoalFallback(std::string("STATUS ") + std::to_string(goalId) + " COMPLETED");
                     }
                     ELLE_INFO("Goal COMPLETED: [%llu] %s", goalId, g.description);
                 }
@@ -185,8 +220,7 @@ public:
                 ELLE_INFO("Goal auto-abandoned (stale): [%llu] %s", g.id, g.description);
                 /* Durable — see UpdateProgress for rationale. */
                 if (!ElleDB::UpdateGoalStatus(g.id, GOAL_ABANDONED)) {
-                    ELLE_WARN("Goal %llu UpdateGoalStatus(ABANDONED) failed",
-                              (unsigned long long)g.id);
+                    AppendGoalFallback(std::string("STATUS ") + std::to_string((unsigned long long)g.id) + " ABANDONED");
                 }
             }
         }

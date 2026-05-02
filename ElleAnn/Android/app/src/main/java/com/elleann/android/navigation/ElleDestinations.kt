@@ -18,27 +18,27 @@ sealed class TopLevelDestination(
     val icon: ImageVector,
     val label: String,
 ) {
-    data object Elle extends TopLevelDestination(
+    data object Elle : TopLevelDestination(
         route = "elle",
         icon  = Icons.Rounded.AutoAwesome,
         label = "Elle",
     )
-    data object Chat extends TopLevelDestination(
+    data object Chat : TopLevelDestination(
         route = "chat",
         icon  = Icons.Rounded.Chat,
         label = "Chat",
     )
-    data object Memory extends TopLevelDestination(
+    data object Memory : TopLevelDestination(
         route = "memory",
         icon  = Icons.Rounded.Memory,
         label = "Memory",
     )
-    data object World extends TopLevelDestination(
+    data object World : TopLevelDestination(
         route = "world",
         icon  = Icons.Rounded.Explore,
         label = "World",
     )
-    data object Dev extends TopLevelDestination(
+    data object Dev : TopLevelDestination(
         route = "dev",
         icon  = Icons.Rounded.Build,
         label = "Dev",
@@ -115,6 +115,7 @@ object ElleRoutes {
     const val DEV_VIDEO_WORKERS = "dev/video-workers"
     const val DEV_LEARNING_ADMIN = "dev/learning"
     const val DEV_ETHICS_ADMIN  = "dev/ethics"
+    const val DEV_SHN_EDITOR    = "dev/shn-editor"
     const val DEV_PIN           = "dev/pin"
 
     // Settings

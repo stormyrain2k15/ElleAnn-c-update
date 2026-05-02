@@ -9,6 +9,7 @@ import androidx.compose.material3.Shapes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -42,12 +43,12 @@ private val IsyaDarkColorScheme = darkColorScheme(
     outlineVariant     = IsyaSilverDeep,
     error              = IsyaError,
     onError            = IsyaCream,
-    errorContainer     = Color(0xFF4A0A0A),
+    errorContainer     = Color(0xFF4A0A0AuL),
     onErrorContainer   = IsyaCream,
     inverseSurface     = IsyaCream,
     inverseOnSurface   = IsyaNight,
     inversePrimary     = IsyaGoldDeep,
-    scrim              = Color(0x99000000),
+    scrim              = Color(0x99000000uL),
 )
 
 // ─── Typography ──────────────────────────────────────────────────────────────
@@ -181,25 +182,25 @@ private val IsyaShapes = Shapes(
 
 // ─── Custom theme extensions ──────────────────────────────────────────────────
 data class IsyaExtendedColors(
-    val gold: androidx.compose.ui.graphics.Color,
-    val goldBright: androidx.compose.ui.graphics.Color,
-    val magic: androidx.compose.ui.graphics.Color,
-    val magicBright: androidx.compose.ui.graphics.Color,
-    val elleViolet: androidx.compose.ui.graphics.Color,
-    val cream: androidx.compose.ui.graphics.Color,
-    val parchment: androidx.compose.ui.graphics.Color,
-    val muted: androidx.compose.ui.graphics.Color,
-    val night: androidx.compose.ui.graphics.Color,
-    val dusk: androidx.compose.ui.graphics.Color,
-    val mist: androidx.compose.ui.graphics.Color,
-    val header: androidx.compose.ui.graphics.Color,
-    val input: androidx.compose.ui.graphics.Color,
-    val silver: androidx.compose.ui.graphics.Color,
-    val silverMid: androidx.compose.ui.graphics.Color,
-    val silverDeep: androidx.compose.ui.graphics.Color,
-    val error: androidx.compose.ui.graphics.Color,
-    val success: androidx.compose.ui.graphics.Color,
-    val warn: androidx.compose.ui.graphics.Color,
+    val gold: Color,
+    val goldBright: Color,
+    val magic: Color,
+    val magicBright: Color,
+    val elleViolet: Color,
+    val cream: Color,
+    val parchment: Color,
+    val muted: Color,
+    val night: Color,
+    val dusk: Color,
+    val mist: Color,
+    val header: Color,
+    val input: Color,
+    val silver: Color,
+    val silverMid: Color,
+    val silverDeep: Color,
+    val error: Color,
+    val success: Color,
+    val warn: Color,
 )
 
 private val LocalIsyaColors = staticCompositionLocalOf {
@@ -267,6 +268,3 @@ fun ElleAnnTheme(
         )
     }
 }
-
-// Needed for color scheme references in IsyaColors.kt from this file
-private typealias Color = androidx.compose.ui.graphics.Color

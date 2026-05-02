@@ -7,6 +7,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -92,7 +94,7 @@ fun IsyaPanel(
                     if (onClose != null) {
                         IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
                             Icon(
-                                imageVector        = androidx.compose.material.icons.Icons.Rounded.Close,
+                                imageVector        = Icons.Rounded.Close,
                                 contentDescription = "Close",
                                 tint               = IsyaMuted,
                                 modifier           = Modifier.size(16.dp),

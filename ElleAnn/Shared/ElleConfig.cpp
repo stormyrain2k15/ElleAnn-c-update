@@ -3,10 +3,16 @@
  ******************************************************************************/
 #include "ElleConfig.h"
 #include "ElleLogger.h"     /* ELLE_WARN / ELLE_INFO macros used below */
+#include "ElleServerInfo.h"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <iostream>
+
+
+/* Lua config loading is implemented in LuaHost (Lua project).
+ * ElleConfig stays dependency-free to keep Shared build simple. */
 
 /* Static null value for safe returns */
 static const JsonValue s_nullValue;
@@ -16,6 +22,58 @@ const JsonValue& JsonValue::operator[](const std::string& key) const {
     auto it = obj_val.find(key);
     return (it != obj_val.end()) ? it->second : s_nullValue;
 }
+
+bool ElleConfig::LoadFromServerInfo(const std::string& serverInfoPath) {
+    ElleServerInfoFile si;
+    std::string err;
+    if (!LoadElleServerInfo(serverInfoPath, si, err)) {
+        ELLE_ERROR("ServerInfo load failed: %s", err.c_str());
+        return false;
+    }
+
+    /* Map: bind/port uses MY_SERVER name if present, else PG_Elle. */
+    const std::string httpKey = !si.my_server_name.empty() ? si.my_server_name : "PG_Elle";
+    auto itHttp = si.servers.find(httpKey);
+    if (itHttp != si.servers.end()) {
+        m_http.bind_address = itHttp->second.host;
+        m_http.port = (uint32_t)std::max(0, itHttp->second.port);
+    }
+
+    /* Map: game auth DB uses ODBC_INFO "Account". */
+    auto itAcc = si.odbc.find("Account");
+    if (itAcc != si.odbc.end()) {
+        /* Preserve existing ODBC driver settings; DSN form is ok. */
+        m_root.obj_val["http_server"].type = JsonType::Object;
+        m_root.obj_val["http_server"].obj_val["game_db_dsn"].type = JsonType::String;
+        m_root.obj_val["http_server"].obj_val["game_db_dsn"].str_val = itAcc->second.dsn;
+    }
+
+    /* SQL pool: use service-specific ODBC name if present; else keep existing.
+     * If you add an ODBC_INFO entry named ElleCore, this will pick it up. */
+    auto itCore = si.odbc.find("ElleCore");
+    if (itCore != si.odbc.end()) {
+        m_service.sql_connection_string = itCore->second.dsn;
+    }
+
+    /* Lua extras live under 9Data/Hero/LuaScript/ElleLua/ (one folder deeper).
+     * Derive from the ServerInfo folder so installs remain portable. */
+    {
+        auto slash = serverInfoPath.find_last_of("\\/");
+        std::string baseDir = (slash == std::string::npos) ? "" : serverInfoPath.substr(0, slash + 1);
+        std::string luaDir = baseDir + "9Data\\Hero\\LuaScript\\ElleLua";
+        m_root.obj_val["lua"].type = JsonType::Object;
+        m_root.obj_val["lua"].obj_val["scripts_directory"].type = JsonType::String;
+        m_root.obj_val["lua"].obj_val["scripts_directory"].str_val = luaDir;
+    }
+
+    m_configPath = serverInfoPath;
+    return true;
+}
+
+// Lua→JSON helpers were removed; ElleConfig stays Lua-free.
+
+// Lua extras loading is handled outside ElleConfig to avoid a hard dependency
+// on Lua headers/libs in the Shared project.
 
 const JsonValue& JsonValue::operator[](size_t index) const {
     if (type != JsonType::Array || index >= arr_val.size()) return s_nullValue;
@@ -269,6 +327,12 @@ bool ElleConfig::Load(const std::string& configPath) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_configPath = configPath;
 
+    /* ServerInfo-style text config (game-compatible). */
+    if (configPath.find("ServerInfo") != std::string::npos &&
+        (configPath.size() >= 4 && configPath.substr(configPath.size() - 4) == ".txt")) {
+        return LoadFromServerInfo(configPath);
+    }
+
     std::ifstream file(configPath);
     if (!file.is_open()) return false;
 
@@ -277,7 +341,11 @@ bool ElleConfig::Load(const std::string& configPath) {
     std::string json = ss.str();
     file.close();
 
-    if (!ParseJSON(json, m_root)) return false;
+    if (!ParseJSON(json, m_root)) {
+        std::cerr << "Config parse failed: " << configPath << "\n";
+        ELLE_ERROR("Config parse failed: %s", configPath.c_str());
+        return false;
+    }
 
     /* Schema guard — fail-closed if any of the required top-level
      * sections are missing or not objects. Previously a typo like
@@ -285,10 +353,12 @@ bool ElleConfig::Load(const std::string& configPath) {
      * because JsonValue operator[] returns a null on missing keys —
      * which Populate* happily treats as "just use defaults", so bad
      * configs shipped without any noise.                              */
-    const char* kRequired[] = { "llm", "emotion", "memory", "http", "services" };
+    const char* kRequired[] = { "llm", "emotions", "memory", "http_server", "services" };
     for (const char* sec : kRequired) {
         const auto& v = m_root[sec];
         if (v.is_null() || v.type != JsonType::Object) {
+            std::cerr << "Config validation failed: missing/invalid section '" << sec
+                      << "' in " << configPath << "\n";
             ELLE_ERROR("Config validation failed: section '%s' is missing or not an object "
                        "in %s — refusing to start with defaults only.",
                        sec, configPath.c_str());
@@ -301,12 +371,15 @@ bool ElleConfig::Load(const std::string& configPath) {
         const auto& llm = m_root["llm"];
         std::string mode = llm["mode"].str_val;
         if (mode != "api" && mode != "local" && mode != "hybrid") {
+            std::cerr << "Config validation failed: llm.mode='" << mode
+                      << "' (must be api|local|hybrid)\n";
             ELLE_ERROR("Config validation failed: llm.mode = '%s' (must be api|local|hybrid)",
                        mode.c_str());
             return false;
         }
         const auto& provs = llm["providers"];
         if (provs.is_null() || provs.type != JsonType::Object || provs.obj_val.empty()) {
+            std::cerr << "Config validation failed: llm.providers must be a non-empty object\n";
             ELLE_ERROR("Config validation failed: llm.providers must be a non-empty object");
             return false;
         }

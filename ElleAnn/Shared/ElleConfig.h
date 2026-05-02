@@ -151,10 +151,11 @@ struct MemoryConfig {
 };
 
 struct HTTPConfig {
-    /* Bind default changed from 0.0.0.0 to 127.0.0.1 — for a local
-     * desktop companion service, external bind should be an explicit
-     * opt-in via config, not a silent default.                         */
-    std::string bind_address = "127.0.0.1";
+    /* Bind default: 0.0.0.0 so the service is reachable from outside the
+     * LAN when the host is placed in a DMZ / port-forwarded. Operators
+     * can still override via http_server.bind_address in config.
+     */
+    std::string bind_address = "0.0.0.0";
     uint32_t    port = 8000;
     std::string ws_path = "/command";
     uint32_t    max_connections = 256;
@@ -182,6 +183,7 @@ public:
     static ElleConfig& Instance();
 
     bool Load(const std::string& configPath);
+    bool LoadFromServerInfo(const std::string& serverInfoPath);
     bool Reload();
     
     void RegisterReloadCallback(std::function<void()> cb);

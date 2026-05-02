@@ -59,6 +59,70 @@
 
 using json = nlohmann::json;
 
+static std::mutex g_diagMx;
+static json g_gameAuthDiag = json::object();
+
+static void SetGameAuthDiag(const json& j) {
+    std::lock_guard<std::mutex> lk(g_diagMx);
+    g_gameAuthDiag = j;
+}
+static json GetGameAuthDiag() {
+    std::lock_guard<std::mutex> lk(g_diagMx);
+    return g_gameAuthDiag;
+}
+
+static void RunGameAuthSelfTest() {
+    json out = {
+        {"ts_ms", (int64_t)ELLE_MS_NOW()},
+        {"configured", false},
+        {"pool_available", false},
+        {"proc_usp_User_loginGame", "unknown"},
+        {"proc_usp_set_login", "unknown"},
+        {"tUser_select", "not_run"}
+    };
+
+    const std::string dsn = ElleConfig::Instance().GetString("http_server.game_db_dsn", "");
+    if (dsn.empty()) {
+        out["error"] = "http_server.game_db_dsn not set";
+        SetGameAuthDiag(out);
+        return;
+    }
+    out["configured"] = true;
+    out["pool_available"] = ElleGameAccountPool::Instance().IsAvailable();
+
+    auto& pool = ElleGameAccountPool::Instance();
+    auto rsProc = pool.Query(
+        "SELECT name FROM sys.objects WHERE type = 'P' AND name IN ('usp_User_loginGame','usp_set_login');");
+    if (rsProc.success) {
+        bool hasLoginGame = false;
+        bool hasSetLogin  = false;
+        for (auto& r : rsProc.rows) {
+            const std::string nm = r.values.size() > 0 ? r.values[0] : "";
+            if (nm == "usp_User_loginGame") hasLoginGame = true;
+            if (nm == "usp_set_login")     hasSetLogin  = true;
+        }
+        out["proc_usp_User_loginGame"] = hasLoginGame ? "present" : "missing";
+        out["proc_usp_set_login"]      = hasSetLogin  ? "present" : "missing";
+    } else {
+        out["proc_check_error"] = rsProc.error;
+    }
+
+    auto rsUser = pool.Query("SELECT TOP 1 nUserNo, sUserID FROM dbo.tUser WITH(NOLOCK);");
+    if (rsUser.success) {
+        out["tUser_select"] = rsUser.rows.empty() ? "ok_empty" : "ok";
+        if (!rsUser.rows.empty()) {
+            auto& r = rsUser.rows[0];
+            out["sample_nUserNo"] = r.GetIntOr(0, 0);
+            out["sample_sUserID"] = r.values.size() > 1 ? r.values[1] : "";
+        }
+    } else {
+        out["tUser_select"] = "failed";
+        out["tUser_error"] = rsUser.error;
+    }
+
+    SetGameAuthDiag(out);
+}
+
 /*──────────────────────────────────────────────────────────────────────────────
  * BASE64 (for WebSocket handshake)
  *──────────────────────────────────────────────────────────────────────────────*/
@@ -323,6 +387,16 @@ struct HTTPResponse {
         return r;
     }
 };
+
+static HTTPResponse InternalErrorResponse(const std::string& detail) {
+    ELLE_ERROR("HTTP 500: %s", detail.c_str());
+#if defined(_DEBUG)
+    return HTTPResponse::Err(500, detail);
+#else
+    (void)detail;
+    return HTTPResponse::Err(500, "internal server error");
+#endif
+}
 
 typedef std::function<HTTPResponse(const HTTPRequest&)> RouteHandler;
 
@@ -631,7 +705,21 @@ public:
 
         if (req.method == "OPTIONS") return HTTPResponse::OK(json::object());
 
-        if (httpCfg.auth_enabled && matched && matched->auth != AUTH_PUBLIC) {
+        const bool noAuth = (ElleConfig::Instance().GetInt("http_server.no_auth", 0) != 0);
+        if (matched && matched->auth != AUTH_PUBLIC) {
+            /* no_auth mode: disable authentication entirely.
+             * Any client can connect; all traffic is treated as one user.
+             * Intended for local/dev pairing only. */
+            if (noAuth) {
+                req.headers["x-auth-nuserno"]   = "1";
+                req.headers["x-auth-user-id"]   = "single";
+                req.headers["x-auth-user-name"] = "Single";
+                req.headers["x-auth-id-level"]  = "9";
+                req.headers["x-auth-device-id"] = "single";
+            }
+        }
+
+        if (!noAuth && httpCfg.auth_enabled && matched && matched->auth != AUTH_PUBLIC) {
             /*══════════════════════════════════════════════════════════════════
              * AUTH GATE — post-Feb-2026 simplification.
              *
@@ -1595,6 +1683,17 @@ private:
      *────────────────────────────────────────────────────────────────────────*/
     void HandleClient(SOCKET clientSocket) {
         try {
+            static std::once_flag s_gameAuthSelfTestOnce;
+            std::call_once(s_gameAuthSelfTestOnce, [](){
+                try { RunGameAuthSelfTest(); }
+                catch (const std::exception& e) {
+                    SetGameAuthDiag({
+                        {"ts_ms", (int64_t)ELLE_MS_NOW()},
+                        {"error", std::string("selftest exception: ") + e.what()}
+                    });
+                }
+            });
+
             int optval = 1;
             setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY,
                        (const char*)&optval, sizeof(optval));
@@ -1702,8 +1801,7 @@ private:
                 closesocket(clientSocket);
             }
         } catch (const std::exception& e) {
-            ELLE_ERROR("HTTP handler exception: %s", e.what());
-            try { SendResponse(clientSocket, HTTPResponse::Err(500, e.what())); }
+            try { SendResponse(clientSocket, InternalErrorResponse(e.what())); }
             catch (const std::exception& se) {
                 ELLE_WARN("HTTP 500 write failed: %s", se.what());
                 closesocket(clientSocket);
@@ -2366,6 +2464,16 @@ private:
          * ================================================================== */
         m_router.Register("POST", "/api/auth/login",
             [this](const HTTPRequest& req) -> HTTPResponse {
+                if (ElleConfig::Instance().GetInt("http_server.no_auth", 0) != 0) {
+                    return HTTPResponse::OK({
+                        {"token", "single"},
+                        {"nUserNo", 1},
+                        {"sUserID", "single"},
+                        {"sUserName", "Single"},
+                        {"nAuthID", 9},
+                        {"created_ms", (int64_t)ELLE_MS_NOW()}
+                    });
+                }
                 std::string username, password, device_id, device_name;
                 try {
                     auto j = json::parse(req.body);
@@ -2460,8 +2568,9 @@ private:
                 if (device_name.empty()) {
                     device_name = id.sUserID;
                 }
-                if (device_name.size() > 256) {
-                    device_name.resize(256);
+                /* Must match ElleSystem.dbo.Sessions.DeviceName NVARCHAR(128). */
+                if (device_name.size() > 128) {
+                    device_name.resize(128);
                 }
 
                 /* ── Mint opaque session token & persist. ──────────
@@ -2483,15 +2592,26 @@ private:
                 sess.last_seen_ms = now;
                 sess.device_name  = device_name;
                 sess.peer_addr    = peer;
+                /* Must match ElleSystem.dbo.Sessions columns.
+                 * Keep this defensive even if upstream guards change. */
+                if (sess.sUserID.size() > 30)   sess.sUserID.resize(30);
+                if (sess.sUserName.size() > 60) sess.sUserName.resize(60);
+                if (sess.device_name.size() > 128) sess.device_name.resize(128);
+                if (sess.peer_addr.size() > 64) sess.peer_addr.resize(64);
                 if (!ElleDB::CreateSession(sess)) {
-                    /* The ElleDB::CreateSession path now logs the actual
-                     * SQL error via ELLE_WARN (see ElleDB_Domain.cpp).
-                     * We still return a generic 500 so the body never
-                     * leaks DB schema info to a remote caller; the
-                     * operator looks at the log for the real cause.
-                     * Common fixes: run ElleAnn_Sessions_Delta.sql; or
-                     * grant the pool login INSERT on ElleCore.dbo.Sessions. */
-                    return HTTPResponse::Err(500, "failed to persist session");
+                    auto probe = ElleSQLPool::Instance().Query(
+                        "SELECT 1 FROM sys.databases WHERE name = 'ElleSystem';");
+                    if (!probe.success || probe.rows.empty()) {
+                        return HTTPResponse::Err(500,
+                            "failed to persist session: missing database ElleSystem (create/restore ElleSystem and dbo.Sessions)");
+                    }
+                    auto probe2 = ElleSQLPool::Instance().Query(
+                        "SELECT 1 FROM ElleSystem.sys.tables WHERE name = 'Sessions' AND schema_id = SCHEMA_ID('dbo');");
+                    if (!probe2.success || probe2.rows.empty()) {
+                        return HTTPResponse::Err(500,
+                            "failed to persist session: missing table ElleSystem.dbo.Sessions");
+                    }
+                    return HTTPResponse::Err(500, "failed to persist session (SQL insert failed)");
                 }
 
                 /* Continuity bump — same hook the old JWT path used to
@@ -2528,6 +2648,9 @@ private:
          * ================================================================== */
         m_router.Register("POST", "/api/auth/logout",
             [](const HTTPRequest& req) -> HTTPResponse {
+                if (ElleConfig::Instance().GetInt("http_server.no_auth", 0) != 0) {
+                    return HTTPResponse::OK({{"ok", true}});
+                }
                 auto it = req.headers.find("x-auth-device-id");
                 if (it != req.headers.end() && !it->second.empty()) {
                     ElleDB::DeleteSession(it->second);
@@ -6346,6 +6469,10 @@ private:
         }, AUTH_PUBLIC);
         m_router.Register("GET", "/api/hal/status", [](const HTTPRequest&) {
             return HTTPResponse::OK({{"hardware", "nominal"}});
+        }, AUTH_PUBLIC);
+
+        m_router.Register("GET", "/api/diag/game-auth", [](const HTTPRequest&) {
+            return HTTPResponse::OK(GetGameAuthDiag());
         }, AUTH_PUBLIC);
         m_router.Register("POST", "/api/admin/reload", [](const HTTPRequest&) {
             try {

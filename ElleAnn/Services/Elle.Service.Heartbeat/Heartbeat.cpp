@@ -66,7 +66,11 @@ protected:
         for (int i = 0; i < ELLE_SERVICE_COUNT; i++) {
             if (i == SVC_HEARTBEAT) continue;
 
-            uint64_t elapsed = now - last[i];
+            /* Guard against clock skew / uninitialized timestamps.
+             * If last[i] is somehow in the future, clamp elapsed to 0
+             * instead of underflowing and producing near-UINT64_MAX.
+             */
+            uint64_t elapsed = (now >= last[i]) ? (now - last[i]) : 0;
 
             if (elapsed > m_deadManMs && healthy[i]) {
                 ELLE_FATAL("DEAD MAN SWITCH: %s not responding for %llums!",
@@ -193,7 +197,7 @@ private:
         }
         ELLE_INFO("=== SERVICE HEALTH SUMMARY ===");
         for (int i = 0; i < ELLE_SERVICE_COUNT; i++) {
-            uint64_t age = now - last[i];
+            uint64_t age = (now >= last[i]) ? (now - last[i]) : 0;
             ELLE_INFO("  %s: %s (last seen %llums ago)",
                       ElleIPC::GetServiceName((ELLE_SERVICE_ID)i),
                       healthy[i] ? "HEALTHY" : "UNHEALTHY", age);

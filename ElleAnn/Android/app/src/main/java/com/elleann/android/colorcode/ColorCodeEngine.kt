@@ -2,6 +2,7 @@ package com.elleann.android.colorcode
 
 import androidx.compose.ui.graphics.Color
 import com.elleann.android.ui.theme.*
+import com.elleann.android.ui.theme.IsyaNight as ThemeIsyaNight
 
 // ─── ColorCode Mode ───────────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ object ColorCodeThemes {
     val Irlen2  = ColorCodeTheme("irlen_2", "Irlen II",Color(0xFF2A1F3D), Color(0xFFEDE8F5))
     val Warm    = ColorCodeTheme("warm",    "Warm",    Color(0xFF2B1F1A), Color(0xFFF5EDE8))
     val HighContrast = ColorCodeTheme("high_contrast","High Contrast",Color(0xFF000000),Color(0xFFFFFFFF))
-    val IsyaNight = ColorCodeTheme("isya_night","Isya Night",IsyaNight, IsyaCream)
+    val IsyaNight = ColorCodeTheme("isya_night","Isya Night", ThemeIsyaNight, IsyaCream)
     val Custom  = ColorCodeTheme("custom",  "Custom",  Color(0xFF1A1A2E), Color(0xFFE8E8F0))
 
     val all: List<ColorCodeTheme> = listOf(

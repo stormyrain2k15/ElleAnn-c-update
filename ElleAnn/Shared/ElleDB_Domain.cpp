@@ -141,17 +141,14 @@ bool StoreMessage(uint64_t convoId, uint32_t role, const std::string& content,
         return false;
     }
 
-    /* STEP 2: Insert the message + bump conversation counters. user_id
-     * comes from the authoritative conversation row, not a fallback.  */
+    /* STEP 2: Insert message (single-statement; avoids ODBC multi-result
+     * cursor-state issues) then bump conversation counters in a separate
+     * statement. */
     auto rs = ElleSQLPool::Instance().QueryParams(
         "INSERT INTO ElleCore.dbo.messages "
         "(conversation_id, user_id, role, content, emotion_detected, emotion_intensity, "
         " created_at, Direction) "
-        "VALUES (?, ?, ?, ?, ?, ?, GETUTCDATE(), ?); "
-        "UPDATE ElleCore.dbo.conversations "
-        "  SET last_message_at = GETUTCDATE(), "
-        "      total_messages  = ISNULL(total_messages,0) + 1 "
-        "  WHERE id = ?;",
+        "VALUES (?, ?, ?, ?, ?, ?, GETUTCDATE(), ?);",
         {
             std::to_string(convoId),
             std::to_string(userId),
@@ -159,14 +156,25 @@ bool StoreMessage(uint64_t convoId, uint32_t role, const std::string& content,
             content,
             dominant,
             std::to_string(topW),
-            direction,
-            std::to_string(convoId)
+            direction
         });
     if (!rs.success) {
         ELLE_ERROR("StoreMessage INSERT failed for conv=%llu role=%s: %s",
                    (unsigned long long)convoId, roleStr.c_str(), rs.error.c_str());
+        return false;
     }
-    return rs.success;
+    auto rs2 = ElleSQLPool::Instance().QueryParams(
+        "UPDATE ElleCore.dbo.conversations "
+        "  SET last_message_at = GETUTCDATE(), "
+        "      total_messages  = ISNULL(total_messages,0) + 1 "
+        "  WHERE id = ?;",
+        { std::to_string(convoId) });
+    if (!rs2.success) {
+        ELLE_WARN("StoreMessage: conversation bump failed for conv=%llu: %s",
+                  (unsigned long long)convoId, rs2.error.c_str());
+        /* Message insert succeeded; don't claim full failure. */
+    }
+    return true;
 }
 
 bool GetConversationHistory(uint64_t convoId,
@@ -225,11 +233,16 @@ bool StoreMemory(const ELLE_MEMORY_RECORD& mem) {
     uint64_t nowMs = ELLE_MS_NOW();
 
     auto r1 = ElleSQLPool::Instance().QueryParams(
+        /* Use OUTPUT INSERTED.id instead of multi-statement
+         * INSERT + SELECT SCOPE_IDENTITY(). This avoids multiple result
+         * sets on a single execute, which is a common trigger for
+         * ODBC 24000 'Invalid cursor state' errors.
+         */
         "INSERT INTO ElleCore.dbo.memory "
         "(memory_type, tier, content, summary, emotional_valence, importance, relevance, "
         " position_x, position_y, position_z, created_ms, last_access_ms) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?); "
-        "SELECT CAST(SCOPE_IDENTITY() AS BIGINT) AS new_id;",
+        "OUTPUT INSERTED.id "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         {
             std::to_string(mem.type),
             std::to_string(mem.tier),
@@ -251,12 +264,11 @@ bool StoreMemory(const ELLE_MEMORY_RECORD& mem) {
 
     int64_t memId = 0;
     if (r1.rows.empty() || !r1.rows[0].TryGetInt(0, memId) || memId <= 0) {
-        /* Session pipelined the INSERT but the SCOPE_IDENTITY() row
-         * didn't come back (driver dropped it across statements, or
-         * the INSERT was rolled back by a trigger we don't know
-         * about). We CANNOT fabricate an id — the caller needs to
-         * know persistence failed.                                  */
-        ELLE_ERROR("StoreMemory: INSERT returned no SCOPE_IDENTITY() row — "
+        /* OUTPUT INSERTED.id should always return exactly one row.
+         * If it doesn't, treat persistence as failed so callers can
+         * retry/alert.
+         */
+        ELLE_ERROR("StoreMemory: INSERT returned no OUTPUT INSERTED.id row — "
                    "reporting failure so caller can retry/alert.");
         return false;
     }
@@ -657,18 +669,30 @@ bool TouchPairedDeviceLastSeen(const std::string& device_id) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
- *  SESSIONS — opaque bearer-token store (Feb 2026 auth simplification).
+ *  SESSIONS — opaque bearer-token store.
  *
- *   All session paths live in ElleCore.dbo.Sessions (v2 of the delta —
- *   moved here from ElleSystem so the pool's existing login can write
- *   without extra cross-DB grants).  The first write auto-creates the
- *   table if the operator hasn't run ElleAnn_Sessions_Delta.sql yet,
- *   so login works out-of-the-box on a fresh install.
+ *   Feb-2026 pivot v2: Sessions lives in ElleCore.dbo (was ElleSystem).
+ *
+ *   The user's v1 version used a workaround where each CreateSession
+ *   opened a dedicated ODBC connection with Database=ElleSystem, built
+ *   SQL by string concatenation, and Execute()'d it.  That was a band-aid
+ *   for two separate problems:
+ *     - cross-DB INSERT into ElleSystem requiring extra grants on the
+ *       pool's login (the real cause of "failed to create session"), and
+ *     - ODBC Driver 18 reportedly throwing 24000 Invalid cursor state
+ *       on cross-DB inserts.
+ *
+ *   Moving the table to ElleCore (the DB the pool is already connected
+ *   to) eliminates BOTH issues.  No Database= override, no dedicated
+ *   connection, no string-concat SQL.  Parameterised QueryParams on the
+ *   existing pool, same login, same grants as Memory writes.  Works
+ *   out-of-the-box on any operator's ElleCore setup.
+ *
+ *   Schema is unchanged — only the DB prefix changes.
  *──────────────────────────────────────────────────────────────────────────────*/
 static void EnsureSessionsTable() {
-    /* Cheap check — runs on every CreateSession.  The IF NOT EXISTS
-     * means the DDL is only issued once; subsequent calls hit the
-     * "table exists" branch and return in microseconds.              */
+    /* Idempotent — runs once per process via std::once_flag, so startup
+     * cost is a single cheap DDL check instead of on every INSERT.      */
     static std::once_flag s_ddlOnce;
     std::call_once(s_ddlOnce, []() {
         auto rs = ElleSQLPool::Instance().Query(
@@ -719,10 +743,6 @@ bool CreateSession(const SessionRow& row) {
             row.peer_addr
         });
     if (!rs.success) {
-        /* Surface the ACTUAL SQL error — previously we just returned
-         * false and the /api/auth/login handler emitted the opaque
-         * "failed to create session" which told the operator nothing
-         * about missing grants, a missing DB, or schema drift.       */
         ELLE_WARN("Sessions INSERT failed for nUserNo=%lld sUserID=\"%s\": %s",
                   (long long)row.nUserNo, row.sUserID.c_str(),
                   rs.error.c_str());

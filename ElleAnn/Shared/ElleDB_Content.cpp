@@ -171,8 +171,8 @@ bool CreateConversation(int32_t user_id, const std::string& title, int32_t& newI
     auto rs = ElleSQLPool::Instance().QueryParams(
         "INSERT INTO ElleCore.dbo.conversations "
         "(user_id, title, started_at, last_message_at, total_messages, is_active) "
-        "VALUES (?, ?, GETUTCDATE(), GETUTCDATE(), 0, 1); "
-        "SELECT CAST(SCOPE_IDENTITY() AS INT);",
+        "OUTPUT INSERTED.id "
+        "VALUES (?, ?, GETUTCDATE(), GETUTCDATE(), 0, 1);",
         { std::to_string(user_id), title });
     if (!rs.success) { ELLE_ERROR("CreateConversation: %s", rs.error.c_str()); return false; }
     if (!rs.rows.empty()) {

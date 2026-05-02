@@ -1,18 +1,9 @@
 package com.elleann.android.navigation
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -24,7 +15,6 @@ import androidx.navigation.navArgument
 import com.elleann.android.AppContainer
 import com.elleann.android.data.AppContainerExtended
 import com.elleann.android.PairingPayload
-import com.elleann.android.PairScreen
 import com.elleann.android.ui.chat.ChatScreen
 import com.elleann.android.ui.chat.ConversationListScreen
 import com.elleann.android.ui.chat.VideoCallScreen
@@ -34,22 +24,18 @@ import com.elleann.android.ui.components.*
 import com.elleann.android.ui.elle.ElleHomeScreen
 import com.elleann.android.ui.memory.MemoryBrowserScreen
 import com.elleann.android.ui.memory.MemoryDetailScreen
+import com.elleann.android.ui.shneditor.SHNScreen
 import com.elleann.android.ui.settings.*
-import com.elleann.android.ui.theme.IsyaGold
-import com.elleann.android.ui.theme.IsyaMagic
-import com.elleann.android.ui.theme.IsyaMuted
-import com.elleann.android.ui.theme.IsyaNight
 import com.elleann.android.ui.world.*
 import com.elleann.android.ui.world.sections.*
+import kotlinx.coroutines.launch
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
- * ElleNavHost — root navigation graph for the ElleAnn companion app.
- *
- * Structure:
- *   - PairScreen (unauthenticated entry point)
- *   - MainScaffold with bottom nav (5 tabs, each with its own back stack)
- *   - Settings (modal overlay accessible from top bar ⚙️)
- *   - Dev tab is PIN-locked — DevPinScreen guards all dev destinations
+ * ElleNavHost — root navigation graph.
+ * Login page removed Feb 2026 for no_auth / injected identity mode.
  */
 @Composable
 fun ElleNavHost(
@@ -61,49 +47,17 @@ fun ElleNavHost(
     prefill: PairingPayload? = null,
 ) {
     val navController = rememberNavController()
-    val startDestination = if (isPaired) ElleRoutes.ELLE else ElleRoutes.PAIR
-
-    // Explicit navigation when isPaired flips false (reauth or manual unpair)
-    // Recomposition alone is not sufficient — the back stack must be cleared explicitly.
-    androidx.compose.runtime.LaunchedEffect(isPaired) {
-        if (!isPaired) {
-            navController.navigate(ElleRoutes.PAIR) {
-                popUpTo(0) { inclusive = true }
-                launchSingleTop = true
-            }
-        }
-    }
 
     NavHost(
         navController    = navController,
-        startDestination = startDestination,
+        startDestination = ElleRoutes.ELLE,
     ) {
-
-        // ── Pair Screen (locked — connection logic untouched) ─────────────────
-        composable(ElleRoutes.PAIR) {
-            PairScreen(
-                container = container,
-                prefill   = prefill,
-                onPaired  = {
-                    onPaired() // WebSocket init handled by MainActivity.onPaired
-                    navController.navigate(ElleRoutes.ELLE) {
-                        popUpTo(ElleRoutes.PAIR) { inclusive = true }
-                    }
-                },
-            )
-        }
-
         // ── Main scaffold with bottom nav ─────────────────────────────────────
         composable(ElleRoutes.ELLE) {
             MainScaffold(
                 container         = container,
                 containerExtended = containerExtended,
-                onUnpair          = {
-                    onUnpair()
-                    navController.navigate(ElleRoutes.PAIR) {
-                        popUpTo(0) { inclusive = true }
-                    }
-                },
+                onUnpair          = onUnpair,
                 onNavigateToSettings = {
                     navController.navigate(ElleRoutes.SETTINGS)
                 },
@@ -141,7 +95,6 @@ fun ElleNavHost(
 
 /**
  * MainScaffold — the persistent bottom-nav shell containing all 5 tabs.
- * Each tab maintains its own independent back stack.
  */
 @Composable
 private fun MainScaffold(
@@ -160,7 +113,6 @@ private fun MainScaffold(
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
-            // Custom IsyaBottomNav replaces Material3 NavigationBar
             val currentRoute = currentDestination?.route ?: ""
             IsyaBottomNav(
                 items = TopLevelDestination.all.map { d ->
@@ -220,6 +172,8 @@ private fun TabNavHost(
         composable(ElleRoutes.ELLE) {
             val ws = containerExtended.webSocketOrNull
             if (ws == null) {
+                // If WS isn't ready, we show a button to retry or connect.
+                // In no_auth mode, we just need the host configured.
                 ConnectionNotReadyScreen(onRetry = { containerExtended.reconnectWebSocketIfNeeded() })
                 return@composable
             }
@@ -382,5 +336,24 @@ private fun TabNavHost(
         composable(ElleRoutes.DEV_VIDEO_WORKERS) { VideoWorkersScreen(containerExtended) { navController.popBackStack() } }
         composable(ElleRoutes.DEV_LEARNING_ADMIN){ LearningAdminScreen(containerExtended) { navController.popBackStack() } }
         composable(ElleRoutes.DEV_ETHICS_ADMIN)  { EthicsAdminScreen(containerExtended) { navController.popBackStack() } }
+
+        composable(ElleRoutes.DEV_SHN_EDITOR) {
+            val scope = rememberCoroutineScope()
+            SHNScreen(
+                onSaveToServer = { bytes, name ->
+                    scope.launch {
+                        runCatching {
+                            val filePart = MultipartBody.Part.createFormData(
+                                "file",
+                                name,
+                                bytes.toRequestBody("application/octet-stream".toMediaType())
+                            )
+                            val namePart = name.toRequestBody("text/plain".toMediaType())
+                            containerExtended.extendedApi.saveSHN(filePart, namePart)
+                        }
+                    }
+                }
+            )
+        }
     }
 }

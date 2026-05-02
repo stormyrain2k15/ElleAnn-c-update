@@ -1034,9 +1034,13 @@ void ElleIdentityCore::LoadFromDatabase() {
 
     /* --- Autobiography (newest-last for chronological replay) --- */
     {
+        /* Source of truth is ElleHeart.dbo.IdentityNarrative (see SQL/ElleAnn_Identity_Schema.sql).
+         * We store each entry with its real authored timestamp.
+         */
         auto rs = ElleSQLPool::Instance().Query(
-            "SELECT entry, written_ms FROM ElleCore.dbo.identity_autobiography "
-            "ORDER BY written_ms ASC;");
+            "SELECT Content, TimestampMs "
+            "FROM ElleHeart.dbo.IdentityNarrative "
+            "ORDER BY TimestampMs ASC;");
         if (rs.success) {
             m_autobiography.clear();
             m_autobiographyTimes.clear();
@@ -1220,56 +1224,63 @@ void ElleIdentityCore::SaveToDatabase() {
 
     uint64_t nowMs = ELLE_MS_NOW();
 
-    /* --- Autobiography: wipe and re-insert, preserving each entry's real
-     * original written_ms. Previously we synthesised the timestamp as
-     * `now - (size - i)` on every save, which rewrote every entry's time
-     * each flush and destroyed the genuine temporal arc. Now we persist
-     * the true millisecond each entry was actually authored. If a
-     * parallel timestamp is missing (shouldn't happen — Append keeps them
-     * in lockstep — but defensive), we synthesise a monotonic fallback
-     * that is strictly BEFORE nowMs.
+    /* --- Autobiography: append-only, ordered by written_ms ---
      *
-     * ATOMICITY: The DELETE and every INSERT run inside a single server-
-     * side transaction so a mid-flush failure rolls back the DELETE
-     * instead of wiping the user's autobiography with nothing to replace
-     * it. The whole batch is driven through ONE QueryParams call so
-     * every statement hits the same ODBC connection — spanning the
-     * transaction across calls isn't safe because the pool could hand
-     * out a different connection on the next call.
-     *
-     * LIMITS: SQL Server caps INSERT...VALUES at 1000 rows per statement
-     * and ~2100 params per batch. We split into 500-row INSERT chunks
-     * (=1000 params) inside the same batch so any plausible lifetime
-     * autobiography fits.                                                */
+     * Source of truth is ElleHeart.dbo.IdentityNarrative
+     * (SQL/ElleAnn_Identity_Schema.sql). We do NOT delete. We insert only
+     * entries newer than the newest TimestampMs in the table.
+     */
     {
-        const size_t kRowsPerInsert = 500;
-        std::string batch =
-            "BEGIN TRY BEGIN TRAN; "
-            "DELETE FROM ElleCore.dbo.identity_autobiography;";
-        std::vector<std::string> params;
-        params.reserve(m_autobiography.size() * 2);
-        for (size_t off = 0; off < m_autobiography.size(); off += kRowsPerInsert) {
-            size_t end = std::min(off + kRowsPerInsert, m_autobiography.size());
-            batch += " INSERT INTO ElleCore.dbo.identity_autobiography "
-                     "(entry, written_ms) VALUES ";
-            for (size_t i = off; i < end; i++) {
-                uint64_t wms = (i < m_autobiographyTimes.size())
-                                 ? m_autobiographyTimes[i] : 0;
-                if (wms == 0) wms = nowMs - (m_autobiography.size() - i);
-                batch += (i == off ? "(?, ?)" : ", (?, ?)");
-                params.push_back(m_autobiography[i]);
-                params.push_back(std::to_string((long long)wms));
+        auto conn = ElleSQLPool::Instance().Acquire(5000);
+        if (!conn) {
+            ELLE_ERROR("Autobiography save FAILED — no SQL connection available. "
+                       "In-memory state has %zu entries; retry scheduled.",
+                       m_autobiography.size());
+        } else {
+            int64_t maxTs = 0;
+            {
+                auto rs = conn->Execute(
+                    "SELECT ISNULL(MAX(TimestampMs), 0) "
+                    "FROM ElleHeart.dbo.IdentityNarrative;");
+                if (rs.success && !rs.rows.empty()) {
+                    maxTs = rs.rows[0].GetIntOr(0, 0);
+                }
             }
-            batch += ";";
-        }
-        batch += " COMMIT; END TRY BEGIN CATCH "
-                 "IF XACT_STATE() <> 0 ROLLBACK; "
-                 "THROW; END CATCH;";
-        auto rs = ElleSQLPool::Instance().QueryParams(batch, params);
-        if (!rs.success) {
-            ELLE_ERROR("Autobiography save FAILED atomically — DB is unchanged. "
-                       "In-memory state has %zu entries; retry scheduled. Err: %s",
-                       m_autobiography.size(), rs.error.c_str());
+
+            bool ok = true;
+            uint32_t inserted = 0;
+            for (size_t i = 0; i < m_autobiography.size(); i++) {
+                uint64_t wms = (i < m_autobiographyTimes.size()) ? m_autobiographyTimes[i] : 0;
+                if (wms == 0) wms = nowMs - (m_autobiography.size() - i);
+                if ((int64_t)wms <= maxTs) continue;
+
+                auto ins = conn->ExecuteParams(
+                    "INSERT INTO ElleHeart.dbo.IdentityNarrative "
+                    "(Content, TimestampMs, SessionNumber) VALUES (?, ?, ?);",
+                    { m_autobiography[i],
+                      std::to_string((long long)wms),
+                      std::to_string((long long)m_feltTime.session_count) });
+
+                if (!ins.success) {
+                    ok = false;
+                    ELLE_ERROR("Autobiography insert failed: %s", ins.error.c_str());
+                    break;
+                }
+                inserted++;
+            }
+
+            ElleSQLPool::Instance().Release(conn);
+
+            if (!ok) {
+                ELLE_ERROR("Autobiography save FAILED — inserts aborted. "
+                           "In-memory state has %zu entries; retry scheduled.",
+                           m_autobiography.size());
+            } else if (inserted > 0) {
+                ELLE_INFO("Autobiography: appended %u new entry(s)", inserted);
+            } else {
+                ELLE_INFO("Autobiography: no new entries to append (maxTs=%lld)",
+                          (long long)maxTs);
+            }
         }
     }
 

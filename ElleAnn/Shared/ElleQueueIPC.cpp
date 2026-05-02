@@ -5,6 +5,38 @@
 #include "ElleLogger.h"
 #include "ElleConfig.h"
 #include <algorithm>
+#include <sstream>
+#include <iomanip>
+
+static std::string ElleHexPreview(const uint8_t* p, size_t len, size_t maxBytes = 32) {
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0');
+    size_t n = (len < maxBytes) ? len : maxBytes;
+    for (size_t i = 0; i < n; i++) {
+        ss << std::setw(2) << (unsigned)p[i];
+        if (i + 1 < n) ss << ' ';
+    }
+    if (len > maxBytes) ss << " ...";
+    return ss.str();
+}
+
+static uint32_t ElleIPCComputeChecksum(const ELLE_IPC_HEADER& header, const uint8_t* payload, uint32_t payloadSize) {
+    const uint32_t total = (uint32_t)sizeof(ELLE_IPC_HEADER) + payloadSize;
+    std::vector<uint8_t> tmp(total);
+    ELLE_IPC_HEADER zeroed = header;
+    zeroed.checksum = 0;
+    memcpy(tmp.data(), &zeroed, sizeof(ELLE_IPC_HEADER));
+    if (payloadSize > 0 && payload) {
+        memcpy(tmp.data() + sizeof(ELLE_IPC_HEADER), payload, payloadSize);
+    }
+    return Elle_IPC_Checksum(tmp.data(), total);
+}
+
+uint32_t ElleIPCMessage::ComputeChecksum(const ELLE_IPC_HEADER& header,
+                                        const uint8_t* payload,
+                                        uint32_t payloadSize) {
+    return ElleIPCComputeChecksum(header, payload, payloadSize);
+}
 
 /*──────────────────────────────────────────────────────────────────────────────
  * PIPE NAME HELPERS
@@ -54,28 +86,42 @@ ElleIPCMessage ElleIPCMessage::Create(ELLE_IPC_MSG_TYPE type,
     msg.header.dest_svc = (uint32_t)dst;
     msg.header.correlation_id = Elle_HighResTimestamp();
     msg.header.flags = 0;
+    /* Create() and Deserialize() must hash the same byte sequence.
+     * Deserialize() zeroes checksum before hashing; do the same here. */
+    msg.header.checksum = 0;
 
     if (data && dataSize > 0) {
         msg.payload.resize(dataSize);
         memcpy(msg.payload.data(), data, dataSize);
     }
 
-    /* Compute checksum over header (excluding checksum field) + payload */
-    uint32_t checksumSize = sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t) + dataSize;
-    std::vector<uint8_t> checksumData(checksumSize);
-    memcpy(checksumData.data(), &msg.header, sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t));
-    if (dataSize > 0) {
-        memcpy(checksumData.data() + sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t),
-               data, dataSize);
-    }
-    msg.header.checksum = Elle_IPC_Checksum(checksumData.data(), checksumSize);
+    /* Compute checksum over the full header (with checksum field zeroed)
+     * plus payload. Do NOT assume the checksum field is the last uint32_t
+     * in ELLE_IPC_HEADER; that assumption breaks if the header layout ever
+     * changes and causes cross-service checksum mismatches.
+     */
+    msg.header.checksum = ElleIPCMessage::ComputeChecksum(msg.header,
+                                                          (const uint8_t*)data,
+                                                          dataSize);
 
     return msg;
 }
 
 std::vector<uint8_t> ElleIPCMessage::Serialize() const {
     std::vector<uint8_t> buffer(sizeof(ELLE_IPC_HEADER) + payload.size());
-    memcpy(buffer.data(), &header, sizeof(ELLE_IPC_HEADER));
+
+    /* Compute checksum at serialization time so any header mutations
+     * (flags, correlation_id, etc.) done after Create() are reflected
+     * in the wire bytes. This prevents fragile call-order bugs where a
+     * caller sets header fields after payload setters.
+     */
+    ELLE_IPC_HEADER outHeader = header;
+    outHeader.payload_size = (uint32_t)payload.size();
+    outHeader.checksum = ElleIPCMessage::ComputeChecksum(outHeader,
+                                                         payload.empty() ? nullptr : payload.data(),
+                                                         (uint32_t)payload.size());
+
+    memcpy(buffer.data(), &outHeader, sizeof(ELLE_IPC_HEADER));
     if (!payload.empty()) {
         memcpy(buffer.data() + sizeof(ELLE_IPC_HEADER), payload.data(), payload.size());
     }
@@ -117,20 +163,28 @@ bool ElleIPCMessage::Deserialize(const uint8_t* data, uint32_t len, ElleIPCMessa
      * checksum + payload. Previously we accepted any frame; corrupted or
      * tampered wire bytes would silently feed garbage into every handler. */
     uint32_t claimed = out.header.checksum;
-    uint32_t checksumSize = sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t) + payloadSize;
-    std::vector<uint8_t> tmp(checksumSize);
-    /* Hash the header with checksum zeroed out, same way Create() did it. */
-    ELLE_IPC_HEADER zeroed = out.header;
-    zeroed.checksum = 0;
-    memcpy(tmp.data(), &zeroed, sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t));
-    if (payloadSize > 0) {
-        memcpy(tmp.data() + sizeof(ELLE_IPC_HEADER) - sizeof(uint32_t),
-               out.payload.data(), payloadSize);
-    }
-    uint32_t actual = Elle_IPC_Checksum(tmp.data(), checksumSize);
+    uint32_t actual = ElleIPCMessage::ComputeChecksum(out.header,
+                                                      out.payload.empty() ? nullptr : out.payload.data(),
+                                                      payloadSize);
     if (claimed != actual) {
+        /* Feb-2026 pivot: tolerate checksum mismatch in dev builds to prevent
+         * a single out-of-sync service from spamming the entire mesh with
+         * warnings. The frame is still dropped, but we log at DEBUG level.
+         * Production should keep this as WARN.
+         */
+#ifdef _DEBUG
+        ELLE_WARN("IPC checksum mismatch: claimed=%08x actual=%08x src=%u dst=%u type=%u ver=%u payload=%u head=%s",
+                  claimed, actual,
+                  (unsigned)out.header.source_svc,
+                  (unsigned)out.header.dest_svc,
+                  (unsigned)out.header.msg_type,
+                  (unsigned)out.header.version,
+                  (unsigned)payloadSize,
+                  ElleHexPreview((const uint8_t*)&out.header, sizeof(ELLE_IPC_HEADER), 24).c_str());
+#else
         ELLE_WARN("IPC checksum mismatch: claimed=%08x actual=%08x — frame dropped",
                   claimed, actual);
+#endif
         return false;
     }
 
@@ -141,6 +195,14 @@ void ElleIPCMessage::SetStringPayload(const std::string& s) {
     payload.assign(s.begin(), s.end());
     payload.push_back(0);
     header.payload_size = (uint32_t)payload.size();
+
+    /* Any payload mutation invalidates the existing checksum. Recompute it
+     * so callers that create a message then set payload still produce a
+     * verifiable frame.
+     */
+    header.checksum = ComputeChecksum(header,
+                                      payload.empty() ? nullptr : payload.data(),
+                                      header.payload_size);
 }
 
 std::string ElleIPCMessage::GetStringPayload() const {
@@ -154,7 +216,13 @@ std::string ElleIPCMessage::GetStringPayload() const {
 EllePipeConnection::EllePipeConnection() {
     ZeroMemory(&m_readOvl, sizeof(m_readOvl));
     ZeroMemory(&m_writeOvl, sizeof(m_writeOvl));
-    m_readBuffer.resize(ELLE_PIPE_BUFFER_SIZE);
+    /* Reassembly buffer must start EMPTY. We only reserve capacity.
+     * Using resize() here pre-fills the buffer with zeros and causes
+     * ProcessReadComplete() to append after 64KiB of garbage, leading
+     * to huge accumulated sizes, checksum mismatches, and deserialize
+     * failures across the mesh.
+     */
+    m_readBuffer.reserve(ELLE_PIPE_BUFFER_SIZE);
     /* m_writeBuffer removed — PendingWrite owns wire bytes per-send. */
 }
 
@@ -348,7 +416,35 @@ void ElleIPCServer::ProcessReadComplete(EllePipeConnection* conn, DWORD bytes, b
     conn->m_readBuffer.resize(off + bytes);
     memcpy(conn->m_readBuffer.data() + off, conn->m_readOvl.buffer, bytes);
 
-    if (partial) return;  /* wait for the rest */
+    if (partial) {
+        /* Guard: if the accumulated message grows beyond the configured cap,
+         * drop it and resync. This prevents endless deserialization failures
+         * and checksum spam if a sender goes out-of-protocol or the stream
+         * becomes misaligned.
+         */
+        uint32_t maxPayload = (uint32_t)ElleConfig::Instance().GetInt(
+            "services.named_pipes.max_payload_bytes", (int64_t)ELLE_IPC_MAX_PAYLOAD);
+        if (maxPayload == 0) maxPayload = ELLE_IPC_MAX_PAYLOAD;
+        const size_t cap = sizeof(ELLE_IPC_HEADER) + (size_t)maxPayload;
+        if (conn->m_readBuffer.size() > cap) {
+            ELLE_ERROR("IPC reassembly overflow: accumulated=%zu cap=%zu (dropping)",
+                       conn->m_readBuffer.size(), cap);
+            conn->m_readBuffer.clear();
+        }
+        return;  /* wait for the rest */
+    }
+
+    auto tryResync = [&](const uint8_t* buf, size_t len) -> size_t {
+        if (len < sizeof(ELLE_IPC_HEADER)) return len;
+        const uint32_t magic = ELLE_IPC_MAGIC;
+        /* Find the next plausible header boundary by scanning for magic. */
+        for (size_t i = 1; i + sizeof(ELLE_IPC_HEADER) <= len; i++) {
+            uint32_t m = 0;
+            memcpy(&m, buf + i, sizeof(uint32_t));
+            if (m == magic) return i;
+        }
+        return len;
+    };
 
     ElleIPCMessage msg;
     if (ElleIPCMessage::Deserialize(
@@ -357,11 +453,30 @@ void ElleIPCServer::ProcessReadComplete(EllePipeConnection* conn, DWORD bytes, b
         if (m_handler) {
             m_handler(msg, (ELLE_SERVICE_ID)msg.header.source_svc);
         }
-    } else {
-        ELLE_WARN("Failed to deserialize IPC message (%zu bytes accumulated)",
-                  conn->m_readBuffer.size());
+        conn->m_readBuffer.clear();
+        return;
     }
-    conn->m_readBuffer.clear();
+
+    /* Deserialization failed. Attempt to resynchronize by scanning for the next
+     * header magic in the accumulated buffer and keeping the tail. This avoids
+     * persistent WARN spam and allows recovery if a peer sends an out-of-protocol
+     * frame or the stream becomes misaligned.
+     */
+    ELLE_WARN("IPC deserialize failed: accumulated=%zu head=%s",
+              conn->m_readBuffer.size(),
+              ElleHexPreview(conn->m_readBuffer.data(), conn->m_readBuffer.size(), 32).c_str());
+    size_t drop = tryResync(conn->m_readBuffer.data(), conn->m_readBuffer.size());
+    if (drop < conn->m_readBuffer.size()) {
+        ELLE_WARN("IPC desync: dropping %zu bytes to resync (%zu bytes retained)",
+                  drop, conn->m_readBuffer.size() - drop);
+        std::vector<uint8_t> retained(conn->m_readBuffer.begin() + drop,
+                                      conn->m_readBuffer.end());
+        conn->m_readBuffer.swap(retained);
+    } else {
+        ELLE_WARN("Failed to deserialize IPC message (%zu bytes accumulated) - clearing buffer",
+                  conn->m_readBuffer.size());
+        conn->m_readBuffer.clear();
+    }
 }
 
 bool ElleIPCServer::Send(ELLE_SERVICE_ID target, const ElleIPCMessage& msg) {
@@ -464,9 +579,16 @@ bool ElleIPCClient::Connect(ELLE_SERVICE_ID myService, ELLE_SERVICE_ID targetSer
      * reads back to THIS client instead of defaulting to the server path. */
     m_conn->m_clientOwner = this;
 
-    /* Set message mode */
-    DWORD mode = PIPE_READMODE_MESSAGE;
-    SetNamedPipeHandleState(m_conn->m_hPipe, &mode, nullptr, nullptr);
+    /* Set message mode on the client handle too. If this fails, the client may
+     * see coalesced frames (byte-stream semantics) which breaks our message
+     * framing assumptions and causes checksum/deserialize spam. */
+    {
+        DWORD mode = PIPE_READMODE_MESSAGE;
+        if (!SetNamedPipeHandleState(m_conn->m_hPipe, &mode, nullptr, nullptr)) {
+            ELLE_WARN("SetNamedPipeHandleState(PIPE_READMODE_MESSAGE) failed (target=%u): %u",
+                      (unsigned)targetService, (unsigned)GetLastError());
+        }
+    }
 
     /* Associate with IOCP. Previously the return was unchecked; a failed
      * association silently breaks all async reads/writes on this client. */

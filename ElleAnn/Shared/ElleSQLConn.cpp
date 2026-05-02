@@ -123,6 +123,14 @@ bool SQLConnection::AllocHandles() {
     ret = SQLAllocHandle(SQL_HANDLE_DBC, m_hEnv, &m_hDbc);
     if (!SQL_SUCCEEDED(ret)) { FreeHandles(); return false; }
 
+    /* Try to enable MARS (Multiple Active Result Sets) if the driver exposes
+     * the SQL Server-specific attributes. Not all headers define these.
+     * If missing, we rely on aggressive cursor draining/closing. */
+#ifdef SQL_COPT_SS_MARS_ENABLED
+    SQLSetConnectAttrA(m_hDbc, SQL_COPT_SS_MARS_ENABLED,
+                       (SQLPOINTER)SQL_MARS_ENABLED_YES, 0);
+#endif
+
     return true;
 }
 
@@ -134,6 +142,13 @@ void SQLConnection::FreeHandles() {
 bool SQLConnection::Connect(const std::string& connectionString) {
     if (m_connected) Disconnect();
     m_connStr = connectionString;
+    /* Workaround for ODBC Driver 18: enable MARS via connection string.
+     * This does not rely on sqlncli-specific header constants.
+     * If already specified, keep caller value. */
+    if (m_connStr.find("MARS_Connection=") == std::string::npos) {
+        if (!m_connStr.empty() && m_connStr.back() != ';') m_connStr.push_back(';');
+        m_connStr += "MARS_Connection=Yes;";
+    }
 
     if (!AllocHandles()) {
         m_lastError = "Failed to allocate ODBC handles";
@@ -152,6 +167,7 @@ bool SQLConnection::Connect(const std::string& connectionString) {
 
     if (!SQL_SUCCEEDED(ret)) {
         m_lastError = GetDiagnostics(SQL_HANDLE_DBC, m_hDbc);
+        ELLE_WARN("SQL connect failed: %s", m_lastError.c_str());
         FreeHandles();
         return false;
     }
@@ -194,24 +210,42 @@ bool SQLConnection::Ping() {
  *────────────────────────────────────────────────────────────────────────────*/
 SQLResultSet SQLConnection::CollectStatementResults(SQLHSTMT hStmt, SQLRETURN execRet) {
     SQLResultSet result;
-
-    /*────────────────────────────────────────────────────────────────────
-     * Helper: drain any pending result sets on early return.  Without
-     * this, bailing on error leaves the connection's statement handle
-     * in a "rowset pending" state and the NEXT query on the same DBC
-     * dies with SQLSTATE 24000.  Applied to every early exit below.
-     *────────────────────────────────────────────────────────────────────*/
-    auto drainMoreResults = [&]() {
+    /* Always drain/close the statement before returning.
+     * ODBC Driver 18 is strict: leaving a cursor open (even on statements
+     * that return no resultset like INSERT) can cause 24000 Invalid cursor
+     * state on the next use of the connection.
+     */
+    auto drainAndClose = [&]() {
         for (;;) {
             SQLRETURN mr = SQLMoreResults(hStmt);
-            if (mr == SQL_NO_DATA || !SQL_SUCCEEDED(mr)) break;
+            if (mr == SQL_NO_DATA) break;
+            if (mr != SQL_SUCCESS && mr != SQL_SUCCESS_WITH_INFO) break;
         }
+        /* SQLCloseCursor may itself fail when no cursor exists; ignore. */
+        SQLCloseCursor(hStmt);
+        SQLFreeStmt(hStmt, SQL_CLOSE);
     };
+
+    /* If the driver says we're in an invalid cursor state already, force
+     * statement cleanup and return a consistent failure. */
+    if (execRet == SQL_ERROR) {
+        SQLINTEGER native = 0;
+        SQLCHAR state[6] = {0};
+        SQLCHAR msg[256] = {0};
+        SQLSMALLINT msgLen = 0;
+        if (SQLGetDiagRecA(SQL_HANDLE_STMT, hStmt, 1, state, &native, msg, sizeof(msg), &msgLen) == SQL_SUCCESS) {
+            if (std::string((char*)state) == "24000") {
+                result.error = "24000: invalid cursor state";
+                drainAndClose();
+                return result;
+            }
+        }
+    }
 
     if (execRet != SQL_SUCCESS && execRet != SQL_SUCCESS_WITH_INFO &&
         execRet != SQL_NO_DATA) {
         result.error = GetDiagnostics(SQL_HANDLE_STMT, hStmt);
-        drainMoreResults();
+        drainAndClose();
         return result;
     }
 
@@ -236,7 +270,7 @@ SQLResultSet SQLConnection::CollectStatementResults(SQLHSTMT hStmt, SQLRETURN ex
         if (fr == SQL_NO_DATA) break;
         if (fr != SQL_SUCCESS && fr != SQL_SUCCESS_WITH_INFO) {
             result.error = GetDiagnostics(SQL_HANDLE_STMT, hStmt);
-            drainMoreResults();
+            drainAndClose();
             return result;
         }
         SQLRow row;
@@ -286,41 +320,9 @@ SQLResultSet SQLConnection::CollectStatementResults(SQLHSTMT hStmt, SQLRETURN ex
     SQLLEN rowCount = 0;
     SQLRowCount(hStmt, &rowCount);
     result.rows_affected = rowCount;
-
-    /*─────────────────────────────────────────────────────────────────────
-     * Drain additional result sets.
-     *
-     * The SQL Server ODBC driver leaves the connection in a busy state
-     * ("cursor state invalid" on the NEXT query) if the current handle
-     * still has more result sets queued.  Stored procs like
-     * `usp_GetLogin` routinely emit:
-     *   (a) a no-result "SET NOCOUNT ON" rowcount,
-     *   (b) the actual SELECT we want,
-     *   (c) the proc's RETURN value as a rowcount.
-     *
-     * We already captured (b) above.  Calling SQLMoreResults() in a
-     * loop until SQL_NO_DATA tells the driver we've taken everything
-     * and lets the subsequent SQLFreeHandle actually release the
-     * cursor.  Without this, the VERY NEXT QueryParams call on the
-     * same pooled connection would die with SQLSTATE 24000 — which
-     * is exactly the "persistent cursor issue" the operator was
-     * hitting on login and on the queue worker.
-     *─────────────────────────────────────────────────────────────────────*/
-    for (;;) {
-        SQLRETURN mr = SQLMoreResults(hStmt);
-        if (mr == SQL_NO_DATA) break;
-        if (!SQL_SUCCEEDED(mr)) {
-            /* Swallow — we already have a successful primary result;
-             * a downstream driver-specific status shouldn't fail the
-             * caller.  Log once so the issue is visible.              */
-            ELLE_WARN("SQLMoreResults drain returned non-success: %s",
-                      GetDiagnostics(SQL_HANDLE_STMT, hStmt).c_str());
-            break;
-        }
-    }
-
     result.success = true;
     m_lastUsed = ELLE_MS_NOW();
+    drainAndClose();
     return result;
 }
 
@@ -340,6 +342,13 @@ SQLResultSet SQLConnection::Execute(const std::string& sql) {
 
     ret = SQLExecDirectA(hStmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
     result = CollectStatementResults(hStmt, ret);
+    /* Defensive: CollectStatementResults closes cursor, but Driver 18 can still
+     * leave statement state uncleared for non-row statements on some paths. */
+    SQLCloseCursor(hStmt);
+    SQLFreeStmt(hStmt, SQL_CLOSE);
+    SQLFreeStmt(hStmt, SQL_RESET_PARAMS);
+    SQLFreeStmt(hStmt, SQL_UNBIND);
+    SQLFreeStmt(hStmt, SQL_CLOSE);
     SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
     return result;
 }
@@ -413,6 +422,16 @@ SQLResultSet SQLConnection::ExecuteParams(const std::string& sql,
 
     ret = SQLExecute(hStmt);
     SQLResultSet rs = CollectStatementResults(hStmt, ret);
+    /* Defensive: ensure cursor is closed regardless of driver quirks. */
+    SQLCloseCursor(hStmt);
+    SQLFreeStmt(hStmt, SQL_CLOSE);
+    /* Hard reset statement state before freeing.
+     * Some drivers are picky about statement cleanup even when we're
+     * freeing the handle.
+     */
+    SQLFreeStmt(hStmt, SQL_RESET_PARAMS);
+    SQLFreeStmt(hStmt, SQL_UNBIND);
+    SQLFreeStmt(hStmt, SQL_CLOSE);
     SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
     return rs;
 }

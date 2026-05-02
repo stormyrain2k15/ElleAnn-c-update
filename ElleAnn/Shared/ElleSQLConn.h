@@ -152,12 +152,6 @@ public:
     uint32_t TotalConnections() const { return m_poolSize; }
     uint64_t TotalQueries() const { return m_totalQueries; }
 
-    /** True if Initialize() succeeded and at least one connection was
-     *  minted. Cheap check used by the passive-mesh reconnector in
-     *  ElleServiceBase::TickReconnector to decide whether to retry
-     *  pool init. Flipped back to false by Shutdown().               */
-    bool IsAvailable() const { return m_initialized; }
-
 private:
     ElleSQLPool() = default;
     ~ElleSQLPool() = default;

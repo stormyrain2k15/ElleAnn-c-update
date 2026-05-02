@@ -29,6 +29,11 @@ struct ElleIPCMessage {
     ELLE_IPC_HEADER header;
     std::vector<uint8_t> payload;
 
+    /* Shared checksum helper implemented in ElleQueueIPC.cpp. */
+    static uint32_t ComputeChecksum(const ELLE_IPC_HEADER& header,
+                                   const uint8_t* payload,
+                                   uint32_t payloadSize);
+
     static ElleIPCMessage Create(ELLE_IPC_MSG_TYPE type, 
                                   ELLE_SERVICE_ID src, 
                                   ELLE_SERVICE_ID dst,
@@ -52,6 +57,11 @@ struct ElleIPCMessage {
         payload.resize(sizeof(T));
         memcpy(payload.data(), &obj, sizeof(T));
         header.payload_size = sizeof(T);
+
+        /* Keep checksum consistent when payload bytes change after Create(). */
+        header.checksum = ComputeChecksum(header,
+                                          payload.empty() ? nullptr : payload.data(),
+                                          header.payload_size);
     }
 
     template<typename T>

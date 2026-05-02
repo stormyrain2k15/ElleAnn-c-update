@@ -8,10 +8,16 @@
 #include "ElleLLM.h"         /* ElleLLMEngine::Instance() used in InitializeCore */
 #include "ElleSQLConn.h"     /* ElleSQLPool::Instance().Reinitialize() in OnConfigReload */
 #include "ElleConfig.h"      /* ElleConfig::Instance().GetService() in OnConfigReload */
+#include "ElleGameAccountDB.h"
 #include <tlhelp32.h>        /* CreateToolhelp32Snapshot / PROCESSENTRY32 */
 #include <iostream>
 #include <sstream>
 #include <chrono>
+#include <algorithm>
+#include <vector>
+#include <Shlwapi.h>
+
+#pragma comment(lib, "Shlwapi.lib")
 
 ElleServiceBase* ElleServiceBase::s_instance = nullptr;
 
@@ -26,6 +32,16 @@ ElleServiceBase::ElleServiceBase(ELLE_SERVICE_ID serviceId, const std::string& s
     ZeroMemory(&m_svcStatus, sizeof(SERVICE_STATUS));
     m_svcStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     m_svcStatus.dwCurrentState = SERVICE_STOPPED;
+}
+
+static std::string GetExeDirPortable() {
+    char exePath[MAX_PATH] = {0};
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    if (exePath[0] == '\0') return "";
+    PathRemoveFileSpecA(exePath);
+    std::string dir(exePath);
+    if (!dir.empty() && dir.back() != '\\' && dir.back() != '/') dir.push_back('\\');
+    return dir;
 }
 
 ElleServiceBase::~ElleServiceBase() {
@@ -473,22 +489,51 @@ bool ElleServiceBase::InitializeCore() {
      * notifies, and the next InterruptibleSleep returns immediately.   */
     m_running.store(true, std::memory_order_release);
 
-    /* 1. Load config */
-    std::string configPath = "elle_master_config.json";
-    /* Try exe directory first */
-    char exePath[MAX_PATH];
+    /* 1. Load config
+     * Portable mode: each service reads a ServerInfo-style text config
+     * from its own folder (same pattern as the game).
+     *
+     * We keep elle_master_config.json as a fallback for dev. */
+    char exePath[MAX_PATH] = {0};
     GetModuleFileNameA(nullptr, exePath, MAX_PATH);
     std::string exeDir(exePath);
     size_t lastSlash = exeDir.find_last_of("\\/");
-    if (lastSlash != std::string::npos) {
-        /* Truncate in place -- was `exeDir = exeDir.substr(0, ...)`
-         * which cppcheck flags as an ineffective self-substring
-         * assignment. Same semantics, no temporary std::string.   */
-        exeDir.resize(lastSlash + 1);
-        configPath = exeDir + "elle_master_config.json";
+    if (lastSlash != std::string::npos) exeDir.resize(lastSlash + 1);
+
+    std::string configPath;
+    {
+        /* Prefer a service-local *ServerInfo.txt (e.g., WMServerInfo.txt).
+         * If none, fall back to the legacy JSON config in the exe dir. */
+        std::vector<std::string> candidates;
+        WIN32_FIND_DATAA fd{};
+        HANDLE h = FindFirstFileA((exeDir + "*ServerInfo*.txt").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                    candidates.push_back(exeDir + fd.cFileName);
+                }
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        /* Heuristic: if multiple exist, prefer one NOT named _ServerInfo.txt
+         * (per-service wrapper like WMServerInfo.txt). */
+        for (auto& c : candidates) {
+            if (c.find("\\_ServerInfo.txt") == std::string::npos &&
+                c.find("/_ServerInfo.txt") == std::string::npos) {
+                configPath = c;
+                break;
+            }
+        }
+        if (configPath.empty() && !candidates.empty()) configPath = candidates[0];
+        if (configPath.empty()) configPath = exeDir + "elle_master_config.json";
     }
 
     if (!ElleConfig::Instance().Load(configPath)) {
+        const DWORD gle = GetLastError();
+        std::cerr << "FATAL: Config load/validation failed: " << configPath
+                  << " (GetLastError=" << gle << ")\n";
+        std::cerr << "Hint: ensure the file is valid JSON and contains required sections: "
+                  << "llm, emotions, memory, http_server, services\n";
         ELLE_ERROR("Failed to load config from: %s", configPath.c_str());
         return false;
     }
@@ -503,55 +548,52 @@ bool ElleServiceBase::InitializeCore() {
     else if (logCfg == "error") logLevel = LOG_ERROR;
 
     ElleLogger::Instance().Initialize(m_serviceId, ELLE_LOG_TARGET_ALL, logLevel);
-    ElleLogger::Instance().SetLogFile(
-        ElleConfig::Instance().GetString("logging.file_path", "C:\\ElleAnn\\Logs\\elle.log"),
+    {
+        char exePath2[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, exePath2, MAX_PATH);
+        std::string exeDir2(exePath2);
+        size_t ls2 = exeDir2.find_last_of("\\/");
+        if (ls2 != std::string::npos) exeDir2.resize(ls2 + 1);
+        std::string defLog = exeDir2 + "debug\\" + m_serviceName + ".log";
+        ElleLogger::Instance().SetLogFile(
+            ElleConfig::Instance().GetString("logging.file_path", defLog),
         (uint32_t)ElleConfig::Instance().GetInt("logging.max_file_size_mb", 100),
         (uint32_t)ElleConfig::Instance().GetInt("logging.max_files", 10)
-    );
-
-    /* 3. Initialize SQL connection pool — NON-FATAL.
-     *
-     *    Pre-pivot this hard-aborted InitializeCore() if the DB was
-     *    unreachable, which meant:
-     *      - SQL Server down → EVERY service refused to start.
-     *      - DB restart → every service crashed, SCM bounced them,
-     *        and cold race-loops ensued.
-     *
-     *    Feb-2026 passive-mesh directive: services must not be bound
-     *    to each other, and SQL is effectively "another peer" from a
-     *    dependency-graph perspective.  So:
-     *      - Initialize() still tries once up front.
-     *      - On failure we log and continue — the per-query path in
-     *        ElleSQLPool already lazy-reconnects on the first call
-     *        after the pool went dark, and Sessions auto-create covers
-     *        the "pool came back but tables weren't migrated" case.
-     *      - A new background SqlReconnect thread re-attempts every
-     *        5s so a pool that comes up mid-run gets wired without a
-     *        service restart.  (Added alongside the IPC reconnector;
-     *        they share InterruptibleSleep for clean shutdown.)      */
-    auto& svcCfg = ElleConfig::Instance().GetService();
-    if (!ElleSQLPool::Instance().Initialize(svcCfg.sql_connection_string, svcCfg.sql_pool_size)) {
-        ELLE_WARN("SQL pool initial connect failed — service will keep "
-                  "running and retry in background. Check "
-                  "service.sql_connection_string in elle_master_config.json.");
-        /* Do NOT return false.  The reconnector handles it.           */
-    } else {
-        ELLE_INFO("SQL pool initialized (%d connections)", svcCfg.sql_pool_size);
+        );
     }
 
-    /* 4. Register this worker in database — soft.  If SQL isn't up
-     *    yet the Heartbeat service will see us bind later through IPC
-     *    and the /api/diag/heartbeats endpoint falls back to the
-     *    in-process wire stamps.  Pre-pivot a failed RegisterWorker
-     *    was silently swallowed anyway; now it's explicit.            */
+    /* 3. Initialize SQL connection pool */
+    auto& svcCfg = ElleConfig::Instance().GetService();
+    if (!ElleSQLPool::Instance().Initialize(svcCfg.sql_connection_string, svcCfg.sql_pool_size)) {
+        std::cerr << "FATAL: SQL pool init failed. Connection string: "
+                  << svcCfg.sql_connection_string << "\n";
+        ELLE_ERROR("Failed to initialize SQL connection pool");
+        return false;
+    }
+    ELLE_INFO("SQL pool initialized (%d connections)", svcCfg.sql_pool_size);
+
+    /* 3b. Initialize optional game Account DB pool (used by /api/auth/login).
+     * If not configured, endpoints will return 503 with a clear message.
+     * Do not fail service startup on this optional dependency. */
+    {
+        const std::string gameDsn = ElleConfig::Instance().GetString(
+            "http_server.game_db_dsn", "");
+        const int gamePoolSize = (int)ElleConfig::Instance().GetInt(
+            "http_server.game_db_pool_size", 4);
+        if (!gameDsn.empty()) {
+            if (!ElleGameAccountPool::Instance().Initialize(
+                    gameDsn, (uint32_t)std::max(1, gamePoolSize))) {
+                ELLE_ERROR("Game Account DB pool init failed (http_server.game_db_dsn set)");
+            }
+        }
+    }
+
+    /* 4. Register this worker in database */
     ElleDB::RegisterWorker(m_serviceId, m_serviceName);
 
-    /* 5. Initialize IPC hub — still fatal.  Unlike SQL, our own IPC
-     *    hub is the thing peers connect TO; without it we can never
-     *    participate in the mesh even after reconnect.  A hub alloc
-     *    failure means Win32 IOCP itself refused to bind, which is
-     *    unrecoverable without a restart.                             */
+    /* 5. Initialize IPC hub */
     if (!m_ipcHub.Initialize(m_serviceId, svcCfg.iocp_threads)) {
+        std::cerr << "FATAL: IPC hub init failed (threads=" << svcCfg.iocp_threads << ")\n";
         ELLE_ERROR("Failed to initialize IPC hub");
         return false;
     }
@@ -723,24 +765,6 @@ void ElleServiceBase::TickReconnector() {
      *
      * The mutex on m_everConnectedTo guards against a future caller
      * (e.g. a status endpoint) wanting to read the live set.        */
-
-    /* SQL pool re-check.  We treat the DB the same as any IPC peer:
-     * if our Acquire() path is reporting the pool down, try to
-     * re-initialise it.  `Reinitialize` is cheap when the pool is
-     * already healthy (it short-circuits inside the pool's own
-     * Initialize path).                                             */
-    if (!ElleSQLPool::Instance().IsAvailable()) {
-        auto& svcCfg = ElleConfig::Instance().GetService();
-        if (!svcCfg.sql_connection_string.empty()) {
-            if (ElleSQLPool::Instance().Reinitialize(
-                    svcCfg.sql_connection_string, svcCfg.sql_pool_size)) {
-                ELLE_INFO("Mesh: SQL pool reconnected");
-                /* Re-register our worker row once we're back. */
-                ElleDB::RegisterWorker(m_serviceId, m_serviceName);
-            }
-        }
-    }
-
     auto deps = GetDependencies();
     for (auto dep : deps) {
         if (!m_running.load()) break;

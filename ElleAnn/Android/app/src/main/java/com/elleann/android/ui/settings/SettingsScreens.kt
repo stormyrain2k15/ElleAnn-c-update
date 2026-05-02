@@ -170,7 +170,7 @@ fun ColorCodeSettingsScreen(onBack: () -> Unit) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     com.elleann.android.colorcode.ColorCodeEngine.grammarLegend.forEach { (label, color) ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            androidx.compose.foundation.Box(
+                            Box(
                                 Modifier.size(12.dp).background(color, CircleShape)
                             )
                             Spacer(Modifier.width(10.dp))
@@ -227,13 +227,5 @@ fun SettingsAboutScreen(onBack: () -> Unit) {
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SettingsRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = IsyaMuted)
-        Text(value, style = MaterialTheme.typography.bodySmall, color = IsyaCream)
     }
 }

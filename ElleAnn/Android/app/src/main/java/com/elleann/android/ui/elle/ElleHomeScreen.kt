@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -320,7 +321,7 @@ fun ElleHomeScreen(
                         Text(
                             text      = si.description,
                             style     = MaterialTheme.typography.bodySmall,
-                            color     = IsyaParchment,
+                            color = IsyaParchment,
                             fontStyle = FontStyle.Italic,
                         )
                     }
@@ -474,9 +475,9 @@ private fun HealthBanner(container: AppContainerExtended) {
     if (!llmDown && !hasIssues) return // Silent when green.
 
     val severe = llmDown
-    val bg = if (severe) androidx.compose.ui.graphics.Color(0xFF3A0D0D)
-             else        androidx.compose.ui.graphics.Color(0xFF3A2A0D)
-    val accent = if (severe) androidx.compose.ui.graphics.Color(0xFFFF6F6F)
+    val bg = if (severe) Color(0xFF3A0D0DuL)
+             else        Color(0xFF3A2A0DuL)
+    val accent = if (severe) Color(0xFFFF6F6FuL)
                  else        IsyaGold
 
     androidx.compose.material3.Surface(
@@ -500,14 +501,14 @@ private fun HealthBanner(container: AppContainerExtended) {
                 Text(
                     "LLM provider \"${h.llm.provider.ifBlank { "—" }}\" is not responding. " +
                         "Add an api_key in elle_master_config.json or wait for the fallback to come up.",
-                    color = androidx.compose.ui.graphics.Color(0xFFFFE8B0),
+                    color = Color(0xFFFFE8B0uL),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
             h.issues.forEach { iss ->
                 Text(
                     "·  $iss",
-                    color = androidx.compose.ui.graphics.Color(0xFFFFE8B0),
+                    color = Color(0xFFFFE8B0uL),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

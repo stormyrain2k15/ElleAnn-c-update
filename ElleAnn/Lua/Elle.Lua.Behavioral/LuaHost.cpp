@@ -16,6 +16,19 @@ extern "C" {
 #include <lualib.h>
 }
 
+static std::string ElleExeDir();
+static std::string ElleRepoRootFromExeDir();
+
+static std::string ElleLuaRoot() {
+    /* Prefer game-compatible path if configured.
+     * Expected: 9Data\Hero\LuaScript\ElleLua (portable, lives next to service). */
+    std::string cfg = ElleConfig::Instance().GetString(
+        "lua.scripts_directory", "");
+    if (!cfg.empty()) return cfg;
+    /* Legacy dev fallback: repo Lua scripts folder. */
+    return ElleRepoRootFromExeDir() + "\\Lua\\Elle.Lua.Behavioral\\scripts";
+}
+
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -24,6 +37,25 @@ extern "C" {
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+
+static std::string ElleExeDir() {
+    char exePath[MAX_PATH] = {0};
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    std::string p(exePath);
+    size_t last = p.find_last_of("\\/");
+    if (last != std::string::npos) p.resize(last);
+    else p.clear();
+    return p;
+}
+
+static std::string ElleRepoRootFromExeDir() {
+    /* Deploy layout: <repo>\Deploy\Debug\x64\Elle.Lua.Behavioral.exe
+     * We want <repo> so we can resolve Lua\... relative to source tree.
+     */
+    std::filesystem::path p(ElleExeDir());
+    for (int i = 0; i < 3 && !p.empty(); i++) p = p.parent_path();
+    return p.string();
+}
 
 class LuaHost {
 public:
@@ -439,8 +471,30 @@ private:
      * used by ReloadScripts() to decide whether to promote the fresh
      * lua_State or roll back.                                           */
     size_t LoadAllScripts() {
-        auto& cfg = ElleConfig::Instance();
-        auto scriptsDir = cfg.GetString("lua.scripts_directory", "Lua\\Elle.Lua.Behavioral\\scripts");
+        auto scriptsDir = ElleLuaRoot();
+
+        /* Services launched by SCM often have CWD = System32. Resolve the
+         * scripts directory relative to the executable directory when a
+         * relative path is configured.
+         */
+        {
+            std::filesystem::path p(scriptsDir);
+            if (p.is_relative()) {
+                std::filesystem::path repoRoot(ElleRepoRootFromExeDir());
+                if (!repoRoot.empty()) {
+                    auto candidate = (repoRoot / p).lexically_normal();
+                    if (std::filesystem::exists(candidate) && std::filesystem::is_directory(candidate)) {
+                        scriptsDir = candidate.string();
+                    } else {
+                        /* Fallback: resolve relative to exe dir (may work if scripts are deployed) */
+                        std::filesystem::path exeBase(ElleExeDir());
+                        if (!exeBase.empty()) {
+                            scriptsDir = (exeBase / p).lexically_normal().string();
+                        }
+                    }
+                }
+            }
+        }
 
         m_loadedScripts.clear();
 

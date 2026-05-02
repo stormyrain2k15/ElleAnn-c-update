@@ -103,9 +103,8 @@ bool AuthenticateUser(const std::string& sUserID,
     if (sUserID.empty() || sUserID.size() > 30) return false;
     if (sUserPW.empty() || sUserPW.size() > 20) return false;
 
-    /* Primary path: EXEC usp_GetLogin.  User directive Feb-2026 —
-     * usp_User_loginWeb was finicky, so go through the shorter
-     * `usp_GetLogin` wrapper the operator installs in Account.
+    /* Primary path: EXEC usp_set_login. Operator directive — go through
+     * the wrapper proc installed in Account.
      *
      * Contract: the proc takes @sUserID + @sUserPW and returns one
      * row with at minimum nUserNo, sUserID, sUserName, bIsBlock,
@@ -118,67 +117,114 @@ bool AuthenticateUser(const std::string& sUserID,
      * log (once) which path was taken, so the operator can tell
      * the proc is missing without the login silently degrading.  */
     {
-        static constexpr const char* kSqlProc =
-            "EXEC usp_GetLogin @sUserID = ?, @sUserPW = ?;";
-        auto rs = pool.QueryParams(kSqlProc, { sUserID, sUserPW });
-        if (rs.success) {
-            if (rs.rows.empty()) return false;   /* bad creds */
-            const auto& r = rs.rows[0];
-            int64_t v = 0;
-            out.nUserNo   = r.TryGetInt(0, v) ? v : 0;
-            out.sUserID   = r.values.size() > 1 ? r[1] : sUserID;
-            out.sUserName = r.values.size() > 2 ? r[2] : "";
-            out.bIsBlock  = (r.values.size() > 3 && r.GetIntOr(3, 0) != 0);
-            out.bIsDelete = (r.values.size() > 4 && r.GetIntOr(4, 0) != 0);
-            out.nAuthID   = r.values.size() > 5
-                             ? (int32_t)r.GetIntOr(5, 0) : 0;
-            out.QX        = (r.values.size() > 6 && !r[6].empty()) ? r[6][0] : 'A';
-            if (out.bIsBlock || out.bIsDelete) return false;
-            if (out.nUserNo <= 0) return false;
-            return true;
+        /* Preferred proc for this environment: usp_User_loginGame.
+         * This proc returns OUTPUT params (no resultset), so call it with
+         * declared locals and then SELECT them as a 1-row result. */
+        {
+            static constexpr const char* kSqlLoginGame =
+                "DECLARE @userNo INT = 0, @authID TINYINT = 0, @block INT = 0, @isLoginable INT = 0; "
+                "EXEC dbo.usp_User_loginGame @userID = ?, @userPW = ?, "
+                "    @userNo = @userNo OUTPUT, @authID = @authID OUTPUT, "
+                "    @block = @block OUTPUT, @isLoginable = @isLoginable OUTPUT; "
+                "SELECT @userNo AS nUserNo, @authID AS nAuthID, @block AS bIsBlock, @isLoginable AS bIsLoginAble;";
+            auto rs = pool.QueryParams(kSqlLoginGame, { sUserID, sUserPW });
+            if (rs.success) {
+                if (rs.rows.empty()) return false;
+                const auto& r = rs.rows[0];
+                int64_t v = 0;
+                out.nUserNo   = r.TryGetInt(0, v) ? v : 0;
+                out.sUserID   = sUserID;
+                out.sUserName = "";
+                out.bIsBlock  = (r.values.size() > 2 && r.GetIntOr(2, 0) != 0);
+                out.bIsDelete = false;
+                out.nAuthID   = (int32_t)(r.values.size() > 1 ? r.GetIntOr(1, 0) : 0);
+                out.QX        = 'A';
+                if (out.bIsBlock) return false;
+                if (out.nUserNo <= 0) return false;
+                return true;
+            }
         }
-        /* Proc not installed / not granted — log and fall through. */
+
+        static constexpr const char* kSqlSetLogin =
+            "EXEC dbo.usp_set_login @sUserID = ?, @sUserPW = ?;";
+        {
+            auto rs = pool.QueryParams(kSqlSetLogin, { sUserID, sUserPW });
+            if (rs.success) {
+                if (rs.rows.empty()) return false;
+                const auto& r = rs.rows[0];
+                int64_t v = 0;
+                out.nUserNo   = r.TryGetInt(0, v) ? v : 0;
+                out.sUserID   = r.values.size() > 1 ? r[1] : sUserID;
+                out.sUserName = r.values.size() > 2 ? r[2] : "";
+                out.bIsBlock  = (r.values.size() > 3 && r.GetIntOr(3, 0) != 0);
+                out.bIsDelete = (r.values.size() > 4 && r.GetIntOr(4, 0) != 0);
+                out.nAuthID   = r.values.size() > 5 ? (int32_t)r.GetIntOr(5, 0) : 0;
+                out.QX        = (r.values.size() > 6 && !r[6].empty()) ? r[6][0] : 'A';
+                if (out.bIsBlock || out.bIsDelete) return false;
+                if (out.nUserNo <= 0) return false;
+                return true;
+            }
+        }
+
+        /* Procs not installed / not granted — log and fall through. */
         static std::once_flag s_procMissingLogged;
         std::call_once(s_procMissingLogged, [&](){
-            ELLE_WARN("usp_GetLogin not available (%s); "
-                      "falling back to direct SELECT on dbo.tUser",
-                      rs.error.c_str());
+            ELLE_WARN("No usable login proc (tried usp_User_loginGame, usp_set_login); "
+                      "falling back to direct SELECT on dbo.tUser");
         });
     }
 
     /* Fallback: direct parameterized SELECT.  Identical semantics to
      * the proc.  ODBC param binding keeps the password out of the
      * SQL text.                                                      */
-    static constexpr const char* kSql =
+    /* Note: some Account DB schemas do NOT have QX. Try with QX first,
+     * then fall back without it on Invalid column errors. */
+    static constexpr const char* kSqlWithQx =
         "SELECT TOP 1 nUserNo, sUserID, sUserName, "
         "       ISNULL(bIsBlock,0) AS bIsBlock, "
         "       ISNULL(bIsDelete,0) AS bIsDelete, "
         "       ISNULL(nAuthID,0) AS nAuthID, "
-        "       ISNULL(QX,'A') AS QX "
+        "       ISNULL(QX,'A')     AS QX "
+        "  FROM dbo.tUser WITH(NOLOCK) "
+        " WHERE sUserID = ? "
+        "   AND sUserPW = ? "
+        "   AND ISNULL(bIsDelete,0) = 0 "
+        "   AND ISNULL(bIsBlock,0)  = 0;";
+    static constexpr const char* kSqlNoQx =
+        "SELECT TOP 1 nUserNo, sUserID, sUserName, "
+        "       ISNULL(bIsBlock,0) AS bIsBlock, "
+        "       ISNULL(bIsDelete,0) AS bIsDelete, "
+        "       ISNULL(nAuthID,0) AS nAuthID "
         "  FROM dbo.tUser WITH(NOLOCK) "
         " WHERE sUserID = ? "
         "   AND sUserPW = ? "
         "   AND ISNULL(bIsDelete,0) = 0 "
         "   AND ISNULL(bIsBlock,0)  = 0;";
 
-    auto rs = pool.QueryParams(kSql, { sUserID, sUserPW });
+    auto rs = pool.QueryParams(kSqlWithQx, { sUserID, sUserPW });
     if (!rs.success) {
-        /* Don't log the password. ID is fine for diagnostics. */
-        ELLE_WARN("game-auth query failed for sUserID=\"%s\": %s",
-                  sUserID.c_str(), rs.error.c_str());
-        return false;
+        /* 42S22 = column not found. Account DB variants omit QX. */
+        if (rs.error.find("42S22") != std::string::npos) {
+            rs = pool.QueryParams(kSqlNoQx, { sUserID, sUserPW });
+        }
+        if (!rs.success) {
+            /* Don't log the password. ID is fine for diagnostics. */
+            ELLE_WARN("game-auth query failed for sUserID=\"%s\": %s",
+                      sUserID.c_str(), rs.error.c_str());
+            return false;
+        }
     }
     if (rs.rows.empty()) return false;
 
     const auto& r = rs.rows[0];
     int64_t v = 0;
     out.nUserNo   = r.TryGetInt(0, v) ? v : 0;
-    out.sUserID   = r[1];
-    out.sUserName = r[2];
+     out.sUserID   = r.values.size() > 1 ? r[1] : sUserID;
+     out.sUserName = r.values.size() > 2 ? r[2] : "";
     out.bIsBlock  = (r.GetIntOr(3, 0) != 0);
     out.bIsDelete = (r.GetIntOr(4, 0) != 0);
     out.nAuthID   = (int32_t)r.GetIntOr(5, 0);
-    out.QX        = r[6].empty() ? 'A' : r[6][0];
+     out.QX        = (r.values.size() > 6 && !r[6].empty()) ? r[6][0] : 'A';
 
     if (out.nUserNo <= 0) return false;
     return true;

@@ -70,6 +70,16 @@ data class SelfImageResponse(
     @SerialName("updated_at") val updatedAt: String = "",
 )
 
+// ── Memory file attach ──────────────────────────────────────────────────────
+/** POST /api/memory/{id}/files — attach a file (path or bytes b64) to a memory */
+@Serializable
+data class AttachFileRequest(
+    @SerialName("file_path") val filePath: String? = null,
+    @SerialName("file_name") val fileName: String? = null,
+    @SerialName("mime_type") val mimeType: String? = null,
+    @SerialName("file_b64")  val fileB64:  String? = null,
+)
+
 // ════════════════════════════════════════════════════════════════════════════
 // EMOTION MODELS
 // Source: EmotionHistory, /api/emotions, /api/emotional-context/*
@@ -124,6 +134,14 @@ data class VocabularyTerm(
 @Serializable
 data class EmotionGrowthResponse(
     val growth: List<Map<String, Float>> = emptyList(),
+)
+
+// ── Emotion dimension manual set ────────────────────────────────────────────
+/** PUT /api/emotions/dimensions/{name} — manually set a dimension's value */
+@Serializable
+data class SetEmotionDimensionRequest(
+    val value:    Float,
+    val baseline: Float? = null,
 )
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -355,9 +373,10 @@ data class AnalyzeEmotionResponse(
 data class Agent(
     val id: Int = 0,
     val name: String,
-    val description: String? = null,
+    val description: String = "",
     @SerialName("system_prompt") val systemPrompt: String? = null,
     val model: String? = null,
+    @SerialName("model_override") val modelOverride: String? = null,
 )
 
 @Serializable
@@ -382,9 +401,10 @@ data class AgentChatRequest(val message: String)
 data class AiTool(
     val id: Int = 0,
     val name: String,
-    val description: String? = null,
+    val description: String = "",
     val config: String? = null,
     val enabled: Boolean = true,
+    @SerialName("parameters_json") val parametersJson: String? = null,
 )
 
 @Serializable
@@ -404,19 +424,36 @@ data class CreateToolRequest(
 @Serializable
 data class HardwareInfo(
     val hardware: String = "nominal",
+    @SerialName("cpu_model") val cpuModel: String = "Unknown",
+    @SerialName("gpu_model") val gpuModel: String = "Unknown",
+    @SerialName("ram_total_gb") val ramTotalGb: Int = 0,
+    @SerialName("os_version") val osVersion: String = "Unknown",
 )
 
 @Serializable
 data class HardwareAction(
     val id: Long,
-    @SerialName("action_type") val actionType: String,
+    @SerialName("action_type") val action: String,
     val status: String,
-    val payload: String? = null,
+    @SerialName("payload") val params: String = "",
+    @SerialName("created_at") val createdAt: String = "",
 )
 
 @Serializable
 data class PendingActionsResponse(
     val actions: List<HardwareAction> = emptyList(),
+)
+
+@Serializable
+data class ClaimHardwareActionRequest(
+    @SerialName("worker_id") val workerId: String,
+)
+
+@Serializable
+data class CompleteHardwareActionRequest(
+    val success: Boolean,
+    val result: String? = null,
+    val error: String? = null,
 )
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -492,9 +529,10 @@ data class DictionaryWord(
 
 @Serializable
 data class DictionaryStats(
-    val total: Int = 0,
+    @SerialName("total") val totalWords: Int = 0,
     val status: String = "",
     val loaded: Int = 0,
+    @SerialName("last_update") val lastUpdate: String = "",
 )
 
 @Serializable
@@ -504,6 +542,7 @@ data class DictionaryLoadStatus(
     val failed: Int = 0,
     val skipped: Int = 0,
     @SerialName("last_word") val lastWord: String? = null,
+    val progress: Float = 0f,
 )
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -518,6 +557,10 @@ data class ModelSlot(
     val model: String,
     val enabled: Boolean = true,
     @SerialName("last_ping_ms") val lastPingMs: Long? = null,
+    @SerialName("model_name") val modelName: String = "",
+    val address: String = "",
+    val port: Int = 0,
+    @SerialName("is_primary") val isPrimary: Boolean = false,
 )
 
 @Serializable
@@ -533,6 +576,10 @@ data class ModelWorker(
     @SerialName("worker_id") val workerId: Int,
     @SerialName("service_id") val serviceId: Int,
     val status: String,
+    val hostname: String = "",
+    @SerialName("model_name") val modelName: String = "",
+    @SerialName("vram_used_mb") val vramUsedMb: Int = 0,
+    @SerialName("vram_total_mb") val vramTotalMb: Int = 0,
 )
 
 @Serializable
@@ -593,6 +640,9 @@ data class ServerSettings(
     val port: Int = 8000,
     val model: String = "",
     val version: String = "",
+    @SerialName("bind_port") val bindPort: Int = 8000,
+    @SerialName("primary_model") val primaryModel: String = "",
+    @SerialName("max_connections") val maxConnections: Int = 0,
 )
 
 @Serializable
@@ -618,15 +668,17 @@ data class LogEntry(
 data class LogListResponse(val logs: List<LogEntry> = emptyList())
 
 @Serializable
-data class Backup(
+data class BackupInfo(
     val id: Int,
     val path: String,
     @SerialName("created_at") val createdAt: String,
     val size: Long? = null,
+    @SerialName("file_name") val fileName: String = "",
+    @SerialName("size_bytes") val sizeBytes: Long = 0,
 )
 
 @Serializable
-data class BackupListResponse(val backups: List<Backup> = emptyList())
+data class BackupListResponse(val backups: List<BackupInfo> = emptyList())
 
 @Serializable
 data class DiagQueue(
@@ -643,6 +695,8 @@ data class RouteEntry(
     val method: String,
     val pattern: String,
     val auth: String,
+    @SerialName("path") val path: String = "",
+    val handler: String = "",
 )
 
 @Serializable
@@ -746,6 +800,7 @@ data class PairedDevice(
     @SerialName("device_name") val deviceName: String,
     @SerialName("device_id") val deviceId: String,
     @SerialName("paired_at_ms") val pairedAtMs: Long,
+    @SerialName("last_active") val lastActive: String = "",
 )
 
 @Serializable
@@ -1062,40 +1117,6 @@ data class AttemptConceptionRequest(
 @Serializable
 data class AcceleratePregnancyRequest(
     val days: Int = 1,
-)
-
-// ── Memory file attach ──────────────────────────────────────────────────────
-/** POST /api/memory/{id}/files — attach a file (path or bytes b64) to a memory */
-@Serializable
-data class AttachFileRequest(
-    @SerialName("file_path") val filePath: String? = null,
-    @SerialName("file_name") val fileName: String? = null,
-    @SerialName("mime_type") val mimeType: String? = null,
-    @SerialName("file_b64")  val fileB64:  String? = null,
-)
-
-// ── Emotion dimension manual set ────────────────────────────────────────────
-/** PUT /api/emotions/dimensions/{name} — manually set a dimension's value */
-@Serializable
-data class SetEmotionDimensionRequest(
-    val value:    Float,
-    val baseline: Float? = null,
-)
-
-// ── Hardware action queue ───────────────────────────────────────────────────
-/** POST /api/hardware/actions/{id}/claim — worker claims an action */
-@Serializable
-data class ClaimHardwareActionRequest(
-    @SerialName("worker_id") val workerId: String,
-)
-
-/** POST /api/hardware/actions/{id}/complete — worker reports completion */
-@Serializable
-data class CompleteHardwareActionRequest(
-    @SerialName("worker_id") val workerId: String,
-    val success: Boolean,
-    val output:  String? = null,
-    val error:   String? = null,
 )
 
 // ── Learning subjects + milestones ──────────────────────────────────────────

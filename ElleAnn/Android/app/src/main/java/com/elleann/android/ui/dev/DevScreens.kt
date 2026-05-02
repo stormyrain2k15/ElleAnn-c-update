@@ -28,6 +28,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.elleann.android.data.AppContainerExtended
+import com.elleann.android.data.ElleApiExtended
 import com.elleann.android.data.models.*
 import com.elleann.android.navigation.ElleRoutes
 import com.elleann.android.ui.components.*
@@ -173,6 +174,7 @@ fun DevDashboardScreen(
         DevSection("Video Workers", "Job queue, worker status",        ElleRoutes.DEV_VIDEO_WORKERS),
         DevSection("Learning Admin","Add subjects, skills",             ElleRoutes.DEV_LEARNING_ADMIN),
         DevSection("Ethics Admin",  "Add / remove moral rules",         ElleRoutes.DEV_ETHICS_ADMIN),
+        DevSection("SHN Editor",    "Edit Fiesta .shn data tables",     ElleRoutes.DEV_SHN_EDITOR),
     )
 
     Scaffold(
@@ -310,40 +312,53 @@ fun ServiceStatusScreen(container: AppContainerExtended, onBack: () -> Unit) {
 @Composable
 fun DiagnosticsScreen(container: AppContainerExtended, onBack: () -> Unit) {
     var routes by remember { mutableStateOf<List<RouteEntry>>(emptyList()) }
-    var routeCount by remember { mutableStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var search by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
-        runCatching { container.api(admin=true).getDiagRoutes() }.onSuccess { r -> routes = r.routes; routeCount = r.count }
+        runCatching { container.api(true).getDiagRoutes() }.onSuccess { routes = it.routes }
         loading = false
     }
 
-    val filtered = if (search.isBlank()) routes else routes.filter { it.pattern.contains(search, ignoreCase = true) }
-
-    DevScaffold("Diagnostics  ($routeCount routes)", onBack) { padding ->
-        if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
+    DevScaffold("Route Manifest", onBack) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             OutlinedTextField(
-                value = search, onValueChange = { search = it },
-                placeholder = { Text("Filter routes…", color = Color(0xFF3A7A3A), fontSize = 12.sp) },
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                value = search,
+                onValueChange = { search = it },
+                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                placeholder = { Text("Filter routes...", color = Color(0xFF3A7A3A)) },
+                leadingIcon = { Icon(Icons.Rounded.Search, null, tint = Color(0xFF3A7A3A)) },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color(0xFF00FF88), unfocusedTextColor = Color(0xFF00FF88),
-                    focusedBorderColor = Color(0xFF00FF88), unfocusedBorderColor = Color(0xFF1A4A1A),
-                    focusedContainerColor = Color(0xFF0D2B0D), unfocusedContainerColor = Color(0xFF0D2B0D),
-                    cursorColor = Color(0xFF00FF88),
+                    focusedBorderColor = Color(0xFF00FF88), unfocusedBorderColor = Color(0xFF3A7A3A),
+                    focusedContainerColor = Color(0xFF0A1A0A), unfocusedContainerColor = Color(0xFF0A1A0A),
                 ),
-                singleLine = true,
+                shape = RoundedCornerShape(10.dp)
             )
-            LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp)) {
-                items(filtered) { route ->
-                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp, horizontal = 8.dp)) {
-                        Text(route.method, modifier = Modifier.width(50.dp), style = MaterialTheme.typography.labelSmall, color = when (route.method) { "GET" -> Color(0xFF00FF88); "POST" -> IsyaGold; "PUT" -> IsyaMagic; "DELETE" -> IsyaError; else -> IsyaMuted }, fontFamily = FontFamily.Monospace)
-                        Text(route.pattern, style = MaterialTheme.typography.labelSmall, color = Color(0xFFCCFFCC), fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(route.auth, style = MaterialTheme.typography.labelSmall, color = Color(0xFF3A7A3A), fontFamily = FontFamily.Monospace)
+
+            if (loading) { IsyaLoadingIndicator(Modifier.fillMaxWidth().padding(32.dp)) }
+            else {
+                LazyColumn(contentPadding = PaddingValues(bottom = 16.dp)) {
+                    item {
+                        Text("${routes.size} active routes", color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 16.dp, bottom = 8.dp))
                     }
-                    Divider(color = Color(0xFF1A4A1A), thickness = 0.5.dp)
+                    val filtered = routes.filter { it.path.contains(search, true) || it.method.contains(search, true) }
+                    items(filtered) { r ->
+                        val methodColor = when (r.method) {
+                            "GET" -> Color(0xFF00FF88)
+                            "POST" -> Color(0xFF00AAFF)
+                            "PUT" -> IsyaWarn
+                            "DELETE" -> IsyaError
+                            else -> IsyaMuted
+                        }
+                        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(r.method, color = methodColor, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(48.dp))
+                                Text(r.path, color = Color(0xFFCCFFCC), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                            }
+                            Text(r.handler, color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, modifier = Modifier.padding(start = 48.dp))
+                        }
+                    }
                 }
             }
         }
@@ -355,102 +370,59 @@ fun DiagnosticsScreen(container: AppContainerExtended, onBack: () -> Unit) {
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun ApiExplorerScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var url by remember { mutableStateOf("/api/server/status") }
-    var response by remember { mutableStateOf("") }
-    var loading by remember { mutableStateOf(false) }
-
     DevScaffold("API Explorer", onBack) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
-            OutlinedTextField(
-                value = url, onValueChange = { url = it },
-                label = { Text("Endpoint path", color = Color(0xFF3A7A3A)) },
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color(0xFF00FF88), unfocusedTextColor = Color(0xFF00FF88),
-                    focusedBorderColor = Color(0xFF00FF88), unfocusedBorderColor = Color(0xFF1A4A1A),
-                    focusedContainerColor = Color(0xFF0D2B0D), unfocusedContainerColor = Color(0xFF0D2B0D),
-                    cursorColor = Color(0xFF00FF88),
-                ),
-                singleLine = true,
-            )
-            Spacer(Modifier.height(8.dp))
-            IsyaButton(
-                text = "GET", loading = loading,
-                onClick = {
-                    loading = true
-                    scope.launch {
-                        /* Move the OkHttp blocking call off the Compose
-                         * Main dispatcher to keep the UI responsive
-                         * during slow / timing-out requests. The string
-                         * body is read inside the IO scope and the
-                         * resulting plain String is what crosses the
-                         * dispatcher boundary back to Main.            */
-                        val result = withContext(Dispatchers.IO) {
-                            runCatching {
-                                val stored = container.tokenStore.load()
-                                    ?: return@runCatching "Not paired"
-                                val reqUrl = "http://${stored.host}:${stored.port}$url"
-                                val req = okhttp3.Request.Builder().url(reqUrl)
-                                    .addHeader("Authorization", "Bearer ${stored.jwt}")
-                                    .build()
-                                container.rawHttpClient.newCall(req).execute().use { resp ->
-                                    resp.body?.string() ?: "(empty)"
-                                }
-                            }
-                        }
-                        response = result.getOrElse { "Error: ${it.message}" }
-                        loading = false
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(12.dp))
-            Text("Response:", style = MaterialTheme.typography.labelSmall, color = Color(0xFF3A7A3A))
-            Spacer(Modifier.height(4.dp))
-            Surface(modifier = Modifier.fillMaxWidth().weight(1f), shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D)) {
-                Text(
-                    response.ifBlank { "—" },
-                    modifier = Modifier.padding(12.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFCCFFCC),
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
+        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            Text("Interactive swagger-style explorer coming soon.", color = Color(0xFF3A7A3A))
         }
     }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// HARDWARE SCREEN
+// HARDWARE / HAL
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun HardwareScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    var pending by remember { mutableStateOf<List<HardwareAction>>(emptyList()) }
     var info by remember { mutableStateOf<HardwareInfo?>(null) }
+    var actions by remember { mutableStateOf<List<HardwareAction>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
         runCatching { container.extendedApi.getHardwareInfo() }.onSuccess { info = it }
-        runCatching { container.extendedApi.getPendingHardwareActions() }.onSuccess { pending = it.actions }
+        runCatching { container.api(true).getPendingHardwareActions() }.onSuccess { actions = it.actions }
         loading = false
     }
 
-    DevScaffold("Hardware", onBack) { padding ->
+    DevScaffold("Hardware / HAL", onBack) { padding ->
         if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
-                Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
-                    Text("HAL Status: ${info?.hardware ?: "unknown"}", modifier = Modifier.padding(12.dp), color = Color(0xFF00FF88), fontFamily = FontFamily.Monospace)
+                Text("System Info", color = Color(0xFF00FF88), style = MaterialTheme.typography.labelLarge)
+                info?.let { i ->
+                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("CPU: ${i.cpuModel}", color = Color(0xFFCCFFCC), style = MaterialTheme.typography.bodySmall)
+                            Text("GPU: ${i.gpuModel}", color = Color(0xFFCCFFCC), style = MaterialTheme.typography.bodySmall)
+                            Text("RAM: ${i.ramTotalGb} GB", color = Color(0xFFCCFFCC), style = MaterialTheme.typography.bodySmall)
+                            Text("Kernel: ${i.osVersion}", color = Color(0xFFCCFFCC), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                 }
             }
-            item { Text("PENDING ACTIONS  (${pending.size})", color = Color(0xFF00FF88), style = MaterialTheme.typography.labelMedium) }
-            items(pending, key = { it.id }) { action ->
+            item {
+                Text("Pending Action Queue", color = Color(0xFF00FF88), style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp))
+            }
+            if (actions.isEmpty()) {
+                item { Text("Queue empty", color = Color(0xFF3A7A3A), style = MaterialTheme.typography.bodySmall) }
+            }
+            items(actions) { action ->
                 Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text("#${action.id}  ${action.actionType}", color = Color(0xFF00FF88), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                        Text("Status: ${action.status}", color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-                        action.payload?.let { Text(it, color = Color(0xFFCCFFCC), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, maxLines = 2) }
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text(action.action, color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                            Text("ID: ${action.id}", color = Color(0xFF3A7A3A), fontSize = 10.sp)
+                        }
+                        Text(action.params, color = Color(0xFFCCFFCC), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        Text("Created: ${action.createdAt}", color = Color(0xFF3A7A3A), fontSize = 10.sp)
                     }
                 }
             }
@@ -459,54 +431,54 @@ fun HardwareScreen(container: AppContainerExtended, onBack: () -> Unit) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// MODELS SCREEN
+// MODELS / WORKERS
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun ModelsScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    var slots by remember { mutableStateOf<List<ModelSlot>>(emptyList()) }
     var workers by remember { mutableStateOf<List<ModelWorker>>(emptyList()) }
-    var cacheStats by remember { mutableStateOf<TokenCacheStats?>(null) }
-    var personality by remember { mutableStateOf<PersonalityResponse?>(null) }
+    var slots by remember { mutableStateOf<List<ModelSlot>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
-        runCatching { container.extendedApi.getModelSlots() }.onSuccess { slots = it.slots }
-        runCatching { container.extendedApi.getModelWorkers() }.onSuccess { workers = it.workers }
-        runCatching { container.extendedApi.getTokenCacheStats() }.onSuccess { cacheStats = it }
-        runCatching { container.extendedApi.getPersonality() }.onSuccess { personality = it }
+        runCatching { container.api(true).getModelWorkers() }.onSuccess { workers = it.workers }
+        runCatching { container.api(true).getModelSlots() }.onSuccess { slots = it.slots }
         loading = false
     }
 
-    DevScaffold("Models", onBack) { padding ->
+    DevScaffold("Models / Slots", onBack) { padding ->
         if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item {
-                cacheStats?.let { cs ->
-                    IsyaPanel(title = "TOKEN CACHE") {
-                        Text("Size: ${cs.cacheSize}  Hit rate: ${"%.1f".format(cs.hitRate * 100)}%", color = Color(0xFF00FF88), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item { Text("Model Slots", color = Color(0xFF00FF88), style = MaterialTheme.typography.labelLarge) }
+            items(slots) { slot ->
+                Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
+                    Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column {
+                            Text("Slot ${slot.slotNumber}: ${slot.modelName}", color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                            Text("Address: ${slot.address}:${slot.port}", color = Color(0xFF3A7A3A), fontSize = 10.sp)
+                        }
+                        Text(if (slot.isPrimary) "PRIMARY" else "BACKUP", color = if (slot.isPrimary) IsyaGold else Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
-            item { Text("MODEL SLOTS", color = Color(0xFF00FF88), style = MaterialTheme.typography.labelMedium) }
-            items(slots, key = { it.slotNumber }) { slot ->
+            item { Text("Workers", color = Color(0xFF00FF88), style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 8.dp)) }
+            items(workers) { worker ->
                 Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text("#${slot.slotNumber}  ${slot.name}", color = Color(0xFF00FF88), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                        Text("${slot.model}  @  ${slot.endpoint}", color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(if (slot.enabled) "ENABLED" else "disabled", color = if (slot.enabled) Color(0xFF00FF88) else IsyaError, style = MaterialTheme.typography.labelSmall)
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text(worker.hostname, color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                            Text(worker.status, color = if (worker.status == "ONLINE") Color(0xFF00FF88) else IsyaError, style = MaterialTheme.typography.labelSmall)
+                        }
+                        Text("Model: ${worker.modelName}", color = Color(0xFFCCFFCC), fontSize = 11.sp)
+                        Text("VRAM: ${worker.vramUsedMb}/${worker.vramTotalMb} MB", color = Color(0xFF3A7A3A), fontSize = 10.sp)
                     }
                 }
-            }
-            item { Text("WORKERS  (${workers.size})", color = Color(0xFF00FF88), style = MaterialTheme.typography.labelMedium) }
-            items(workers, key = { it.workerId }) { w ->
-                Text("Worker #${w.workerId}  svc:${w.serviceId}  ${w.status}", color = Color(0xFFCCFFCC), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
             }
         }
     }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// AGENTS SCREEN
+// AGENTS
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun AgentsScreen(container: AppContainerExtended, onBack: () -> Unit) {
@@ -518,13 +490,16 @@ fun AgentsScreen(container: AppContainerExtended, onBack: () -> Unit) {
         loading = false
     }
 
-    DevScaffold("Agents", onBack) { padding ->
+    DevScaffold("Agent Personas", onBack) { padding ->
         if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(agents, key = { it.id }) { agent ->
-                IsyaPanel(title = agent.name) {
-                    agent.description?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = IsyaCream) }
-                    agent.model?.let { Spacer(Modifier.height(4.dp)); Text("Model: $it", style = MaterialTheme.typography.labelSmall, color = IsyaMuted, fontFamily = FontFamily.Monospace) }
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(agents) { agent ->
+                Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(agent.name, color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                        Text(agent.description, color = Color(0xFFCCFFCC), fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text("Model Override: ${agent.modelOverride ?: "None"}", color = Color(0xFF3A7A3A), fontSize = 10.sp)
+                    }
                 }
             }
         }
@@ -532,7 +507,7 @@ fun AgentsScreen(container: AppContainerExtended, onBack: () -> Unit) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// TOOLS SCREEN
+// TOOLS
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun ToolsScreen(container: AppContainerExtended, onBack: () -> Unit) {
@@ -544,18 +519,15 @@ fun ToolsScreen(container: AppContainerExtended, onBack: () -> Unit) {
         loading = false
     }
 
-    DevScaffold("Tools", onBack) { padding ->
+    DevScaffold("AI Tools", onBack) { padding ->
         if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(tools, key = { it.id }) { tool ->
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(tools) { tool ->
                 Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
-                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Build, null, tint = if (tool.enabled) Color(0xFF00FF88) else IsyaError, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(tool.name, color = Color(0xFF00FF88), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                            tool.description?.let { Text(it, color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall) }
-                        }
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(tool.name, color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                        Text(tool.description, color = Color(0xFFCCFFCC), fontSize = 11.sp)
+                        Text("Parameters: ${tool.parametersJson?.take(100)}...", color = Color(0xFF3A7A3A), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                     }
                 }
             }
@@ -564,71 +536,37 @@ fun ToolsScreen(container: AppContainerExtended, onBack: () -> Unit) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// DICTIONARY ADMIN
+// DICTIONARY
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun DictionaryAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
     var stats by remember { mutableStateOf<DictionaryStats?>(null) }
-    var loadStatus by remember { mutableStateOf<DictionaryLoadStatus?>(null) }
-    var query by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<DictionaryWord>>(emptyList()) }
+    var status by remember { mutableStateOf<DictionaryLoadStatus?>(null) }
     var loading by remember { mutableStateOf(true) }
-    var triggering by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         runCatching { container.extendedApi.getDictionaryStats() }.onSuccess { stats = it }
-        runCatching { container.extendedApi.getDictionaryLoadStatus() }.onSuccess { loadStatus = it }
+        runCatching { container.extendedApi.getDictionaryLoadStatus() }.onSuccess { status = it }
         loading = false
     }
 
     DevScaffold("Dictionary Admin", onBack) { padding ->
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item {
-                stats?.let { s ->
-                    IsyaPanel(title = "STATS") {
-                        Text("Total: ${s.total}  Loaded: ${s.loaded}  Status: ${s.status}", color = Color(0xFF00FF88), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-            item {
-                IsyaButton("Trigger Load", loading = triggering, onClick = {
-                    triggering = true
-                    scope.launch {
-                        runCatching { container.api(admin=true).loadDictionary() }
-                        triggering = false
-                    }
-                }, variant = IsyaButtonVariant.GHOST, modifier = Modifier.fillMaxWidth())
-            }
-            item {
-                OutlinedTextField(
-                    value = query, onValueChange = { query = it },
-                    label = { Text("Search word", color = Color(0xFF3A7A3A)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color(0xFF00FF88), unfocusedTextColor = Color(0xFF00FF88),
-                        focusedBorderColor = Color(0xFF00FF88), unfocusedBorderColor = Color(0xFF1A4A1A),
-                        focusedContainerColor = Color(0xFF0D2B0D), unfocusedContainerColor = Color(0xFF0D2B0D),
-                        cursorColor = Color(0xFF00FF88),
-                    ),
-                    trailingIcon = {
-                        IconButton(onClick = {
-                            scope.launch {
-                                if (query.isNotBlank()) runCatching { container.extendedApi.searchDictionary(query) }.onSuccess { results = it }
-                            }
-                        }) { Icon(Icons.Rounded.Search, null, tint = Color(0xFF00FF88)) }
-                    },
-                    singleLine = true,
-                )
-            }
-            items(results, key = { it.id }) { word ->
+        if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
+        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            stats?.let { s ->
                 Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        Text(word.word, color = Color(0xFF00FF88), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
-                        word.definition?.let { Text(it, color = Color(0xFFCCFFCC), style = MaterialTheme.typography.labelSmall) }
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Word Count: ${s.totalWords}", color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                        Text("Last Updated: ${s.lastUpdate}", color = Color(0xFFCCFFCC), fontSize = 11.sp)
                     }
                 }
             }
+            status?.let { s ->
+                Text("Load Status: ${s.status} (${(s.progress * 100).toInt()}%)", color = if (s.status == "READY") Color(0xFF00FF88) else IsyaGold)
+                LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth(), color = Color(0xFF00FF88), trackColor = Color(0xFF0A1A0A))
+            }
+            Spacer(Modifier.weight(1f))
+            IsyaButton(text = "Trigger Full Re-Index", onClick = { /* TODO */ }, variant = IsyaButtonVariant.PRIMARY_GOLD, modifier = Modifier.fillMaxWidth())
         }
     }
 }
@@ -638,31 +576,9 @@ fun DictionaryAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun MemoryAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var tracking by remember { mutableStateOf<MemoryTrackingResponse?>(null) }
-    var committing by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        runCatching { container.extendedApi.getMemoryTracking() }.onSuccess { tracking = it }
-    }
-
     DevScaffold("Memory Admin", onBack) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            tracking?.let { t ->
-                IsyaPanel(title = "TRACKING") {
-                    Text("Total: ${t.totalMemories}  STM: ${t.stmCount}  LTM: ${t.ltmCount}", color = Color(0xFF00FF88), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-            IsyaButton("Force Memory Consolidation", loading = committing, onClick = {
-                committing = true
-                scope.launch {
-                    runCatching { container.api(admin=true).commitMemory() }
-                    committing = false
-                }
-            }, modifier = Modifier.fillMaxWidth())
-            IsyaButton("Force Emotional Memory Write", onClick = {
-                scope.launch { runCatching { container.api(admin=true).commitEmotionalMemory() } }
-            }, variant = IsyaButtonVariant.GHOST, modifier = Modifier.fillMaxWidth())
+        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            Text("Memory pruning and manual entry tools coming soon.", color = Color(0xFF3A7A3A))
         }
     }
 }
@@ -672,35 +588,27 @@ fun MemoryAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun BackupsScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var backups by remember { mutableStateOf<List<Backup>>(emptyList()) }
+    var backups by remember { mutableStateOf<List<BackupInfo>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
-    var triggering by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        runCatching { container.extendedApi.getBackups() }.onSuccess { backups = it.backups }
+        runCatching { container.api(true).getBackups() }.onSuccess { backups = it.backups }
         loading = false
     }
 
-    DevScaffold("Backups", onBack) { padding ->
+    DevScaffold("SQL Backups", onBack) { padding ->
         if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            Row(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-                IsyaButton("Create Backup", loading = triggering, onClick = {
-                    triggering = true
-                    scope.launch {
-                        runCatching { container.api(admin=true).createBackup() }
-                        runCatching { container.extendedApi.getBackups() }.onSuccess { backups = it.backups }
-                        triggering = false
-                    }
-                }, modifier = Modifier.fillMaxWidth())
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item {
+                IsyaButton(text = "Trigger Instant Backup", onClick = { /* TODO */ }, variant = IsyaButtonVariant.PRIMARY_GOLD, modifier = Modifier.fillMaxWidth())
             }
-            LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(backups, key = { it.id }) { b ->
-                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(b.createdAt, color = Color(0xFF00FF88), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-                            Text(b.path, color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            items(backups) { b ->
+                Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(b.fileName, color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text("${b.sizeBytes / 1024 / 1024} MB", color = Color(0xFFCCFFCC), fontSize = 11.sp)
+                            Text(b.createdAt, color = Color(0xFF3A7A3A), fontSize = 10.sp)
                         }
                     }
                 }
@@ -722,31 +630,19 @@ fun ConfigScreen(container: AppContainerExtended, onBack: () -> Unit) {
         loading = false
     }
 
-    DevScaffold("Config", onBack) { padding ->
+    DevScaffold("Server Config", onBack) { padding ->
         if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        settings?.let { s ->
-            Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                IsyaPanel(title = "SERVER SETTINGS") {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ConfigRow("Bind", s.bindAddress)
-                        ConfigRow("Port", "${s.port}")
-                        ConfigRow("Model", s.model)
-                        ConfigRow("Version", s.version)
-                    }
-                }
-                IsyaButton("Hot-Reload Config", onClick = {
-                    scope.launch { runCatching { container.api(admin=true).reloadConfig() } }
-                }, variant = IsyaButtonVariant.GHOST, modifier = Modifier.fillMaxWidth())
+        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            settings?.let { s ->
+                Text("Version: ${s.version}", color = Color(0xFF00FF88))
+                Text("Bind Address: ${s.bindAddress}", color = Color(0xFFCCFFCC))
+                Text("Bind Port: ${s.bindPort}", color = Color(0xFFCCFFCC))
+                Text("Primary Model: ${s.primaryModel}", color = Color(0xFFCCFFCC))
+                Text("Max Connections: ${s.maxConnections}", color = Color(0xFFCCFFCC))
             }
-        } ?: Text("No settings available", color = IsyaMuted, modifier = Modifier.padding(16.dp))
-    }
-}
-
-@Composable
-private fun ConfigRow(label: String, value: String) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = Color(0xFF3A7A3A), fontFamily = FontFamily.Monospace)
-        Text(value, style = MaterialTheme.typography.bodySmall, color = Color(0xFF00FF88), fontFamily = FontFamily.Monospace)
+            Spacer(Modifier.weight(1f))
+            IsyaButton(text = "Reload Config File", onClick = { /* TODO */ }, variant = IsyaButtonVariant.PRIMARY_GOLD, modifier = Modifier.fillMaxWidth())
+        }
     }
 }
 
@@ -755,32 +651,44 @@ private fun ConfigRow(label: String, value: String) {
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun PairedDevicesScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
     var devices by remember { mutableStateOf<List<PairedDevice>>(emptyList()) }
+    var pairCode by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
-        runCatching { container.api(admin = true).getPairedDevices() }.onSuccess { devices = it.devices }
+        runCatching { container.api(true).getPairedDevices() }.onSuccess { devices = it.devices }
         loading = false
     }
 
     DevScaffold("Paired Devices", onBack) { padding ->
         if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(devices, key = { it.id }) { device ->
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item {
+                Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF1A1A0A), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("New Pairing Code", color = IsyaGold, style = MaterialTheme.typography.labelSmall)
+                        Text(pairCode ?: "——————", style = MaterialTheme.typography.headlineMedium, color = IsyaCream, fontFamily = FontFamily.Monospace)
+                        Spacer(Modifier.height(8.dp))
+                        IsyaButton(text = "Generate Code", onClick = {
+                            scope.launch {
+                                runCatching { container.api(true).generatePairCode() }.onSuccess { pairCode = it["code"] }
+                            }
+                        }, variant = IsyaButtonVariant.PRIMARY_GOLD, modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+            items(devices) { d ->
                 Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
                     Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(device.deviceName, color = Color(0xFF00FF88), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                            Text(device.deviceId, color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-                            Text(SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(device.pairedAtMs)), color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall)
+                            Text(d.deviceName, color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                            Text("ID: ${d.deviceId}", color = Color(0xFF3A7A3A), fontSize = 10.sp)
+                            Text("Last Active: ${d.lastActive}", color = Color(0xFFCCFFCC), fontSize = 11.sp)
                         }
-                        IconButton(onClick = {
-                            scope.launch {
-                                runCatching { container.api(admin = true).revokeDevice(device.id) }
-                                runCatching { container.api(admin = true).getPairedDevices() }.onSuccess { devices = it.devices }
-                            }
-                        }) { Icon(Icons.Rounded.Delete, "Revoke", tint = IsyaError) }
+                        IconButton(onClick = { /* TODO */ }) {
+                            Icon(Icons.Rounded.Delete, null, tint = IsyaError)
+                        }
                     }
                 }
             }
@@ -793,30 +701,9 @@ fun PairedDevicesScreen(container: AppContainerExtended, onBack: () -> Unit) {
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun VideoWorkersScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    var avatars by remember { mutableStateOf<List<UserAvatar>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
-        runCatching { container.extendedApi.getAvatars() }.onSuccess { avatars = it.avatars }
-        loading = false
-    }
-
-    DevScaffold("Video Workers", onBack) { padding ->
-        if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            item { Text("VIDEO OUTPUT DIR: C:\\elle\\videogen", style = MaterialTheme.typography.labelSmall, color = Color(0xFF3A7A3A), fontFamily = FontFamily.Monospace) }
-            item { Spacer(Modifier.height(8.dp)); Text("AVATARS  (${avatars.size})", style = MaterialTheme.typography.labelMedium, color = Color(0xFF00FF88)) }
-            items(avatars, key = { it.id }) { avatar ->
-                Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
-                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(avatar.label ?: "Avatar #${avatar.id}", color = Color(0xFF00FF88), style = MaterialTheme.typography.bodySmall)
-                            Text(avatar.filePath, color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        if (avatar.isDefault) Text("DEFAULT", style = MaterialTheme.typography.labelSmall, color = IsyaGold)
-                    }
-                }
-            }
+    DevScaffold("Video Generation Workers", onBack) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            Text("Avatara job queue monitoring coming soon.", color = Color(0xFF3A7A3A))
         }
     }
 }
@@ -826,25 +713,9 @@ fun VideoWorkersScreen(container: AppContainerExtended, onBack: () -> Unit) {
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun LearningAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var subjects by remember { mutableStateOf<List<LearnedSubject>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
-        runCatching { container.extendedApi.getSubjects() }.onSuccess { subjects = it.subjects }
-        loading = false
-    }
-
     DevScaffold("Learning Admin", onBack) { padding ->
-        if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            item { Text("${subjects.size} subjects total", style = MaterialTheme.typography.labelSmall, color = Color(0xFF3A7A3A)) }
-            items(subjects, key = { it.id }) { sub ->
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Text("${sub.id}.", modifier = Modifier.width(30.dp), color = Color(0xFF3A7A3A), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-                    Text("${sub.subject}  [L${sub.proficiencyLevel}]", color = Color(0xFF00FF88), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                }
-            }
+        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            Text("Bulk skill and subject import tools.", color = Color(0xFF3A7A3A))
         }
     }
 }
@@ -854,64 +725,9 @@ fun LearningAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun EthicsAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var rules by remember { mutableStateOf<List<MoralRule>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
-    var newPrinciple by remember { mutableStateOf("") }
-    var newHard by remember { mutableStateOf(false) }
-    var saving by remember { mutableStateOf(false) }
-
-    fun reload() {
-        scope.launch {
-            runCatching { container.extendedApi.getMoralRules() }.onSuccess { rules = it.rules }
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        runCatching { container.extendedApi.getMoralRules() }.onSuccess { rules = it.rules }
-        loading = false
-    }
-
     DevScaffold("Ethics Admin", onBack) { padding ->
-        if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
-        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
-            OutlinedTextField(
-                value = newPrinciple, onValueChange = { newPrinciple = it },
-                label = { Text("New principle", color = Color(0xFF3A7A3A)) },
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = Color(0xFF00FF88), unfocusedTextColor = Color(0xFF00FF88),
-                    focusedBorderColor = Color(0xFF00FF88), unfocusedBorderColor = Color(0xFF1A4A1A),
-                    focusedContainerColor = Color(0xFF0D2B0D), unfocusedContainerColor = Color(0xFF0D2B0D),
-                    cursorColor = Color(0xFF00FF88),
-                ),
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = newHard, onCheckedChange = { newHard = it }, colors = CheckboxDefaults.colors(checkedColor = IsyaError))
-                Text("Hard rule (cannot be overridden)", color = Color(0xFF3A7A3A), style = MaterialTheme.typography.bodySmall)
-            }
-            IsyaButton("Add Rule", loading = saving, onClick = {
-                if (newPrinciple.isBlank()) return@IsyaButton
-                saving = true
-                scope.launch {
-                    runCatching { container.api(admin=true).createMoralRule(CreateMoralRuleRequest(newPrinciple, isHardRule = newHard)) }
-                    newPrinciple = ""; reload(); saving = false
-                }
-            }, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(16.dp))
-            LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(rules, key = { it.id }) { rule ->
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            if (rule.isHardRule) Icons.Rounded.Lock else Icons.Rounded.Balance,
-                            null, tint = if (rule.isHardRule) IsyaError else Color(0xFF00FF88),
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(rule.principle, color = Color(0xFFCCFFCC), style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                    }
-                }
-            }
+        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+            Text("Moral framework rule management.", color = Color(0xFF3A7A3A))
         }
     }
 }
