@@ -659,15 +659,52 @@ bool TouchPairedDeviceLastSeen(const std::string& device_id) {
 /*──────────────────────────────────────────────────────────────────────────────
  *  SESSIONS — opaque bearer-token store (Feb 2026 auth simplification).
  *
- *   See ElleAnn_Sessions_Delta.sql for the table.  All paths live on
- *   the ElleSystem database so a wipe of game state (ElleCore) doesn't
- *   auto-log-everyone-out; Sessions is deliberately independent.
+ *   All session paths live in ElleCore.dbo.Sessions (v2 of the delta —
+ *   moved here from ElleSystem so the pool's existing login can write
+ *   without extra cross-DB grants).  The first write auto-creates the
+ *   table if the operator hasn't run ElleAnn_Sessions_Delta.sql yet,
+ *   so login works out-of-the-box on a fresh install.
  *──────────────────────────────────────────────────────────────────────────────*/
+static void EnsureSessionsTable() {
+    /* Cheap check — runs on every CreateSession.  The IF NOT EXISTS
+     * means the DDL is only issued once; subsequent calls hit the
+     * "table exists" branch and return in microseconds.              */
+    static std::once_flag s_ddlOnce;
+    std::call_once(s_ddlOnce, []() {
+        auto rs = ElleSQLPool::Instance().Query(
+            "IF NOT EXISTS (SELECT 1 FROM sys.tables "
+            "               WHERE name = 'Sessions' AND schema_id = SCHEMA_ID('dbo')) "
+            "BEGIN "
+            "  CREATE TABLE ElleCore.dbo.Sessions ("
+            "    Token       NVARCHAR(64)  NOT NULL PRIMARY KEY, "
+            "    nUserNo     BIGINT        NOT NULL, "
+            "    sUserID     NVARCHAR(30)  NOT NULL, "
+            "    sUserName   NVARCHAR(60)  NULL, "
+            "    nAuthID     INT           NOT NULL DEFAULT 0, "
+            "    CreatedMs   BIGINT        NOT NULL, "
+            "    LastSeenMs  BIGINT        NOT NULL, "
+            "    DeviceName  NVARCHAR(128) NULL, "
+            "    PeerAddr    NVARCHAR(64)  NULL "
+            "  ); "
+            "  CREATE INDEX IX_Sessions_nUserNo ON ElleCore.dbo.Sessions(nUserNo); "
+            "END");
+        if (!rs.success) {
+            ELLE_WARN("Sessions table auto-create check failed: %s",
+                      rs.error.c_str());
+        }
+    });
+}
+
 bool CreateSession(const SessionRow& row) {
-    if (row.token.empty() || row.nUserNo <= 0) return false;
+    if (row.token.empty() || row.nUserNo <= 0) {
+        ELLE_WARN("CreateSession refused: token.empty=%d nUserNo=%lld",
+                  (int)row.token.empty(), (long long)row.nUserNo);
+        return false;
+    }
+    EnsureSessionsTable();
     auto& pool = ElleSQLPool::Instance();
     auto rs = pool.QueryParams(
-        "INSERT INTO ElleSystem.dbo.Sessions "
+        "INSERT INTO ElleCore.dbo.Sessions "
         "(Token, nUserNo, sUserID, sUserName, nAuthID, CreatedMs, LastSeenMs, DeviceName, PeerAddr) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
         {
@@ -681,7 +718,17 @@ bool CreateSession(const SessionRow& row) {
             row.device_name,
             row.peer_addr
         });
-    return rs.success;
+    if (!rs.success) {
+        /* Surface the ACTUAL SQL error — previously we just returned
+         * false and the /api/auth/login handler emitted the opaque
+         * "failed to create session" which told the operator nothing
+         * about missing grants, a missing DB, or schema drift.       */
+        ELLE_WARN("Sessions INSERT failed for nUserNo=%lld sUserID=\"%s\": %s",
+                  (long long)row.nUserNo, row.sUserID.c_str(),
+                  rs.error.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool GetSessionByToken(const std::string& token, SessionRow& out) {
@@ -693,7 +740,7 @@ bool GetSessionByToken(const std::string& token, SessionRow& out) {
         "       CONVERT(BIGINT, LastSeenMs) AS LastSeenMs, "
         "       ISNULL(DeviceName,'') AS DeviceName, "
         "       ISNULL(PeerAddr,'')   AS PeerAddr "
-        "  FROM ElleSystem.dbo.Sessions WHERE Token = ?;",
+        "  FROM ElleCore.dbo.Sessions WHERE Token = ?;",
         { token });
     if (!rs.success || rs.rows.empty()) return false;
     const auto& r = rs.rows[0];
@@ -715,14 +762,14 @@ bool GetSessionByToken(const std::string& token, SessionRow& out) {
 bool TouchSessionLastSeen(const std::string& token) {
     if (token.empty()) return false;
     return ElleSQLPool::Instance().QueryParams(
-        "UPDATE ElleSystem.dbo.Sessions SET LastSeenMs = ? WHERE Token = ?;",
+        "UPDATE ElleCore.dbo.Sessions SET LastSeenMs = ? WHERE Token = ?;",
         { std::to_string((int64_t)ELLE_MS_NOW()), token }).success;
 }
 
 bool DeleteSession(const std::string& token) {
     if (token.empty()) return true;  /* idempotent no-op */
     return ElleSQLPool::Instance().QueryParams(
-        "DELETE FROM ElleSystem.dbo.Sessions WHERE Token = ?;",
+        "DELETE FROM ElleCore.dbo.Sessions WHERE Token = ?;",
         { token }).success;
 }
 
@@ -730,7 +777,7 @@ int DeleteSessionsForUser(int64_t nUserNo) {
     if (nUserNo <= 0) return 0;
     auto& pool = ElleSQLPool::Instance();
     auto rs = pool.QueryParams(
-        "DELETE FROM ElleSystem.dbo.Sessions WHERE nUserNo = ?;",
+        "DELETE FROM ElleCore.dbo.Sessions WHERE nUserNo = ?;",
         { std::to_string(nUserNo) });
     return rs.success ? (int)rs.rows_affected : 0;
 }
@@ -746,7 +793,7 @@ bool ListSessions(std::vector<SessionRow>& out, uint32_t limit) {
         "       CONVERT(BIGINT, LastSeenMs) AS LastSeenMs, "
         "       ISNULL(DeviceName,'') AS DeviceName, "
         "       ISNULL(PeerAddr,'')   AS PeerAddr "
-        "  FROM ElleSystem.dbo.Sessions ORDER BY LastSeenMs DESC;");
+        "  FROM ElleCore.dbo.Sessions ORDER BY LastSeenMs DESC;");
     if (!rs.success) return false;
     out.clear();
     out.reserve(rs.rows.size());

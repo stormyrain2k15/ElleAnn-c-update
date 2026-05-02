@@ -2484,6 +2484,13 @@ private:
                 sess.device_name  = device_name;
                 sess.peer_addr    = peer;
                 if (!ElleDB::CreateSession(sess)) {
+                    /* The ElleDB::CreateSession path now logs the actual
+                     * SQL error via ELLE_WARN (see ElleDB_Domain.cpp).
+                     * We still return a generic 500 so the body never
+                     * leaks DB schema info to a remote caller; the
+                     * operator looks at the log for the real cause.
+                     * Common fixes: run ElleAnn_Sessions_Delta.sql; or
+                     * grant the pool login INSERT on ElleCore.dbo.Sessions. */
                     return HTTPResponse::Err(500, "failed to persist session");
                 }
 

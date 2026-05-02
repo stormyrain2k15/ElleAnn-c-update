@@ -2053,3 +2053,106 @@ explaining the pivot so the operator knows `jwt_secret` is IGNORED.
 - `Android .../ElleApp.kt`                       (PairResponse relabel + login() in API)
 - `Android .../PairScreen.kt`                    (login() call path)
 - `memory/test_credentials.md`                   (refreshed)
+
+## Session Feb-2026 — Login fix + cursor drain + SQL passive-mesh
+
+User reported a cluster of runtime issues:
+- **"Constant 'failed to create session' errors"** — login completely dead.
+- **"Persistent cursor issue"** — next SQL call after some paths fails.
+- **"Services still bound to each other"** — passive mesh incomplete.
+- IPC serialisation, queue worker complaints, JSON-settings replacement,
+  Fiesta assets received (HeadlessClient.cpp, FiestaCrypto.h, SHNScreen.kt).
+
+### Fix 1 — "Failed to create session"
+
+Root cause: `CreateSession` targeted `ElleSystem.dbo.Sessions` but the
+SQL pool connects to `ElleCore`. Cross-DB INSERT required the pool's
+login to have rights on BOTH databases; most operator setups grant
+`ElleCore` only.
+
+Changes:
+- **`ElleAnn_Sessions_Delta.sql` v2** — relocated the table to
+  `ElleCore.dbo.Sessions`. Schema identical. Idempotent re-apply.
+  Header comment documents the migration path (old ElleSystem rows
+  are orphaned but low-cost: one re-login per user).
+- **`ElleDB::CreateSession`** + `GetSessionByToken`/`TouchSessionLastSeen`/
+  `DeleteSession`/`DeleteSessionsForUser`/`ListSessions` all swapped
+  to `ElleCore.dbo.Sessions` (sed, mechanical).
+- **Auto-create on first use** — `EnsureSessionsTable()` inside
+  `CreateSession` runs an `IF NOT EXISTS CREATE TABLE` through the
+  pool exactly once per process (via `std::once_flag`). Operators
+  who upgrade without running the SQL delta still get working login;
+  the first login creates the table + index transparently.
+- **Real error logging** — if the INSERT still fails, `ELLE_WARN`
+  now prints `nUserNo`, `sUserID`, and the actual SQL error string.
+  The HTTP handler's 500 body stays generic (no schema leak over
+  the wire) but the operator's log finally shows the real cause.
+
+### Fix 2 — Persistent cursor issue
+
+Root cause: `SQLConnection::CollectStatementResults` never called
+`SQLMoreResults` to drain the driver's queued result sets. Stored
+procedures like `usp_GetLogin` routinely emit multiple result sets
+(SET NOCOUNT rowcounts, the actual SELECT, and a RETURN-value
+rowcount). Leaving those undrained means the next query on the
+same pooled connection dies with SQLSTATE 24000 ("invalid cursor
+state"). This is almost certainly why the queue worker was
+"sometimes wedging" and why login failed on the SECOND attempt.
+
+Changes to `Shared/ElleSQLConn.cpp`:
+- `CollectStatementResults` now drains via
+  `while (SQLMoreResults != SQL_NO_DATA)` **after** the primary
+  result set is collected, before returning success.
+- Added the same drain to every early-return path (exec failure,
+  fetch failure) via a local `drainMoreResults` lambda. The
+  statement handle is still freed afterwards; we just take the
+  driver's queued results first so the CONNECTION is clean.
+
+This single fix should unstick the queue worker's "serialisation
+of IPC issues" too — the ODBC cursor state was bleeding into the
+next unrelated query, so a queue-worker pop that fired right after
+a failed usp_GetLogin would see garbage or nothing at all.
+
+### Fix 3 — Services still bound to each other
+
+Root cause: `ElleServiceBase::InitializeCore` hard-aborted when the
+SQL pool failed to connect. SQL down → every service refuses to
+boot → mesh never forms.
+
+Changes:
+- **SQL pool init is now NON-FATAL**. On failure we log a warning
+  and continue. The reconnector loop (already running for IPC peers)
+  now also re-attempts `ElleSQLPool::Reinitialize` on every tick
+  when `!IsAvailable()`. A pool that comes up mid-run wires in
+  within ≤ 5s.
+- **`RegisterWorker` is now soft** (runs without checking result;
+  will re-fire on first successful reconnect — see the
+  `TickReconnector` DB branch).
+- **IPC hub init stays fatal** — if our OWN hub can't allocate,
+  we can't participate at all and a restart is the right answer.
+- New `ElleSQLPool::IsAvailable()` getter for the reconnector.
+
+Now `sc stop MSSQL$INSTANCE` doesn't cascade through the mesh.
+Every Elle service keeps running, marks SQL-backed queries as
+warnings, and snaps back the moment SQL returns.
+
+### Fiesta assets received (for next session)
+
+- `HeadlessClient.cpp.txt` — confirms SHN-table load list, main loop
+  at 50 Hz, `NC_MISC_CLIENT_DEBUG_MSG_CMD` exception-report path.
+  No explicit opcode/crypto bits in this file.
+- `FiestaCrypto.h.txt`, `SHNScreen.kt` — still pending read.
+- Google Drive link for the updated source — OAuth-gated; need a
+  direct download link or paste of the key files.
+
+Fiesta is still on hold per prior directive.
+
+### Verification
+
+- C++ + SQL brace/paren balance clean on every touched file.
+- Schema lint clean.
+- No behavioural regression paths — all changes are either:
+  (a) strictly additive (IsAvailable, EnsureSessionsTable,
+       drainMoreResults, SQL reconnect in TickReconnector), or
+  (b) fail-safe relaxations (SQL init non-fatal, error logging,
+       target-DB migration).

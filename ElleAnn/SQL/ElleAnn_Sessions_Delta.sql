@@ -1,37 +1,43 @@
 /*══════════════════════════════════════════════════════════════════════════════
- * ElleAnn_Sessions_Delta.sql — opaque bearer-token sessions (Feb 2026 pivot).
+ * ElleAnn_Sessions_Delta.sql — opaque bearer-token sessions.
  *
- *   Replaces the HS256-JWT auth that preceded it.  Per user directive
- *   Feb 2026: "username and password login, no expire, enough of the
- *   unnecessary security."  Sessions live in ElleSystem.dbo.Sessions
- *   and have NO expires_ms column — a session is only invalidated by
- *   explicit DELETE (logout) or by flipping tUser.bIsBlock server-side
- *   (checked at every auth-gate lookup).
+ *   Feb-2026 pivot v2: moved from ElleSystem to ElleCore.
  *
- *   Design:
- *     - Token is 64 hex chars (32 cryptographically-random bytes).
- *     - nAuthID is cached from tUser at session-creation time so we
- *       don't re-hit the Account DB on every request; on privilege
- *       change the user logs out and back in.
- *     - LastSeenMs is best-effort (written on every auth'd request)
- *       so the dev panel can show "idle devices" without a separate
- *       heartbeat.  No index on it by design — ordering is by Token
- *       PK for the common case (lookup) and that's already covered.
+ *   Why the move?  The C++ SQL pool connects to ElleCore by default and
+ *   writing cross-database to ElleSystem requires the pool's login to
+ *   also have INSERT/SELECT/DELETE rights on ElleSystem.dbo.Sessions.
+ *   That tripped "failed to create session" for operators who granted
+ *   rights only on ElleCore.  Keeping Sessions local to ElleCore means
+ *   the same login that wrote Memory rows writes Sessions rows, and
+ *   login Just Works.
  *
- *   Run order:
+ *   Token is 64 hex chars (32 cryptographically-random bytes).
+ *   nAuthID is cached from tUser at session-creation time so the gate
+ *   doesn't re-hit Account on every request; privilege changes take
+ *   effect on the next logout/login.
+ *   No expires_ms by design — invalidation is DELETE-only.
+ *
+ *   Run order (idempotent; safe to re-apply):
  *     1. ElleAnn_SchemaSync_FebPivot.sql
  *     2. ElleAnn_Schema.sql
  *     3. ElleAnn_System_Schema.sql
  *     4. ElleAnn_Sessions_Delta.sql            ← this file
+ *
+ *   Migration from v1 (if you already ran the ElleSystem version):
+ *     - v2 will create ElleCore.dbo.Sessions (empty).
+ *     - Any old tokens stored in ElleSystem.dbo.Sessions become
+ *       orphaned; users will need to log in once. Low cost.
+ *     - You can DROP ElleSystem.dbo.Sessions afterwards if you want a
+ *       clean state; the code no longer reads from it.
  *══════════════════════════════════════════════════════════════════════════════*/
 SET ANSI_NULLS ON;
 SET QUOTED_IDENTIFIER ON;
 GO
 
-USE ElleSystem;
+USE ElleCore;
 GO
 
-IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Sessions')
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Sessions' AND schema_id = SCHEMA_ID('dbo'))
 BEGIN
     CREATE TABLE dbo.Sessions (
         Token       NVARCHAR(64)   NOT NULL PRIMARY KEY,
@@ -45,6 +51,11 @@ BEGIN
         PeerAddr    NVARCHAR(64)   NULL
     );
     CREATE INDEX IX_Sessions_nUserNo ON dbo.Sessions(nUserNo);
+    PRINT 'ElleCore.dbo.Sessions created';
+END
+ELSE
+BEGIN
+    PRINT 'ElleCore.dbo.Sessions already exists';
 END
 GO
 

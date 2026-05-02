@@ -194,9 +194,24 @@ bool SQLConnection::Ping() {
  *────────────────────────────────────────────────────────────────────────────*/
 SQLResultSet SQLConnection::CollectStatementResults(SQLHSTMT hStmt, SQLRETURN execRet) {
     SQLResultSet result;
+
+    /*────────────────────────────────────────────────────────────────────
+     * Helper: drain any pending result sets on early return.  Without
+     * this, bailing on error leaves the connection's statement handle
+     * in a "rowset pending" state and the NEXT query on the same DBC
+     * dies with SQLSTATE 24000.  Applied to every early exit below.
+     *────────────────────────────────────────────────────────────────────*/
+    auto drainMoreResults = [&]() {
+        for (;;) {
+            SQLRETURN mr = SQLMoreResults(hStmt);
+            if (mr == SQL_NO_DATA || !SQL_SUCCEEDED(mr)) break;
+        }
+    };
+
     if (execRet != SQL_SUCCESS && execRet != SQL_SUCCESS_WITH_INFO &&
         execRet != SQL_NO_DATA) {
         result.error = GetDiagnostics(SQL_HANDLE_STMT, hStmt);
+        drainMoreResults();
         return result;
     }
 
@@ -221,6 +236,7 @@ SQLResultSet SQLConnection::CollectStatementResults(SQLHSTMT hStmt, SQLRETURN ex
         if (fr == SQL_NO_DATA) break;
         if (fr != SQL_SUCCESS && fr != SQL_SUCCESS_WITH_INFO) {
             result.error = GetDiagnostics(SQL_HANDLE_STMT, hStmt);
+            drainMoreResults();
             return result;
         }
         SQLRow row;
@@ -270,6 +286,39 @@ SQLResultSet SQLConnection::CollectStatementResults(SQLHSTMT hStmt, SQLRETURN ex
     SQLLEN rowCount = 0;
     SQLRowCount(hStmt, &rowCount);
     result.rows_affected = rowCount;
+
+    /*─────────────────────────────────────────────────────────────────────
+     * Drain additional result sets.
+     *
+     * The SQL Server ODBC driver leaves the connection in a busy state
+     * ("cursor state invalid" on the NEXT query) if the current handle
+     * still has more result sets queued.  Stored procs like
+     * `usp_GetLogin` routinely emit:
+     *   (a) a no-result "SET NOCOUNT ON" rowcount,
+     *   (b) the actual SELECT we want,
+     *   (c) the proc's RETURN value as a rowcount.
+     *
+     * We already captured (b) above.  Calling SQLMoreResults() in a
+     * loop until SQL_NO_DATA tells the driver we've taken everything
+     * and lets the subsequent SQLFreeHandle actually release the
+     * cursor.  Without this, the VERY NEXT QueryParams call on the
+     * same pooled connection would die with SQLSTATE 24000 — which
+     * is exactly the "persistent cursor issue" the operator was
+     * hitting on login and on the queue worker.
+     *─────────────────────────────────────────────────────────────────────*/
+    for (;;) {
+        SQLRETURN mr = SQLMoreResults(hStmt);
+        if (mr == SQL_NO_DATA) break;
+        if (!SQL_SUCCEEDED(mr)) {
+            /* Swallow — we already have a successful primary result;
+             * a downstream driver-specific status shouldn't fail the
+             * caller.  Log once so the issue is visible.              */
+            ELLE_WARN("SQLMoreResults drain returned non-success: %s",
+                      GetDiagnostics(SQL_HANDLE_STMT, hStmt).c_str());
+            break;
+        }
+    }
+
     result.success = true;
     m_lastUsed = ELLE_MS_NOW();
     return result;

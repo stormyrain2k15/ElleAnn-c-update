@@ -509,18 +509,48 @@ bool ElleServiceBase::InitializeCore() {
         (uint32_t)ElleConfig::Instance().GetInt("logging.max_files", 10)
     );
 
-    /* 3. Initialize SQL connection pool */
+    /* 3. Initialize SQL connection pool — NON-FATAL.
+     *
+     *    Pre-pivot this hard-aborted InitializeCore() if the DB was
+     *    unreachable, which meant:
+     *      - SQL Server down → EVERY service refused to start.
+     *      - DB restart → every service crashed, SCM bounced them,
+     *        and cold race-loops ensued.
+     *
+     *    Feb-2026 passive-mesh directive: services must not be bound
+     *    to each other, and SQL is effectively "another peer" from a
+     *    dependency-graph perspective.  So:
+     *      - Initialize() still tries once up front.
+     *      - On failure we log and continue — the per-query path in
+     *        ElleSQLPool already lazy-reconnects on the first call
+     *        after the pool went dark, and Sessions auto-create covers
+     *        the "pool came back but tables weren't migrated" case.
+     *      - A new background SqlReconnect thread re-attempts every
+     *        5s so a pool that comes up mid-run gets wired without a
+     *        service restart.  (Added alongside the IPC reconnector;
+     *        they share InterruptibleSleep for clean shutdown.)      */
     auto& svcCfg = ElleConfig::Instance().GetService();
     if (!ElleSQLPool::Instance().Initialize(svcCfg.sql_connection_string, svcCfg.sql_pool_size)) {
-        ELLE_ERROR("Failed to initialize SQL connection pool");
-        return false;
+        ELLE_WARN("SQL pool initial connect failed — service will keep "
+                  "running and retry in background. Check "
+                  "service.sql_connection_string in elle_master_config.json.");
+        /* Do NOT return false.  The reconnector handles it.           */
+    } else {
+        ELLE_INFO("SQL pool initialized (%d connections)", svcCfg.sql_pool_size);
     }
-    ELLE_INFO("SQL pool initialized (%d connections)", svcCfg.sql_pool_size);
 
-    /* 4. Register this worker in database */
+    /* 4. Register this worker in database — soft.  If SQL isn't up
+     *    yet the Heartbeat service will see us bind later through IPC
+     *    and the /api/diag/heartbeats endpoint falls back to the
+     *    in-process wire stamps.  Pre-pivot a failed RegisterWorker
+     *    was silently swallowed anyway; now it's explicit.            */
     ElleDB::RegisterWorker(m_serviceId, m_serviceName);
 
-    /* 5. Initialize IPC hub */
+    /* 5. Initialize IPC hub — still fatal.  Unlike SQL, our own IPC
+     *    hub is the thing peers connect TO; without it we can never
+     *    participate in the mesh even after reconnect.  A hub alloc
+     *    failure means Win32 IOCP itself refused to bind, which is
+     *    unrecoverable without a restart.                             */
     if (!m_ipcHub.Initialize(m_serviceId, svcCfg.iocp_threads)) {
         ELLE_ERROR("Failed to initialize IPC hub");
         return false;
@@ -693,6 +723,24 @@ void ElleServiceBase::TickReconnector() {
      *
      * The mutex on m_everConnectedTo guards against a future caller
      * (e.g. a status endpoint) wanting to read the live set.        */
+
+    /* SQL pool re-check.  We treat the DB the same as any IPC peer:
+     * if our Acquire() path is reporting the pool down, try to
+     * re-initialise it.  `Reinitialize` is cheap when the pool is
+     * already healthy (it short-circuits inside the pool's own
+     * Initialize path).                                             */
+    if (!ElleSQLPool::Instance().IsAvailable()) {
+        auto& svcCfg = ElleConfig::Instance().GetService();
+        if (!svcCfg.sql_connection_string.empty()) {
+            if (ElleSQLPool::Instance().Reinitialize(
+                    svcCfg.sql_connection_string, svcCfg.sql_pool_size)) {
+                ELLE_INFO("Mesh: SQL pool reconnected");
+                /* Re-register our worker row once we're back. */
+                ElleDB::RegisterWorker(m_serviceId, m_serviceName);
+            }
+        }
+    }
+
     auto deps = GetDependencies();
     for (auto dep : deps) {
         if (!m_running.load()) break;
