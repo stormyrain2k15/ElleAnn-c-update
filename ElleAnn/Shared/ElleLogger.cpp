@@ -266,34 +266,168 @@ void ElleLogger::WriteFile(const std::string& formatted) {
     std::lock_guard<std::mutex> lock(m_fileMutex);
     if (!m_logFile.is_open()) return;
 
+    /* Day rollover — new day → new file.  Handles running-through-
+     * midnight log streams without an operator having to do anything. */
+    int today = TodayYmd();
+    if (today != m_currentDateYmd) {
+        m_currentDateYmd    = today;
+        m_currentDateSuffix = 0;
+        m_currentLineCount  = 0;
+        m_logFile.close();
+        OpenDatedDebugFile();
+        if (!m_logFile.is_open()) return;
+    }
+
     m_logFile << formatted << "\n";
     m_logFile.flush();
     m_currentFileSize += formatted.size() + 1;
+    m_currentLineCount++;
 
-    if (m_currentFileSize > (uint64_t)m_maxFileSizeMB * 1024 * 1024) {
+    /* Line-count cap — once per 10k lines we bump the suffix and
+     * open a new file.  Stops any single log from crossing ~2MB
+     * even under heavy traffic.  Size-based rotation stays as a
+     * second safety net.                                             */
+    if (m_currentLineCount >= m_maxLinesPerFile ||
+        m_currentFileSize > (uint64_t)m_maxFileSizeMB * 1024 * 1024) {
         RotateFile();
     }
 }
 
 void ElleLogger::RotateFile() {
+    /* Caller holds m_fileMutex. */
     m_logFile.close();
+    m_currentDateSuffix++;
+    m_currentLineCount = 0;
+    m_currentFileSize  = 0;
+    OpenDatedDebugFile();
+}
 
-    /* Rotate existing files — wrap every std::filesystem::rename because
-     * a missing file or a locked file would otherwise throw out of the
-     * log-write path and take the caller down with it. */
+int ElleLogger::TodayYmd() const {
+    time_t t = time(nullptr);
+    struct tm lt;
+    localtime_s(&lt, &t);
+    return (lt.tm_year + 1900) * 10000 + (lt.tm_mon + 1) * 100 + lt.tm_mday;
+}
+
+std::string ElleLogger::ExeDirectory() const {
+    /* Cached per-process — GetModuleFileNameA is cheap but cache keeps
+     * LogChannel hot-path at zero syscalls after the first call.   */
+    static std::string s_cached;
+    static std::once_flag s_once;
+    std::call_once(s_once, []() {
+        char buf[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, buf, MAX_PATH);
+        std::filesystem::path p(buf);
+        s_cached = p.parent_path().string();
+        if (s_cached.empty()) s_cached = ".";
+    });
+    return s_cached;
+}
+
+void ElleLogger::OpenDatedDebugFile() {
+    /* Caller holds m_fileMutex.  Files land in
+     *   <exe_dir>\debug\YYYY-MM-DD[-NN].txt
+     * where -NN is bumped every 10k lines.                         */
+    char ymdBuf[32];
+    int y =  m_currentDateYmd / 10000;
+    int mo = (m_currentDateYmd / 100) % 100;
+    int d =  m_currentDateYmd % 100;
+    if (m_currentDateSuffix == 0) {
+        snprintf(ymdBuf, sizeof(ymdBuf), "%04d-%02d-%02d.txt", y, mo, d);
+    } else {
+        snprintf(ymdBuf, sizeof(ymdBuf), "%04d-%02d-%02d-%02u.txt", y, mo, d, m_currentDateSuffix);
+    }
+
+    std::filesystem::path dir(ExeDirectory());
+    dir /= "debug";
     std::error_code ec;
-    for (int i = (int)m_maxFiles - 1; i >= 1; i--) {
-        std::string oldName = m_logPath + "." + std::to_string(i);
-        std::string newName = m_logPath + "." + std::to_string(i + 1);
-        if (std::filesystem::exists(oldName, ec)) {
-            std::filesystem::rename(oldName, newName, ec);
+    std::filesystem::create_directories(dir, ec);
+    m_logPath = (dir / ymdBuf).string();
+
+    m_logFile.open(m_logPath, std::ios::app);
+    if (m_logFile.is_open()) {
+        m_currentFileSize = (uint64_t)std::filesystem::file_size(m_logPath, ec);
+        /* File may already contain lines from an earlier run today —
+         * re-count so we honour the 10k cap across the whole day.
+         * Quick scan: reopen, count '\n', reopen for append.  Cheap
+         * for files under ~100k lines.                             */
+        std::ifstream probe(m_logPath);
+        m_currentLineCount = 0;
+        for (std::string line; std::getline(probe, line); ++m_currentLineCount) {}
+    }
+}
+
+ElleLogger::ChannelState& ElleLogger::GetOrOpenChannel(const std::string& name) {
+    std::lock_guard<std::mutex> lk(m_channelsMutex);
+    auto it = m_channels.find(name);
+    if (it != m_channels.end()) return *it->second;
+
+    auto st = std::make_unique<ChannelState>();
+    m_channels.emplace(name, std::move(st));
+    return *m_channels[name];
+}
+
+void ElleLogger::LogChannel(const char* channel, const char* fmt, ...) {
+    if (!channel || !*channel || !fmt) return;
+
+    /* Format once, under the caller's stack. */
+    char body[4096];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(body, sizeof(body), fmt, args);
+    va_end(args);
+
+    auto& st = GetOrOpenChannel(channel);
+    std::lock_guard<std::mutex> lk(st.mtx);
+
+    /* Open / rotate.  Every line re-checks the date so the first
+     * post-midnight line trips the date rollover cleanly.           */
+    int today = TodayYmd();
+    bool needOpen = !st.file.is_open();
+    if (today != st.dateYmd) {
+        st.dateYmd    = today;
+        st.dateSuffix = 0;
+        st.lineCount  = 0;
+        if (st.file.is_open()) st.file.close();
+        needOpen = true;
+    } else if (st.lineCount >= m_maxLinesPerFile) {
+        /* Same-day cap hit → bump suffix, new file. */
+        st.dateSuffix++;
+        st.lineCount = 0;
+        st.file.close();
+        needOpen = true;
+    }
+
+    if (needOpen) {
+        char buf[64];
+        int y  =  st.dateYmd / 10000;
+        int mo = (st.dateYmd / 100) % 100;
+        int d  =  st.dateYmd % 100;
+        if (st.dateSuffix == 0)
+            snprintf(buf, sizeof(buf), "%s_%04d-%02d-%02d.log", channel, y, mo, d);
+        else
+            snprintf(buf, sizeof(buf), "%s_%04d-%02d-%02d-%02u.log", channel, y, mo, d, st.dateSuffix);
+        std::filesystem::path path = std::filesystem::path(ExeDirectory()) / buf;
+        st.file.open(path.string(), std::ios::app);
+        if (st.file.is_open() && st.dateSuffix == 0) {
+            std::ifstream probe(path.string());
+            st.lineCount = 0;
+            for (std::string line; std::getline(probe, line); ++st.lineCount) {}
         }
     }
-    if (std::filesystem::exists(m_logPath, ec)) {
-        std::filesystem::rename(m_logPath, m_logPath + ".1", ec);
-    }
-    m_logFile.open(m_logPath, std::ios::out);
-    m_currentFileSize = 0;
+
+    if (!st.file.is_open()) return;  /* file-creation failure — swallow */
+
+    /* Timestamp + body. */
+    time_t t = time(nullptr);
+    struct tm lt;
+    localtime_s(&lt, &t);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%H:%M:%S", &lt);
+
+    st.file << "[" << ts << "] " << body << "\n";
+    st.file.flush();
+    st.lineCount++;
 }
 
 void ElleLogger::DatabaseWriterThread() {
