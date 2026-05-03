@@ -1,0 +1,21 @@
+; ─────────────────────────────────────────────────────────────────────
+; PG_Elle_XChromosome — per-service ServerInfo declaration (Fiesta-compatible format)
+;
+; Matches the 0oneServerInfo.txt / ZoneServerInfo.txt pattern: this
+; file declares only MY_SERVER and #includes the master _ServerInfo.txt.
+; The master file carries the listen sockets and ODBC connections.
+; ─────────────────────────────────────────────────────────────────────
+
+#DEFINE MY_SERVER
+  <STRING>                  ; Server name
+  <STRING>                  ; Subdir label
+  <INTEGER>                 ; Server ID
+  <INTEGER>                 ; World No
+  <INTEGER>                 ; Zone / instance
+#ENDDEFINE
+
+MY_SERVER "PG_Elle_XChromosome", "_XChromosome", 118, 0, 0
+
+#include "./_ServerInfo.txt"
+
+#END

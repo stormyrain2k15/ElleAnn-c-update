@@ -1,0 +1,123 @@
+; ─────────────────────────────────────────────────────────────────────────────
+; Elle-Ann ESI — Master ServerInfo (Fiesta-compatible format)
+;
+; Purpose
+;   Single source of truth for every Elle service's bind address, port,
+;   and ODBC connection.  Each per-service installer ships a thin
+;   `_<service>info.txt` that declares its own `MY_SERVER` line and
+;   `#include`s this file.  The runtime loader (ElleConfig::LoadFromServerInfo
+;   → ElleServerInfo::LoadElleServerInfo) understands the same grammar
+;   Fiesta's original server tools use.
+;
+; File location
+;   <ExeDir>\9Data\ServerInfo\_ServerInfo.txt
+;   — identical to JHR / 0one server layout so operators migrating from
+;   a Fiesta deploy can drop these files next to their existing ones.
+;
+; Authored : Feb 2026
+; ─────────────────────────────────────────────────────────────────────────────
+
+;─────────────────────────────────────────────────────────────────────────────
+; DEFINE SCRIPTOR COMMANDS — identical to JHR_ServerInfo.txt so the loader
+; treats MY_SERVER / SERVER_INFO / ODBC_INFO with the same parser.
+;─────────────────────────────────────────────────────────────────────────────
+
+#DEFINE NATION_NAME
+  <STRING>                  ; Nation / deployment label
+#ENDDEFINE
+
+#DEFINE WORLD_NAME
+  <INTEGER>                 ; World No
+  <STRING>                  ; Friendly name
+  <STRING>                  ; Data path (relative to exe)
+#ENDDEFINE
+
+#DEFINE SERVER_INFO          ; Listen-socket declaration
+  <STRING>                  ; Name (e.g. "PG_Elle_HTTP")
+  <INTEGER>                 ; Server ID
+  <INTEGER>                 ; World No
+  <INTEGER>                 ; Zone / instance
+  <INTEGER>                 ; From-Server ID filter
+  <STRING>                  ; IP ('' = use my IP)
+  <INTEGER>                 ; Port
+  <INTEGER>                 ; Backlog (0 = SOMAXCONN)
+  <INTEGER>                 ; Max accept sockets
+#ENDDEFINE
+
+#DEFINE ODBC_INFO
+  <STRING>                  ; DB name (loader key)
+  <INTEGER>                 ; DB ID
+  <INTEGER>                 ; World No
+  <STRING>                  ; ODBC connection string
+  <STRING>                  ; Startup SQL (USE ...)
+#ENDDEFINE
+
+;─────────────────────────────────────────────────────────────────────────────
+; Server ID map — Elle services start at 100 to leave room for legacy
+; Fiesta numbering (0-20 reserved for Account/Login/Zone/OPTOOL/Launcher/
+; Client etc.).  Numbers here must stay stable across deploys — the
+; Android companion and the SCM registrar bake them in.
+;─────────────────────────────────────────────────────────────────────────────
+;
+;  100 SVC_QUEUE_WORKER
+;  101 SVC_HTTP_SERVER
+;  102 SVC_EMOTIONAL
+;  103 SVC_MEMORY
+;  104 SVC_COGNITIVE
+;  105 SVC_ACTION
+;  106 SVC_IDENTITY
+;  107 SVC_HEARTBEAT
+;  108 SVC_SELF_PROMPT
+;  109 SVC_DREAM
+;  110 SVC_GOAL_ENGINE
+;  111 SVC_WORLD_MODEL
+;  112 SVC_LUA_BEHAVIORAL
+;  113 SVC_BONDING
+;  114 SVC_CONTINUITY
+;  115 SVC_INNER_LIFE
+;  116 SVC_SOLITUDE
+;  117 SVC_FAMILY
+;  118 SVC_X_CHROMOSOME
+;  119 SVC_CONSENT
+;  120 SVC_FIESTA
+;─────────────────────────────────────────────────────────────────────────────
+
+NATION_NAME  "Elle"
+
+WORLD_NAME   0, "ElleCore", "../9Data/Hero"
+
+;─────────────────────────────────────────────────────────────────────────────
+; SERVICE LISTEN SOCKETS
+;
+; Elle services communicate over IOCP named pipes, NOT TCP, so port
+; assignments here are purely for the HTTP edge (SVC_HTTP_SERVER) and for
+; any future TCP-exposed diagnostic endpoints.  The named-pipe prefix
+; lives in elle_master_config.json under services.named_pipes.prefix.
+;─────────────────────────────────────────────────────────────────────────────
+
+; [Name]               [ID, W, Z, F]    [IP]              [Port]    [Backlog]  [MaxSock]
+
+; Edge HTTP REST + WebSocket — the only TCP listener in the mesh.
+SERVER_INFO "PG_Elle_HTTP",       101, 0, 0,20, "0.0.0.0",          8000,  100,    2000   ; From Client (Android/Dev)
+SERVER_INFO "PG_Elle_HTTP",       101, 0, 0, 8, "127.0.0.1",        8001,    1,      50   ; From OPTOOL / CLI admin
+
+; Diagnostic probe channel (optional — off unless services.diag_tcp_port set).
+SERVER_INFO "PG_Elle_Diag",       199, 0, 0, 8, "127.0.0.1",        8099,    1,      20   ; From OPTOOL
+
+;─────────────────────────────────────────────────────────────────────────────
+; ODBC
+;
+; `ElleCore`     = emotional / cognitive / memory / world / goal state
+; `Account`      = game account DB (read-only from Elle; sUserID / sUserPW)
+; `ElleSystem`   = sessions + logs + workers (cross-process runtime truth)
+;
+; Passwords live in environment-specific overrides that operators keep
+; OUTSIDE this committed file.  Replace "TRUSTED_CONNECTION=Yes" with your
+; UID/PWD pair on a production host.
+;─────────────────────────────────────────────────────────────────────────────
+
+ODBC_INFO "ElleCore",    100, 0, "DRIVER={SQL Server};SERVER=.\SQLEXPRESS;Trusted_Connection=Yes;", "USE ElleCore;   SET LOCK_TIMEOUT 5000"
+ODBC_INFO "Account",       0, 0, "DRIVER={SQL Server};SERVER=.\SQLEXPRESS;Trusted_Connection=Yes;", "USE Account;    SET LOCK_TIMEOUT 5000"
+ODBC_INFO "ElleSystem",  101, 0, "DRIVER={SQL Server};SERVER=.\SQLEXPRESS;Trusted_Connection=Yes;", "USE ElleSystem; SET LOCK_TIMEOUT 5000"
+
+#END

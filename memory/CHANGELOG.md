@@ -288,3 +288,102 @@ the cognitive engine.
 - No copyrighted Fiesta game assets downloaded or embedded.
 - No-stub policy: every IPC op is wired to real `Fiesta::Client` calls, no fake 200s.
 - `/WX`-clean by inspection; no raw `Sleep()` in tick loop (uses `SetTickInterval(1000)`); no broad `catch(...)` (the sole `catch (const std::exception& e)` matches the existing Bonding pattern for JSON parse).
+
+---
+
+## Session Feb-2026 (continued) — Fiesta-parity logging, offline SQL queue, per-service ServerInfo
+
+### Logger finish (P0 — DONE, verified)
+- `ElleLogger::Initialize()` auto-opens the date-rotated
+  `<exe_dir>/debug/YYYY-MM-DD.txt` when `ELLE_LOG_TARGET_FILE` is set.
+  Previously file logging silently no-op'd until a caller remembered
+  to hand-hold with `SetLogFile()`.
+- Implemented the 4 methods that were **declared but not defined**
+  (would've tripped LNK2001 on the next `/WX` MSBuild run):
+  `LogWithContext`, `LogIntent`, `LogAction`, `LogIPC`.
+  Field names verified against `ELLE_INTENT_RECORD` /
+  `ELLE_ACTION_RECORD` / `ELLE_IPC_HEADER` in `ElleTypes.h`
+  (used `.type`, `.status`, `.urgency`, `.dest_svc`, etc.).
+- `ElleLogger.h` brace-balance clean; header compiles on g++17 with
+  `-Wall -Wextra` against stub types. Channel macros
+  (`ELLE_LOG_HTTP/SQL/SOCKET/ASSERT`) already defined and now actually
+  wired from real call sites.
+
+### Channel macro wire-up (P0c — DONE)
+Three files, ~12 call sites total, no functionality change — each new
+channel line is strictly additive next to the existing ELLE_INFO/ERROR
+so the unified debug stream stays identical and the per-channel files
+get their dedicated traffic:
+- `Shared/ElleSQLConn.cpp` — connect OK/FAIL, pool acquire timeout,
+  stale-reconnect (`ELLE_LOG_SQL`).
+- `Shared/ElleServiceBase.cpp` — dependency first-contact, peer
+  loss/reattempt, pending-peer markers (`ELLE_LOG_SOCKET`).
+- `Services/Elle.Service.HTTP/HTTPServer.cpp` — server listen, socket
+  create-fail, login OK/REFUSED/LOCKED, WS connect/disconnect
+  (`ELLE_LOG_HTTP` + `ELLE_LOG_SOCKET`). Channel logs land in
+  `<exe_dir>/http_YYYY-MM-DD.log` / `socket_YYYY-MM-DD.log` rotated at
+  10,000 lines per the Feb-2026 logger spec.
+
+### Offline SQL fallback queue (P1 — DONE, tested)
+New module `Shared/ElleSQLFallback.{h,cpp}`:
+- Serialises every failed `Exec` / `QueryParams` / `CallProc` to
+  `<exe_dir>/sqllogs/YYYY-MM-DD.txt` as one NDJSON line per query
+  (format: `{"ts","kind","sql","params":[…]}`).
+- Worker thread lazy-spawned on first enqueue; wakes every 10 s or on
+  `NudgeDrain()`. Probes via `SELECT 1` before replaying — if ODBC is
+  still down, no work is lost and the file is untouched.
+- On successful drain, lines are removed atomically (temp-file +
+  rename) so a crash mid-drain never loses un-replayed rows.
+- `ElleSQLPool::Initialize()` enables the fallback at boot and nudges
+  the drain (so crashes / restarts replay whatever the previous
+  lifetime left behind).
+- `ElleSQLPool::Acquire()` `NudgeDrain()`s after a successful
+  stale-reconnect — drain latency equals first post-recovery query.
+- Added to `ElleCore.Shared.vcxproj` as a new `ClCompile` entry.
+- **7/7 portable unit tests pass** (`Debug/test_sql_fallback_ndjson.cpp`):
+  simple happy path, every escape class, ctrl-char round-trip,
+  multi-line file replay, empty params, malformed rejection,
+  newline-inside-sql round-trip. Compiled with
+  `g++ -std=c++17 -Wall -Wextra -Werror`.
+- Full end-to-end run: Enqueue → read back the NDJSON from disk →
+  parse → assert equality.  File written at
+  `/tmp/sqllogs/2026-05-03.txt`, decode round-trip matches.
+
+### Fiesta-format per-service ServerInfo (P3 — DONE)
+Matches the 0oneServerInfo.txt / ZoneServerInfo.txt pattern exactly.
+- `9Data/ServerInfo/_ServerInfo.txt` — master. Same grammar as the
+  Fiesta `#DEFINE` / `#ENDDEFINE` / `SERVER_INFO` / `ODBC_INFO` layout
+  (same loader path already lives at `Shared/ElleServerInfo.{h,cpp}`).
+  Declares `NATION_NAME "Elle"`, `WORLD_NAME 0, "ElleCore", ".../Hero"`,
+  two HTTP listen sockets (client port 8000, OPTOOL port 8001), one
+  diag probe port, and three ODBC entries (ElleCore / Account /
+  ElleSystem).
+- 21 per-service files generated from `Deploy/gen_serverinfo_files.py`:
+  `_HTTPserverinfo.txt`, `_Cognitiveserverinfo.txt` etc.  Each declares
+  `MY_SERVER "<PG_Elle_X>", "<_X>", <100+N>, 0, 0` and
+  `#include "./_ServerInfo.txt"`.
+- Elle IDs start at 100 so a legacy Fiesta deploy (IDs 0–20) can live
+  side-by-side without collision.
+- `9Data/ServerInfo/README.md` documents the layout and regeneration.
+- **22/22 files verified valid** (Python regex parser mirroring the
+  C++ loader grammar confirms every `MY_SERVER` line parses and every
+  `#include` points at the master).
+
+### Files touched / created
+- `Shared/ElleLogger.cpp`                  (+4 methods, +auto-open init)
+- `Shared/ElleSQLFallback.h` / `.cpp`      (NEW — 350 LOC total)
+- `Shared/ElleSQLConn.cpp`                 (+fallback wiring, 4 SQL channel sites)
+- `Shared/ElleServiceBase.cpp`             (+3 SOCKET channel sites)
+- `Services/Elle.Service.HTTP/HTTPServer.cpp` (+6 HTTP/SOCKET channel sites)
+- `Shared/ElleCore.Shared.vcxproj`         (+ElleSQLFallback.cpp/.h)
+- `9Data/ServerInfo/_ServerInfo.txt`       (NEW master)
+- `9Data/ServerInfo/_<21 services>.txt`    (NEW per-service)
+- `9Data/ServerInfo/README.md`             (NEW)
+- `Deploy/gen_serverinfo_files.py`         (NEW — generator)
+- `Debug/test_sql_fallback_ndjson.cpp`     (NEW — 7 unit tests, all pass)
+
+### Deferred (next session)
+- **Lua settings loader (P2)**: wire `settings.lua` (already vendored
+  at `9Data/Hero/LuaScript/ElleLua/settings.lua`) into ElleConfig so
+  behavioral traits migrate off `elle_master_config.json`. Needs a
+  Lua-project-side bridge (Shared stays Lua-free by design).

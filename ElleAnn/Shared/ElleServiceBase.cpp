@@ -811,6 +811,7 @@ void ElleServiceBase::TickReconnector() {
         if (wasUp && !aliveNow) {
             ELLE_WARN("Lost connection to %s — will reattempt",
                       ElleIPC::GetServiceName(dep));
+            ELLE_LOG_SOCKET("IPC LOST %s — reattempt", ElleIPC::GetServiceName(dep));
             std::lock_guard<std::mutex> lk(m_reconnectMutex);
             m_everConnectedTo.erase(dep);
             /* Fall through to the ConnectTo attempt below so we rebuild
@@ -837,6 +838,9 @@ void ElleServiceBase::TickReconnector() {
                 ELLE_INFO("Mesh: first contact with %s (epoch %llu)",
                           ElleIPC::GetServiceName(dep),
                           (unsigned long long)now);
+                ELLE_LOG_SOCKET("IPC first-contact %s epoch=%llu",
+                                ElleIPC::GetServiceName(dep),
+                                (unsigned long long)now);
             }
         }
     }

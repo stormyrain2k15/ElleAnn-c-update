@@ -69,6 +69,7 @@
     <ClCompile Include="ElleServerInfo.cpp" />
     <ClCompile Include="ElleServiceBase.cpp" />
     <ClCompile Include="ElleSQLConn.cpp" />
+    <ClCompile Include="ElleSQLFallback.cpp" />
     <ClCompile Include="ElleDB_Queues.cpp" />
     <ClCompile Include="ElleDB_Domain.cpp" />
     <ClCompile Include="ElleDB_Content.cpp" />
@@ -90,6 +91,7 @@
     <ClInclude Include="ElleSelfSurprise.h" />
     <ClInclude Include="ElleServerInfo.h" />
     <ClInclude Include="ElleSQLConn.h" />
+    <ClInclude Include="ElleSQLFallback.h" />
     <ClInclude Include="ElleGameAccountDB.h" />
     <ClInclude Include="ElleUserContinuity.h" />
     <ClInclude Include="ElleTypes.h" />

@@ -3,6 +3,7 @@
  ******************************************************************************/
 #include "ElleSQLConn.h"
 #include "ElleLogger.h"
+#include "ElleSQLFallback.h"
 
 #include <sql.h>
 #include <sqlext.h>
@@ -168,12 +169,14 @@ bool SQLConnection::Connect(const std::string& connectionString) {
     if (!SQL_SUCCEEDED(ret)) {
         m_lastError = GetDiagnostics(SQL_HANDLE_DBC, m_hDbc);
         ELLE_WARN("SQL connect failed: %s", m_lastError.c_str());
+        ELLE_LOG_SQL("connect FAILED: %s", m_lastError.c_str());
         FreeHandles();
         return false;
     }
 
     m_connected = true;
     m_lastUsed = ELLE_MS_NOW();
+    ELLE_LOG_SQL("connect OK conn=%p", (void*)m_hDbc);
     return true;
 }
 
@@ -522,6 +525,11 @@ bool ElleSQLPool::Initialize(const std::string& connectionString, uint32_t poolS
     m_connStr = connectionString;
     m_poolSize = poolSize;
 
+    /* Enable the offline fallback queue — writes that can't reach ODBC
+     * land in <exe_dir>/sqllogs/YYYY-MM-DD.txt and get drained on
+     * recovery. Idempotent; safe to call on every Initialize().         */
+    ElleSQLFallback::Instance().Initialize(true);
+
     for (uint32_t i = 0; i < poolSize; i++) {
         std::shared_ptr<SQLConnection> conn;
         if (CreateConnection(conn)) {
@@ -532,6 +540,9 @@ bool ElleSQLPool::Initialize(const std::string& connectionString, uint32_t poolS
     }
 
     m_initialized = !m_available.empty();
+    /* Prod the drain worker — if a previous run left lines in
+     * sqllogs/, replay them now that the pool is up.                    */
+    if (m_initialized) ElleSQLFallback::Instance().NudgeDrain();
     return m_initialized;
 }
 
@@ -564,6 +575,8 @@ std::shared_ptr<SQLConnection> ElleSQLPool::Acquire(uint32_t timeoutMs) {
     if (!m_cv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
                        [this] { return !m_available.empty(); })) {
         ELLE_WARN("SQL pool: Acquire timeout after %dms", timeoutMs);
+        ELLE_LOG_SQL("pool acquire TIMEOUT %dms (available=%zu)",
+                     timeoutMs, m_available.size());
         return nullptr;
     }
 
@@ -573,11 +586,17 @@ std::shared_ptr<SQLConnection> ElleSQLPool::Acquire(uint32_t timeoutMs) {
     /* Validate connection */
     if (!conn->Ping()) {
         ELLE_WARN("SQL pool: Stale connection, reconnecting...");
+        ELLE_LOG_SQL("pool: stale conn, reconnecting");
         conn->Disconnect();
         if (!conn->Connect(m_connStr)) {
             ELLE_ERROR("SQL pool: Reconnection failed");
+            ELLE_LOG_SQL("pool: reconnect FAILED");
             return nullptr;
         }
+        ELLE_LOG_SQL("pool: reconnect OK");
+        /* Pool just recovered — prod the offline fallback to replay any
+         * queries buffered while ODBC was down.                          */
+        ElleSQLFallback::Instance().NudgeDrain();
     }
 
     return conn;
@@ -601,7 +620,15 @@ SQLResultSet ElleSQLPool::Query(const std::string& sql) {
 
 SQLResultSet ElleSQLPool::QueryParams(const std::string& sql, const std::vector<std::string>& params) {
     auto conn = Acquire();
-    if (!conn) return {};
+    if (!conn) {
+        /* Pool down — queue for drain. Callers that need a return value
+         * still see failure (empty result set), but the write is preserved. */
+        if (ElleSQLFallback::Instance().IsEnabled()) {
+            ElleSQLFallback::Instance().Enqueue(
+                ElleSQLFallback::Kind::QueryParams, sql, params);
+        }
+        return {};
+    }
     m_totalQueries++;
     auto result = conn->ExecuteParams(sql, params);
     Release(conn);
@@ -619,10 +646,24 @@ SQLResultSet ElleSQLPool::CallProc(const std::string& proc, const std::vector<st
 
 bool ElleSQLPool::Exec(const std::string& sql) {
     auto conn = Acquire();
-    if (!conn) return false;
+    if (!conn) {
+        /* ODBC unreachable — stash this statement for drain-on-recovery.
+         * Return true because the caller's write is persisted to disk and
+         * will be replayed; returning false would cause callers to treat
+         * a transient outage as data loss.                                */
+        if (ElleSQLFallback::Instance().IsEnabled() &&
+            ElleSQLFallback::Instance().Enqueue(ElleSQLFallback::Kind::Exec, sql, {})) {
+            return true;
+        }
+        return false;
+    }
     m_totalQueries++;
     bool ok = conn->ExecuteNonQuery(sql);
     Release(conn);
+    if (!ok && ElleSQLFallback::Instance().IsEnabled()) {
+        /* Transient failure mid-flight — queue for retry. */
+        ElleSQLFallback::Instance().Enqueue(ElleSQLFallback::Kind::Exec, sql, {});
+    }
     return ok;
 }
 

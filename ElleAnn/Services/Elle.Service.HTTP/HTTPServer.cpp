@@ -1213,9 +1213,15 @@ public:
 
 protected:
     bool OnStart() override {
+        /* First line emitted by the service — lands in
+         * <exe_dir>/http_YYYY-MM-DD.log so operators can tail a dedicated
+         * HTTP channel independently of the unified debug stream.      */
+        ELLE_LOG_HTTP("OnStart — HTTP service booting");
+
         WSADATA wsaData;
         if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
             ELLE_ERROR("WSAStartup failed");
+            ELLE_LOG_SOCKET("WSAStartup FAILED");
             return false;
         }
 
@@ -1226,6 +1232,7 @@ protected:
         m_listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (m_listenSocket == INVALID_SOCKET) {
             ELLE_ERROR("socket() failed: %d", WSAGetLastError());
+            ELLE_LOG_SOCKET("socket() FAILED wsa=%d", WSAGetLastError());
             return false;
         }
 
@@ -1261,6 +1268,8 @@ protected:
 
         ELLE_INFO("HTTP server listening on %s:%d (%zu routes, %u workers)",
                   cfg.bind_address.c_str(), cfg.port, m_router.Count(), workers);
+        ELLE_LOG_HTTP("server listening on %s:%d (routes=%zu workers=%u)",
+                      cfg.bind_address.c_str(), cfg.port, m_router.Count(), workers);
 
         /* Emit the runtime-active HTTP knobs so config drift is visible in
          * logs. Post-pivot (Feb 2026) auth is session-token only — no
@@ -2078,6 +2087,7 @@ private:
         }
 
         ELLE_INFO("WebSocket client connected: %s", client->id.c_str());
+        ELLE_LOG_SOCKET("WS CONNECT id=%s", client->id.c_str());
 
         /* Send welcome */
         json welcome = {
@@ -2253,6 +2263,7 @@ private:
                 [&](const std::shared_ptr<WSClient>& c) { return c.get() == client.get(); }),
             m_wsClients.end());
         ELLE_INFO("WebSocket client disconnected: %s", client->id.c_str());
+        ELLE_LOG_SOCKET("WS DISCONNECT id=%s", client->id.c_str());
     }
 
     void HandleWebSocketMessage(std::shared_ptr<WSClient> client, const std::string& payload) {
@@ -2525,6 +2536,9 @@ private:
                                   "retry_after_ms=%llu",
                                   username.c_str(), peer.c_str(),
                                   (unsigned long long)remaining);
+                        ELLE_LOG_HTTP("login LOCKED user=\"%s\" peer=%s retry_ms=%llu",
+                                      username.c_str(), peer.c_str(),
+                                      (unsigned long long)remaining);
                         HTTPResponse r = HTTPResponse::Err(429,
                             "too many failed attempts — try again later");
                         r.headers["Retry-After"] =
@@ -2542,6 +2556,8 @@ private:
                     }
                     ELLE_INFO("login: refused user=\"%s\" peer=%s",
                               username.c_str(), peer.c_str());
+                    ELLE_LOG_HTTP("login REFUSED user=\"%s\" peer=%s",
+                                  username.c_str(), peer.c_str());
                     /* Generic message — never reveal whether the user
                      * exists.  Same response shape for "no such user"
                      * and "wrong password". */
@@ -2625,6 +2641,9 @@ private:
                           "device=%s peer=%s",
                           id.sUserID.c_str(), (long long)id.nUserNo,
                           id.nAuthID, device_id.c_str(), peer.c_str());
+                ELLE_LOG_HTTP("login OK user=\"%s\" nUserNo=%lld nAuthID=%d peer=%s",
+                              id.sUserID.c_str(), (long long)id.nUserNo,
+                              id.nAuthID, peer.c_str());
 
                 return HTTPResponse::OK({
                     {"token",        token},

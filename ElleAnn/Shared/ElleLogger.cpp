@@ -34,6 +34,20 @@ bool ElleLogger::Initialize(ELLE_SERVICE_ID sourceService, uint32_t targets,
         m_dbThread = std::thread(&ElleLogger::DatabaseWriterThread, this);
     }
 
+    /* Auto-open the date-rotated debug file when FILE target is set and
+     * the caller hasn't already pointed us at a legacy path. Mirrors the
+     * Fiesta `Debug/YYYYMMDD.txt` convention — first line of the service's
+     * life lands in <exe_dir>/debug/YYYY-MM-DD.txt without the caller
+     * having to know about SetLogFile().                                 */
+    if ((targets & ELLE_LOG_TARGET_FILE) && m_logPath.empty()) {
+        std::lock_guard<std::mutex> fileLock(m_fileMutex);
+        m_currentDateYmd    = TodayYmd();
+        m_currentDateSuffix = 0;
+        m_currentLineCount  = 0;
+        m_currentFileSize   = 0;
+        OpenDatedDebugFile();
+    }
+
     m_initialized = true;
     return true;
 }
@@ -200,6 +214,76 @@ void ElleLogger::LogLLM(const ELLE_LLM_REQUEST& req, const ELLE_LLM_RESPONSE& re
     } else {
         Error("LLM[%s] FAILED: %s", req.model_name, resp.error);
     }
+}
+
+/* Context-prefixed entry — same pipeline as Log() but carries a caller-
+ * supplied tag that FormatEntry slots between the service name and the
+ * message (e.g. "[ElleServiceBase]" for startup phases).                */
+void ElleLogger::LogWithContext(ELLE_LOG_LEVEL level, const char* context, const char* fmt, ...) {
+    if (!m_initialized || level < m_minLevel.load(std::memory_order_acquire)) return;
+
+    char buffer[4096];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    std::string formatted = FormatEntry(level, buffer, context ? context : "");
+
+    if (m_targets & ELLE_LOG_TARGET_CONSOLE) WriteConsole(level, formatted);
+    if (m_targets & ELLE_LOG_TARGET_FILE)    WriteFile(formatted);
+    if (m_targets & ELLE_LOG_TARGET_WEBSOCKET) {
+        std::function<void(const std::string&)> cb;
+        {
+            std::lock_guard<std::mutex> lock(m_wsMutex);
+            cb = m_wsBroadcaster;
+        }
+        if (cb) cb(formatted);
+    }
+
+    if (m_targets & ELLE_LOG_TARGET_DATABASE) {
+        ELLE_LOG_ENTRY entry;
+        entry.level = level;
+        entry.source_svc = m_sourceService;
+        entry.timestamp_ms = ELLE_MS_NOW();
+        strncpy_s(entry.message, buffer, ELLE_MAX_MSG - 1);
+        if (context) strncpy_s(entry.context, context, sizeof(entry.context) - 1);
+        else         entry.context[0] = '\0';
+        std::lock_guard<std::mutex> lock(m_dbMutex);
+        m_dbQueue.push(entry);
+    }
+
+    m_totalEntries++;
+    if (level >= LOG_ERROR) m_errorCount++;
+}
+
+/* Specialised logs — forward into the main logger at INFO level with a
+ * canonical one-line summary. Kept here (rather than inlined in the
+ * header) so header include surface stays minimal and all formatting
+ * lives next to the other specialised loggers.                           */
+void ElleLogger::LogIntent(const ELLE_INTENT_RECORD& intent) {
+    Info("Intent[type=%u urg=%.2f status=%u]: %s",
+         (unsigned)intent.type,
+         intent.urgency,
+         (unsigned)intent.status,
+         intent.description);
+}
+
+void ElleLogger::LogAction(const ELLE_ACTION_RECORD& action) {
+    Info("Action[type=%u status=%u intent=%llu]: %s",
+         (unsigned)action.type,
+         (unsigned)action.status,
+         (unsigned long long)action.intent_id,
+         action.command);
+}
+
+void ElleLogger::LogIPC(const ELLE_IPC_HEADER& header, bool incoming) {
+    Trace("IPC %s [type=%u src=%u dst=%u payload=%u]",
+          incoming ? "RX" : "TX",
+          (unsigned)header.msg_type,
+          (unsigned)header.source_svc,
+          (unsigned)header.dest_svc,
+          (unsigned)header.payload_size);
 }
 
 /*──────────────────────────────────────────────────────────────────────────────

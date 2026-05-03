@@ -2235,3 +2235,45 @@ User directive (with reference screenshots showing Fiesta Zone.exe
 - `Deploy/Install-ElleServices.ps1`         (retired → pointer)
 - `Deploy/Uninstall-ElleServices.ps1`       (mirror of above)
 - `Deploy/Install.bat` / `Uninstall.bat`    (retired → pointer)
+
+---
+
+## Session Feb-2026 (continued) — Logger finish + offline SQL queue + ServerInfo
+
+(See `/app/memory/CHANGELOG.md` for the full per-file diff narrative.)
+
+### Status summary
+- **Logger refactor (P0)**: DONE. Date-rotated debug stream auto-opens
+  on `Initialize()`; channel macros `ELLE_LOG_HTTP/SQL/SOCKET/ASSERT`
+  wired from HTTPServer, ElleSQLConn, ElleServiceBase. `LogWithContext`
+  / `LogIntent` / `LogAction` / `LogIPC` method definitions landed
+  (were declared-only; would've tripped `/WX` LNK2001).
+- **Offline SQL fallback (P1)**: DONE. `Shared/ElleSQLFallback.{h,cpp}`
+  serialises failed queries to `<exe_dir>/sqllogs/YYYY-MM-DD.txt`
+  (NDJSON, one line per query). Drains on `NudgeDrain()` fired from the
+  pool's stale-reconnect path. 7/7 unit tests pass with
+  `-Wall -Wextra -Werror`.
+- **Fiesta-format ServerInfo (P3)**: DONE. `9Data/ServerInfo/_ServerInfo.txt`
+  (master, Fiesta grammar) + 21 per-service `_<Service>serverinfo.txt`
+  files with `MY_SERVER` + `#include`. All 22 parse-verified against
+  the `Shared/ElleServerInfo.cpp` loader grammar.
+
+### Deferred
+- **Lua settings loader (P2)**: wire `9Data/Hero/LuaScript/ElleLua/
+  settings.lua` → ElleConfig behavioral traits via a Lua-project-side
+  bridge (Shared stays Lua-free). Needed to hollow out the behavioral
+  portion of `elle_master_config.json`.
+- **Lua-driven behavioral reload**: once above lands, hot-reload needs
+  to re-run the Lua bridge on `IPC_CONFIG_RELOAD`.
+
+### Files this batch
+- `Shared/ElleLogger.cpp`                  (method bodies + auto-open)
+- `Shared/ElleSQLFallback.{h,cpp}`         (NEW)
+- `Shared/ElleSQLConn.cpp`                 (fallback wiring + channel logs)
+- `Shared/ElleServiceBase.cpp`             (socket channel logs)
+- `Services/Elle.Service.HTTP/HTTPServer.cpp` (HTTP/socket channel logs)
+- `Shared/ElleCore.Shared.vcxproj`         (+ElleSQLFallback)
+- `9Data/ServerInfo/*.txt`                 (22 files, all Fiesta-grammar)
+- `9Data/ServerInfo/README.md`             (NEW)
+- `Deploy/gen_serverinfo_files.py`         (NEW)
+- `Debug/test_sql_fallback_ndjson.cpp`     (NEW, 7/7 pass)
