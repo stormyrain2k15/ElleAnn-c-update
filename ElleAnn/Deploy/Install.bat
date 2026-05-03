@@ -1,34 +1,22 @@
 @echo off
-REM Double-click wrapper -- elevates and runs Install-ElleServices.ps1.
-REM Propagates the underlying PowerShell exit code so a failed install
-REM never prints "Done." OpSec audit (Feb 2026, item #132): prior
-REM version unconditionally said "Done." and paused, masking failures.
-
-setlocal
-
-REM Elevate if not already admin.
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo Requesting Administrator privileges...
-    powershell -Command "Start-Process '%~f0' -Verb RunAs"
-    exit /b %errorLevel%
-)
-
-set "SCRIPT_DIR=%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Install-ElleServices.ps1" %*
-set "PS_RC=%errorLevel%"
-
+REM Install.bat — retired Feb 2026.
+REM
+REM Elle services are now Fiesta-style self-installing: double-click
+REM each Release\x64\Elle.Service.*.exe (as Administrator) and click
+REM OK on the "SERVICE UPLOAD ONLY OK" dialog.  After that, manage
+REM them via services.msc.  No batch / ps1 / dependency chain.
+REM
+REM This batch is kept only so anyone relying on the old filename gets
+REM a pointer instead of a silent no-op.
 echo.
-if "%PS_RC%"=="0" (
-    echo ================================================================
-    echo  SUCCESS. To uninstall later, run Uninstall.bat from this folder.
-    echo ================================================================
-) else (
-    echo ================================================================
-    echo  FAILED. Install-ElleServices.ps1 exited with code %PS_RC%.
-    echo  Check the PowerShell output above for the specific error.
-    echo ================================================================
-)
-
+echo Install.bat is retired.
+echo.
+echo To install Elle services:
+echo   1. Navigate to Release\x64 (or wherever your builds land)
+echo   2. Right-click Elle.Service.HTTP.exe  -  Run as administrator
+echo   3. Double-click the exe
+echo   4. Click OK on the "SERVICE UPLOAD ONLY OK" dialog
+echo   5. Repeat for each other Elle.Service.*.exe
+echo.
+echo Services can start/stop/restart in any order from services.msc.
 pause
-exit /b %PS_RC%

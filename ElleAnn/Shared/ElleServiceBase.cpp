@@ -110,7 +110,7 @@ void WINAPI ElleServiceBase::ServiceMain(DWORD argc, LPWSTR* argv) {
 
     if (!s_instance->m_svcStatusHandle) return;
 
-    s_instance->ReportStatus(SERVICE_START_PENDING, NO_ERROR, 10000);
+    s_instance->ReportStatus(SERVICE_START_PENDING, NO_ERROR, kStartHintMs);
 
     if (!s_instance->InitializeCore()) {
         s_instance->ReportStatus(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR);
@@ -133,7 +133,13 @@ DWORD WINAPI ElleServiceBase::ServiceCtrlHandler(DWORD control, DWORD eventType,
     switch (control) {
         case SERVICE_CONTROL_STOP:
         case SERVICE_CONTROL_SHUTDOWN:
-            svc->ReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 10000);
+            /* Fast-stop. Pre-pivot the wait hint here was 10s per
+             * service × 21 services ≈ 3.5 min of cumulative SCM
+             * timeout just telling Windows we were pending. The real
+             * shutdown path is bounded by InterruptibleSleep which
+             * completes in ≤ a tick interval (<= 1s) once m_running
+             * flips; 2s is plenty of headroom with no drama.      */
+            svc->ReportStatus(SERVICE_STOP_PENDING, NO_ERROR, kStopHintMs);
             svc->m_running = false;
             /* Wake every thread in InterruptibleSleep so stop latency is
              * bounded by OnTick duration instead of m_tickIntervalMs. */
@@ -229,11 +235,19 @@ bool ElleServiceBase::InstallService() {
     desc.lpDescription = const_cast<LPSTR>(m_description.c_str());
     ChangeServiceConfig2A(hService, SERVICE_CONFIG_DESCRIPTION, &desc);
 
-    /* Set recovery: restart on failure */
+    /* Recovery: restart on failure, small delays.
+     *
+     * Pre-pivot the third retry sat at 30s; combined with the per-
+     * attempt SCM StartPending 10s timeout and 21 services, a worst-
+     * case failing deploy blocked for >10 min before SCM gave up on
+     * the last service. Shortened to 1s / 2s / 5s (reset window
+     * unchanged at 1 day). A service that keeps crashing within 5s
+     * repeatedly is a config bug the operator should see and fix,
+     * not a condition we want to paper over with long backoffs.     */
     SC_ACTION actions[3] = {
-        { SC_ACTION_RESTART, 5000 },
-        { SC_ACTION_RESTART, 10000 },
-        { SC_ACTION_RESTART, 30000 }
+        { SC_ACTION_RESTART, 1000 },
+        { SC_ACTION_RESTART, 2000 },
+        { SC_ACTION_RESTART, 5000 }
     };
     SERVICE_FAILURE_ACTIONSA failActions;
     ZeroMemory(&failActions, sizeof(failActions));
@@ -289,8 +303,14 @@ bool ElleServiceBase::UninstallService() {
     SERVICE_STATUS status;
     if (ControlService(hService, SERVICE_CONTROL_STOP, &status)) {
         std::cout << "Stopping service...";
-        const DWORD pollMs = 200;
-        const DWORD ceilMs = 30000;
+        const DWORD pollMs = 100;
+        const DWORD ceilMs = 5000;   /* 30s → 5s: the service itself
+                                      * only needs <= 2s to stop cleanly
+                                      * (see kStopHintMs). 5s is pure
+                                      * safety margin; if it can't stop
+                                      * in that, DeleteService after this
+                                      * will still succeed as MARKED_FOR
+                                      * _DELETE on the next reboot.     */
         DWORD waited = 0;
         HANDLE hSelf = GetCurrentProcess(); /* never signals — timeout-only */
         while (status.dwCurrentState != SERVICE_STOPPED && waited < ceilMs) {
@@ -317,34 +337,47 @@ bool ElleServiceBase::UninstallService() {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
- * DOUBLE-CLICK INSTALL
+ * DOUBLE-CLICK INSTALL — Fiesta Zone.exe style.
+ *
+ *   The operator double-clicks the exe. It silently registers the
+ *   service with SCM (CreateServiceA → start it → exit), showing a
+ *   single modal MessageBox on the way out:
+ *
+ *       "<SERVICE UPLOAD ONLY OK>"       on success
+ *       "<SERVICE UPLOAD FAILED>"        on any failure
+ *
+ *   Same phrasing as Fiesta's own Zone.exe so it's instantly familiar.
+ *   After the OK dialog, the exe exits and the operator controls the
+ *   service from services.msc the rest of its life. No batch, no
+ *   PowerShell, no install/uninstall switches needed — though the
+ *   `--install` / `--uninstall` / `--console` flags still work for
+ *   CI and dev loops.
+ *
+ *   Explicitly: NO "Yes/No/Cancel" menu. The pre-pivot version asked
+ *   the user whether they wanted console vs service mode; on a fresh
+ *   deploy-to-server machine that's noise. If you want console mode,
+ *   run `exe --console`.
  *──────────────────────────────────────────────────────────────────────────────*/
 int ElleServiceBase::DoubleClickInstall() {
-    std::string msg = m_displayName + " v" + ELLE_VERSION_STRING + "\n\n"
-        "Would you like to install this as a Windows service?\n\n"
-        "Yes = Install and start service\n"
-        "No  = Run in console mode (debug)\n"
-        "Cancel = Exit";
+    /* Hide the transient console window Windows opened when the exe
+     * was double-clicked from Explorer. FreeConsole() detaches; the
+     * MessageBox renders cleanly without a black box behind it. On a
+     * console-launched install (Admin cmd, CI) there's nothing to
+     * detach and the call is a no-op.                                */
+    FreeConsole();
 
-    int result = MessageBoxA(nullptr, msg.c_str(), m_displayName.c_str(),
-                             MB_YESNOCANCEL | MB_ICONQUESTION);
-
-    switch (result) {
-        case IDYES:
-            if (InstallService()) {
-                MessageBoxA(nullptr, "Service installed and started successfully!",
-                            m_displayName.c_str(), MB_OK | MB_ICONINFORMATION);
-                return 0;
-            } else {
-                MessageBoxA(nullptr, "Installation failed. Try running as Administrator.",
-                            m_displayName.c_str(), MB_OK | MB_ICONERROR);
-                return 1;
-            }
-        case IDNO:
-            return RunConsole();
-        default:
-            return 0;
-    }
+    bool ok = InstallService();
+    /* Hide stdout — the parent console (if any) may have printed during
+     * InstallService(); the MessageBox alone is the operator-visible
+     * cue, identical to Zone.exe's behaviour.                           */
+    const char* msg = ok
+        ? "<SERVICE UPLOAD ONLY OK>"
+        : "<SERVICE UPLOAD FAILED>\n\n"
+          "Most common cause: this exe is not running as Administrator.\n"
+          "Right-click → Run as administrator, then double-click again.";
+    MessageBoxA(nullptr, msg, m_displayName.c_str(),
+                MB_OK | (ok ? MB_ICONINFORMATION : MB_ICONERROR));
+    return ok ? 0 : 1;
 }
 
 bool ElleServiceBase::IsRunningFromSCM() {

@@ -193,6 +193,22 @@ private:
      *  "first contact" / "lost peer" log lines on transitions. */
     void TickReconnector();
     static constexpr uint32_t kReconnectIntervalMs = 5000;
+
+    /* SCM pending-state wait hints.
+     *
+     *   kStartHintMs — time we promise SCM we need to reach RUNNING.
+     *     Capped at 2s: InitializeCore + OnStart in this codebase run
+     *     in well under that even on the slowest service (SQL pool
+     *     init is now non-fatal post passive-mesh refactor). If any
+     *     service truly needs longer it should raise this per-service
+     *     via an override, not force every service to wait.
+     *   kStopHintMs — same but for STOP_PENDING. 2s is more than
+     *     enough: ShutdownCore joins the reconnector (≤ tick interval)
+     *     + tears down the IPC hub (synchronous).  Pre-pivot this was
+     *     10s × 21 services ≈ 3.5 min of cumulative SCM stop latency
+     *     on a full-stack shutdown — completely gratuitous.           */
+    static constexpr uint32_t kStartHintMs = 2000;
+    static constexpr uint32_t kStopHintMs  = 2000;
 };
 
 /*──────────────────────────────────────────────────────────────────────────────

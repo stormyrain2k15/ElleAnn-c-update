@@ -1,31 +1,17 @@
 @echo off
-REM Double-click wrapper -- elevates and runs Uninstall-ElleServices.ps1.
-REM Propagates the underlying PowerShell exit code (audit item #132).
-
-setlocal
-
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo Requesting Administrator privileges...
-    powershell -Command "Start-Process '%~f0' -Verb RunAs"
-    exit /b %errorLevel%
-)
-
-set "SCRIPT_DIR=%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Uninstall-ElleServices.ps1" %*
-set "PS_RC=%errorLevel%"
-
+REM Uninstall.bat — retired Feb 2026.
+REM
+REM To uninstall: open services.msc as Administrator, right-click each
+REM Elle-Ann service, Stop, then run `sc.exe delete ElleHTTPServer`
+REM (etc.) from an elevated prompt.  Or run the exe with --uninstall:
+REM     Elle.Service.HTTP.exe --uninstall
 echo.
-if "%PS_RC%"=="0" (
-    echo ================================================================
-    echo  Uninstall complete.
-    echo ================================================================
-) else (
-    echo ================================================================
-    echo  FAILED. Uninstall-ElleServices.ps1 exited with code %PS_RC%.
-    echo  Check the PowerShell output above for the specific error.
-    echo ================================================================
-)
-
+echo Uninstall.bat is retired.
+echo.
+echo To uninstall Elle services:
+echo   EITHER: for each service, run (elevated):
+echo             Elle.Service.HTTP.exe --uninstall
+echo   OR:     in services.msc, Stop the service,
+echo           then in elevated cmd:  sc delete ElleHTTPServer
+echo.
 pause
-exit /b %PS_RC%

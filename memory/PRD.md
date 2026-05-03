@@ -2156,3 +2156,82 @@ Fiesta is still on hold per prior directive.
        drainMoreResults, SQL reconnect in TickReconnector), or
   (b) fail-safe relaxations (SQL init non-fatal, error logging,
        target-DB migration).
+
+## Session Feb-2026 — Fiesta-style service install + short stop timeouts
+
+User directive (with reference screenshots showing Fiesta Zone.exe
+`<SERVICE UPLOAD ONLY OK>` / `<SERVICE UPLOAD FAILED>` dialogs):
+  - double-click each exe → registers with SCM silently,
+  - control from services.msc afterwards,
+  - no batch, no ps1, no service dependencies,
+  - reduce the 30s × 21 stop-timeout cascade.
+
+### What changed in `Shared/ElleServiceBase.{cpp,h}`
+
+1. `DoubleClickInstall()` rewritten Fiesta-style. Dropped the Yes/No/
+   Cancel MessageBox. New flow: auto-InstallService → FreeConsole() to
+   detach the stray black window Explorer opened → one MessageBox:
+   ```
+     <SERVICE UPLOAD ONLY OK>      (MB_ICONINFORMATION on success)
+     <SERVICE UPLOAD FAILED>       (MB_ICONERROR on any failure,
+                                    with the "not running as admin"
+                                    hint as the most likely cause)
+   ```
+   Same phrasing as Zone.exe's own dialog so it's instantly familiar.
+
+2. SCM pending-state timeouts dropped from 10s / 30s to **2s** across
+   the board. New `kStartHintMs = 2000` / `kStopHintMs = 2000` in the
+   header so there's one place to tune.
+   Math: 21 services × 10s SCM stop hint = ~3.5 min of pure "telling
+   Windows we're trying" latency on a full-stack stop. Now it's
+   bounded at 42s (= 21 × 2s) for the SCM handshake, and the real
+   shutdown path is <<1s per service because the reconnector join
+   is wait-cv driven.
+
+3. `UninstallService()` SCM wait ceiling dropped 30s → 5s. Same
+   reasoning — the real stop path is <2s; the 5s is pure safety
+   margin, and if SCM can't stop the service in 5s the subsequent
+   DeleteService still succeeds as MARKED_FOR_DELETE on next reboot.
+
+4. Failure-recovery SC_ACTION delays dropped from 5s/10s/30s to
+   **1s/2s/5s**. A service that keeps crashing within 5s repeatedly
+   is a config bug an operator should see and fix, not paper over
+   with long backoffs.
+
+5. No SCM dependency chain. The `CreateServiceA` call already
+   passes `nullptr` for `lpDependencies` (audited) — services can be
+   started, stopped, restarted in any order, consistent with the
+   passive mesh reconnector that binds peers as they appear.
+
+### Installer scripts retired
+
+- `Deploy/Install-ElleServices.ps1` → pointer script (prints
+  "retired" + instructions, exits 0).
+- `Deploy/Install.bat` / `Uninstall.bat` → same treatment.
+- `Deploy/elle_service_manifest.json` kept on disk (historical) but
+  no code references it; grep confirms zero live callers.
+
+### Operator-visible upgrade path
+
+1. Build Release|x64.
+2. For each `Release\x64\Elle.Service.*.exe` + `Elle.Lua.Behavioral.exe`:
+   right-click → Run as administrator → double-click → OK on the
+   "SERVICE UPLOAD ONLY OK" dialog.
+3. Control everything from `services.msc` from then on.
+4. `sc stop <SingleService>` /  `sc start <SingleService>` works at
+   any time, in any order, independently.
+
+### Verification
+
+- Brace/paren balance on touched C++ files: clean.
+- No stray `30000` or `10000` literals in the service base.
+- `grep -rn "elle_service_manifest"` in live source: empty.
+- Behaviour contract unchanged for CI callers: `--install`,
+  `--uninstall`, `--console` still work (used by dev loops).
+
+### Files this batch
+- `Shared/ElleServiceBase.{h,cpp}`          (Fiesta dialog, timeouts,
+                                             FreeConsole, kStart/StopHintMs)
+- `Deploy/Install-ElleServices.ps1`         (retired → pointer)
+- `Deploy/Uninstall-ElleServices.ps1`       (mirror of above)
+- `Deploy/Install.bat` / `Uninstall.bat`    (retired → pointer)
