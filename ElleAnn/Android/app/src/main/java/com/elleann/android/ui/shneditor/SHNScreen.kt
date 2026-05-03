@@ -11,8 +11,9 @@ package com.elleann.android.ui.shneditor
  *     GET  /api/shn/get?root=...&name=...          — fetch bytes (base64)
  *     POST /api/shn/save {root,name,bytes_b64}     — persist edits
  *
- *   Files live under <exe_dir>\9Data\Hero\ and <exe_dir>\9Data\ReSystem\, the
- *   two folders the Fiesta client reads from.  See
+ *   Files live under <exe_dir>\9Data\Hero\ (server-side data tables) and
+ *   <exe_dir>\ReSystem\ (client-side data tables — at repo root, NOT
+ *   under 9Data — per the Fiesta client's on-disk layout).  See
  *   Services/Elle.Service.HTTP/HTTPServer.cpp for the server contract.
  *
  *   SHN binary layout:
@@ -137,6 +138,7 @@ data class SHNState(
     val statusIsOk:   Boolean     = false,
     val serverFiles:  List<String> = emptyList(),
     val showBrowser:  Boolean     = false,
+    val diffSummary:  DiffSummary? = null,
 )
 
 // ─── Decrypt / Encrypt (symmetric) — canonical SHNFile.cs:Decrypt ───────────
@@ -404,6 +406,37 @@ class SHNViewModel : ViewModel() {
     fun setStatus(text: String?, ok: Boolean = false) =
         _state.update { it.copy(statusBanner = text, statusIsOk = ok) }
 
+    /* Compare the current in-memory edit state against a freshly-parsed
+     * server copy of the same file. Called from the SHNScreen "Diff"
+     * button — see the server-browser flow in SHNScreen for the fetch.*/
+    fun computeAndShowDiff(serverBytes: ByteArray) {
+        val enc = _state.value.encoding.charset()
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { parseSHN(serverBytes, enc) }
+            }.onSuccess { serverFile ->
+                val localFile = snapshotFile()
+                if (localFile == null) {
+                    _state.update { it.copy(error = "no local file loaded") }
+                    return@onSuccess
+                }
+                val summary = computeDiff(localFile, serverFile)
+                _state.update { it.copy(
+                    diffSummary = summary,
+                    statusBanner = "diff: +${summary.added} / " +
+                                   "−${summary.removed} / ~${summary.changed}",
+                    statusIsOk   = summary.added + summary.removed + summary.changed == 0,
+                )}
+            }.onFailure { e ->
+                _state.update { it.copy(
+                    error = "diff parse failed: ${e.message ?: "unknown"}"
+                )}
+            }
+        }
+    }
+
+    fun closeDiff() = _state.update { it.copy(diffSummary = null) }
+
     fun setCell(rowIdx: Int, colIdx: Int, raw: String) {
         val col = _editColumns.getOrNull(colIdx) ?: return
         val parsed: Any = when (col.type.toInt()) {
@@ -586,6 +619,27 @@ fun SHNScreen(
                                     Icon(Icons.Rounded.CloudUpload, "Save to server", tint = IsyaMagic)
                             }
                         }
+                        // Diff against server
+                        if (api != null) {
+                            IconButton(onClick = {
+                                scope.launch {
+                                    runCatching {
+                                        api.getSHN(state.serverRoot, state.fileName)
+                                    }.onSuccess { resp ->
+                                        val bytes = AndroidBase64.decode(
+                                            resp.bytesB64, AndroidBase64.DEFAULT)
+                                        vm.computeAndShowDiff(bytes)
+                                    }.onFailure { e ->
+                                        val msg = "diff fetch failed: ${e.message}"
+                                        vm.setStatus(msg)
+                                        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }) {
+                                Icon(Icons.Rounded.CompareArrows, "Diff against server",
+                                     tint = IsyaGold)
+                            }
+                        }
                         IconButton(onClick = { saveToDevice.launch(state.fileName) }) {
                             Icon(Icons.Rounded.SaveAlt, "Save to device", tint = IsyaGold)
                         }
@@ -749,6 +803,16 @@ fun SHNScreen(
                 }
             }
         }
+    }
+
+    /* Full-screen diff overlay — rendered on top of the table when
+     * `diffSummary` is non-null.  Dismiss returns to the table. */
+    state.diffSummary?.let { summary ->
+        SHNDiffView(
+            summary   = summary,
+            columns   = vm.currentColumns(),
+            onDismiss = vm::closeDiff,
+        )
     }
 
     if (addColDialog) {

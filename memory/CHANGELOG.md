@@ -459,3 +459,42 @@ all closed this pass.
 - Column reorder via `displayToReal` map — P2 cosmetic.
 - SQL export (canonical `CreateSQL`) — P3.
 - Encoding auto-detect (filename-based `textdata` flag) — P3.
+
+---
+
+## Session Feb-2026 (continued) — SHN path correction + diff preview
+
+### Client-path correction
+Operator clarified the Fiesta client's on-disk layout:
+- `9Data\Hero\*.shn`  (server-authoritative data tables) — unchanged
+- `ReSystem\*.shn`    (client-side data tables) — **at the Fiesta root,
+  NOT nested under 9Data**.
+
+Previously the backend resolver treated `ReSystem` as `9Data\ReSystem`,
+which wouldn't match the actual client deploy. Fixed in
+`Services/Elle.Service.HTTP/HTTPServer.cpp` `shnResolveRoot`: now maps
+`resystem` / `/resystem` → `ReSystem` (no 9Data prefix).
+
+### Diff preview view (new — `SHNDiffView.kt`)
+- Row-keyed by column[0] when it's an integer type (Fiesta PK convention),
+  fallback = joined-cell hash.
+- Produces `DiffSummary { added, removed, changed, rows, columnSchemaDelta }`.
+- UI overlay rendered above the table when active; rows colour-coded
+  green (Added) / red (Removed) / amber (Changed). Changed cells show
+  `local ← server` inline.
+- Schema-delta banner surfaces when column count or types differ
+  between local and server so the operator doesn't confuse a schema
+  change for thousands of cell-level diffs.
+- Wired into `SHNScreen` via a new CompareArrows icon — tap → fetches
+  `GET /api/shn/get` for the same (root, name), parses with the active
+  encoding, computes diff, overlays.  Dismiss returns to the table.
+
+### Files touched
+- `Services/Elle.Service.HTTP/HTTPServer.cpp` (path fix + comment update)
+- `Android/.../ui/shneditor/SHNDiffView.kt` (NEW ~230 LOC)
+- `Android/.../ui/shneditor/SHNScreen.kt` (+diff icon, VM hook, overlay)
+
+### Validation
+- Brace/paren/bracket balance clean on all touched files.
+- No new backend routes needed — diff is an Android-side computation
+  off the existing `GET /api/shn/get` response.

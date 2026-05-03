@@ -6512,11 +6512,17 @@ private:
         /*──────────────────────────────────────────────────────────────
          * SHN EDITOR (Fiesta .shn binary data tables)
          *
-         * Persists client-side .shn files under <exe_dir>/9Data/Hero/ or
-         * <exe_dir>/9Data/ReSystem/, matching the exact folder layout
-         * Fiesta's own client ships. The Android editor parses/edits
-         * these tables on the go and round-trips bytes through these
-         * three endpoints.
+         * Persists client-side .shn files under the exact folder layout
+         * the Fiesta client ships:
+         *   <exe_dir>\9Data\Hero\*.shn   — server-side data tables
+         *   <exe_dir>\ReSystem\*.shn     — client-side data tables
+         *                                  (at repo root, NOT nested
+         *                                  under 9Data — per the
+         *                                  operator's verified client
+         *                                  layout, Feb 2026).
+         *
+         * The Android editor parses/edits these tables on the go and
+         * round-trips bytes through these three endpoints.
          *
          * Security:
          *   - AUTH_ADMIN: nAuthID ≥ threshold (default 9).
@@ -6539,7 +6545,7 @@ private:
             for (auto& c : r) c = (char)std::tolower((unsigned char)c);
             std::string sub;
             if      (r == "hero"     || r == "9data/hero")     sub = "9Data\\Hero";
-            else if (r == "resystem" || r == "9data/resystem") sub = "9Data\\ReSystem";
+            else if (r == "resystem" || r == "/resystem")      sub = "ReSystem";
             else { outErr = "root must be 'Hero' or 'ReSystem'"; return false; }
 
             /* Anchor to <exe_dir>. GetModuleFileNameA is the same
