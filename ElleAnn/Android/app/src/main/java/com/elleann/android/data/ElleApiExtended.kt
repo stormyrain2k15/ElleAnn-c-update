@@ -661,11 +661,26 @@ interface ElleApiExtended {
 
     /**
      * POST /api/shn/save — save an SHN file back to the server.
+     *
+     * Body: { "root": "Hero"|"ReSystem", "name": "Mob.shn", "bytes_b64": "..." }
+     * Server persists to <exe_dir>/9Data/<Hero|ReSystem>/<name>.
      */
-    @Multipart
     @POST("/api/shn/save")
-    suspend fun saveSHN(
-        @Part file: MultipartBody.Part,
-        @Part("name") name: RequestBody,
-    ): OkResponse
+    suspend fun saveSHN(@Body request: ShnSaveRequest): ShnSaveResponse
+
+    /**
+     * GET /api/shn/list?root=Hero|ReSystem — enumerate server-side .shn files.
+     */
+    @GET("/api/shn/list")
+    suspend fun listSHN(@Query("root") root: String = "Hero"): ShnListResponse
+
+    /**
+     * GET /api/shn/get?root=...&name=Mob.shn — fetch raw .shn bytes (base64).
+     * Client decodes bytes_b64 and feeds into the parser.
+     */
+    @GET("/api/shn/get")
+    suspend fun getSHN(
+        @Query("root") root: String,
+        @Query("name") name: String
+    ): ShnGetResponse
 }

@@ -2277,3 +2277,26 @@ User directive (with reference screenshots showing Fiesta Zone.exe
 - `9Data/ServerInfo/README.md`             (NEW)
 - `Deploy/gen_serverinfo_files.py`         (NEW)
 - `Debug/test_sql_fallback_ndjson.cpp`     (NEW, 7/7 pass)
+
+---
+
+## Session Feb-2026 (continued) — In-app SHN editor finished
+
+(Full narrative: `/app/memory/CHANGELOG.md`.)
+
+### Status
+- **SHN editor (DONE)**: canonical-parity parser + serializer (incl.
+  record-length validation, configurable encoding, recomputed
+  DefaultRecordLength on save, UnkCol round-trip). CSV export, column
+  create/delete, server browser (list/get), save-to-server with error
+  toasts.  All against the canonical SHNDecryptor v4.7 reference.
+- **SHN server routes (DONE)**: `POST /api/shn/save`,
+  `GET /api/shn/list`, `GET /api/shn/get` — all AUTH_ADMIN, constrained
+  to `9Data/Hero` and `9Data/ReSystem`, path-traversal proof, atomic
+  writes.
+
+### Deferred (P2+)
+- Bulk column ops (multiply/divide/rename/bulk-edit): SHNDecryptor ships
+  dedicated dialogs for these. Can copy the per-column math loops.
+- Column reorder via `displayToReal` map.
+- SQL export (SHNFile.CreateSQL).

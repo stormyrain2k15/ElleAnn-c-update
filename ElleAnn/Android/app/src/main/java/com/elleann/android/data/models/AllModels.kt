@@ -1247,3 +1247,47 @@ sealed class ApiResult<out T> {
     data class Error(val message: String, val code: Int = 0) : ApiResult<Nothing>()
     data object Loading : ApiResult<Nothing>()
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// SHN EDITOR MODELS
+// Source: Services/Elle.Service.HTTP/HTTPServer.cpp /api/shn/* routes
+// ════════════════════════════════════════════════════════════════════════════
+
+@Serializable
+data class ShnSaveRequest(
+    val root: String,                       // "Hero" | "ReSystem"
+    val name: String,                       // <file>.shn — single path segment
+    @SerialName("bytes_b64") val bytesB64: String,
+)
+
+@Serializable
+data class ShnSaveResponse(
+    val ok:    Boolean = false,
+    val path:  String  = "",
+    val bytes: Long    = 0,
+    val root:  String  = "",
+    val name:  String  = "",
+)
+
+@Serializable
+data class ShnListEntry(
+    val name:  String,
+    val bytes: Long = 0,
+    @SerialName("modified_ms") val modifiedMs: Long = 0,
+)
+
+@Serializable
+data class ShnListResponse(
+    val root:    String = "",
+    @SerialName("abs_dir") val absDir: String = "",
+    val files:   List<ShnListEntry> = emptyList(),
+)
+
+@Serializable
+data class ShnGetResponse(
+    val root:  String = "",
+    val name:  String = "",
+    val path:  String = "",
+    val bytes: Long   = 0,
+    @SerialName("bytes_b64") val bytesB64: String = "",
+)

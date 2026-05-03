@@ -55,6 +55,7 @@
 #include <cstring>
 #include <chrono>
 #include <fstream>
+#include <filesystem>
 #include <condition_variable>
 
 using json = nlohmann::json;
@@ -6506,6 +6507,248 @@ private:
              * logs with full request context. Preventing the inner
              * catch-all removes a blind spot where an unknown throw was
              * silently turning into a generic "reload failed" 500.       */
+        }, AUTH_ADMIN);
+
+        /*──────────────────────────────────────────────────────────────
+         * SHN EDITOR (Fiesta .shn binary data tables)
+         *
+         * Persists client-side .shn files under <exe_dir>/9Data/Hero/ or
+         * <exe_dir>/9Data/ReSystem/, matching the exact folder layout
+         * Fiesta's own client ships. The Android editor parses/edits
+         * these tables on the go and round-trips bytes through these
+         * three endpoints.
+         *
+         * Security:
+         *   - AUTH_ADMIN: nAuthID ≥ threshold (default 9).
+         *   - `root` is constrained to the allow-list {Hero, ReSystem}.
+         *   - `name` must be a single path segment ending in .shn; no
+         *     path separators, no "..", no absolute paths.
+         *   - `name` length capped at 128 to keep the fs API happy.
+         *
+         * Payload format: JSON + base64 (same pattern as the avatar
+         * upload route). No real multipart — servings never deal with
+         * .shn files larger than a few MB so the extra base64 overhead
+         * is a non-issue.
+         *──────────────────────────────────────────────────────────────*/
+        auto shnResolveRoot = [](const std::string& root,
+                                 std::string& outAbsDir,
+                                 std::string& outErr) -> bool {
+            /* Accept only the two canonical folders. Case-insensitive
+             * on the query input; normalised to the on-disk spelling.  */
+            std::string r = root;
+            for (auto& c : r) c = (char)std::tolower((unsigned char)c);
+            std::string sub;
+            if      (r == "hero"     || r == "9data/hero")     sub = "9Data\\Hero";
+            else if (r == "resystem" || r == "9data/resystem") sub = "9Data\\ReSystem";
+            else { outErr = "root must be 'Hero' or 'ReSystem'"; return false; }
+
+            /* Anchor to <exe_dir>. GetModuleFileNameA is the same
+             * primitive ElleLogger::ExeDirectory() uses, kept inline
+             * here to avoid pulling the logger's private cache.       */
+            char buf[MAX_PATH] = {0};
+            GetModuleFileNameA(nullptr, buf, MAX_PATH);
+            std::filesystem::path exeDir =
+                std::filesystem::path(buf).parent_path();
+            std::filesystem::path full = exeDir / sub;
+            std::error_code ec;
+            std::filesystem::create_directories(full, ec);
+            outAbsDir = full.string();
+            return true;
+        };
+
+        auto shnValidateName = [](const std::string& name,
+                                  std::string& outErr) -> bool {
+            if (name.empty() || name.size() > 128) {
+                outErr = "name must be 1..128 chars"; return false;
+            }
+            if (name.find('/') != std::string::npos ||
+                name.find('\\') != std::string::npos ||
+                name.find("..") != std::string::npos) {
+                outErr = "name must not contain path separators or '..'";
+                return false;
+            }
+            /* Must end in .shn (case-insensitive). */
+            auto dot = name.rfind('.');
+            if (dot == std::string::npos) { outErr = "name missing .shn extension"; return false; }
+            std::string ext = name.substr(dot);
+            for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+            if (ext != ".shn") { outErr = "name must end with .shn"; return false; }
+            return true;
+        };
+
+        /* POST /api/shn/save
+         * Body: { "root": "Hero"|"ReSystem", "name": "Mob.shn",
+         *         "bytes_b64": "..." }                                 */
+        m_router.Register("POST", "/api/shn/save",
+            [shnResolveRoot, shnValidateName](const HTTPRequest& req) {
+            try {
+                json body = req.BodyJSON();
+                std::string root = body.value("root", std::string("Hero"));
+                std::string name = body.value("name", std::string(""));
+                std::string b64  = body.value("bytes_b64", std::string(""));
+                if (name.empty() || b64.empty()) {
+                    return HTTPResponse::Err(400,
+                        "name and bytes_b64 are required");
+                }
+                std::string err;
+                if (!shnValidateName(name, err))
+                    return HTTPResponse::Err(400, err);
+
+                std::string absDir;
+                if (!shnResolveRoot(root, absDir, err))
+                    return HTTPResponse::Err(400, err);
+
+                /* Decode base64 → bytes. Same permissive scanner the
+                 * avatar route uses (ignores '=', whitespace, junk). */
+                std::string decoded;
+                decoded.reserve(b64.size() * 3 / 4);
+                int val = 0, bits = -8;
+                for (unsigned char c : b64) {
+                    int d;
+                    if      (c >= 'A' && c <= 'Z') d = c - 'A';
+                    else if (c >= 'a' && c <= 'z') d = c - 'a' + 26;
+                    else if (c >= '0' && c <= '9') d = c - '0' + 52;
+                    else if (c == '+')             d = 62;
+                    else if (c == '/')             d = 63;
+                    else continue;
+                    val = (val << 6) | d; bits += 6;
+                    if (bits >= 0) {
+                        decoded += (char)((val >> bits) & 0xFF);
+                        bits -= 8;
+                    }
+                }
+                if (decoded.size() < 0x24) {
+                    return HTTPResponse::Err(400,
+                        "decoded payload too small for a valid SHN "
+                        "(expected at least 0x24 header bytes)");
+                }
+
+                std::filesystem::path path =
+                    std::filesystem::path(absDir) / name;
+
+                /* Atomic write: *.shn.tmp → rename over *.shn so a
+                 * mid-save crash never leaves a half-written table.  */
+                std::filesystem::path tmp = path; tmp += ".tmp";
+                {
+                    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+                    if (!f.is_open())
+                        return HTTPResponse::Err(500,
+                            "cannot open " + tmp.string() + " for write");
+                    f.write(decoded.data(), (std::streamsize)decoded.size());
+                    if (!f.good())
+                        return HTTPResponse::Err(500,
+                            "write to " + tmp.string() + " failed");
+                }
+                std::error_code ec;
+                std::filesystem::rename(tmp, path, ec);
+                if (ec) {
+                    std::filesystem::copy_file(tmp, path,
+                        std::filesystem::copy_options::overwrite_existing, ec);
+                    std::filesystem::remove(tmp, ec);
+                }
+
+                ELLE_INFO("SHN saved: root=%s name=%s size=%zu",
+                          root.c_str(), name.c_str(), decoded.size());
+                ELLE_LOG_HTTP("SHN save OK root=%s name=%s size=%zu",
+                              root.c_str(), name.c_str(), decoded.size());
+                return HTTPResponse::OK({
+                    {"ok",       true},
+                    {"path",     path.string()},
+                    {"bytes",    (uint64_t)decoded.size()},
+                    {"root",     root},
+                    {"name",     name}
+                });
+            } catch (const std::exception& e) {
+                return HTTPResponse::Err(400,
+                    std::string("invalid body: ") + e.what());
+            }
+        }, AUTH_ADMIN);
+
+        /* GET /api/shn/list?root=Hero|ReSystem — enumerate .shn files. */
+        m_router.Register("GET", "/api/shn/list",
+            [shnResolveRoot](const HTTPRequest& req) {
+            std::string root = req.QueryString("root", "Hero");
+            std::string absDir, err;
+            if (!shnResolveRoot(root, absDir, err))
+                return HTTPResponse::Err(400, err);
+
+            json arr = json::array();
+            std::error_code ec;
+            if (std::filesystem::exists(absDir, ec)) {
+                for (const auto& ent :
+                        std::filesystem::directory_iterator(absDir, ec)) {
+                    if (!ent.is_regular_file()) continue;
+                    auto ext = ent.path().extension().string();
+                    for (auto& c : ext)
+                        c = (char)std::tolower((unsigned char)c);
+                    if (ext != ".shn") continue;
+                    arr.push_back({
+                        {"name",     ent.path().filename().string()},
+                        {"bytes",    (uint64_t)ent.file_size(ec)},
+                        {"modified_ms",
+                            (uint64_t)std::chrono::duration_cast<
+                                std::chrono::milliseconds>(
+                                    ent.last_write_time().time_since_epoch()
+                                ).count()}
+                    });
+                }
+            }
+            return HTTPResponse::OK({
+                {"root",    root},
+                {"abs_dir", absDir},
+                {"files",   arr}
+            });
+        }, AUTH_ADMIN);
+
+        /* GET /api/shn/get?root=...&name=Mob.shn — fetch bytes (b64). */
+        m_router.Register("GET", "/api/shn/get",
+            [shnResolveRoot, shnValidateName](const HTTPRequest& req) {
+            std::string root = req.QueryString("root", "Hero");
+            std::string name = req.QueryString("name", "");
+            std::string err;
+            if (!shnValidateName(name, err))
+                return HTTPResponse::Err(400, err);
+            std::string absDir;
+            if (!shnResolveRoot(root, absDir, err))
+                return HTTPResponse::Err(400, err);
+
+            std::filesystem::path path =
+                std::filesystem::path(absDir) / name;
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec))
+                return HTTPResponse::Err(404, "file not found: " + name);
+
+            std::ifstream f(path, std::ios::binary);
+            if (!f.is_open())
+                return HTTPResponse::Err(500,
+                    "cannot open " + path.string() + " for read");
+            std::string bytes((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+
+            /* base64 encode (RFC 4648, no line wrapping). */
+            static const char kTbl[] =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            std::string b64;
+            b64.reserve((bytes.size() + 2) / 3 * 4);
+            int val = 0, bits = -6;
+            for (unsigned char c : bytes) {
+                val = (val << 8) | c; bits += 8;
+                while (bits >= 0) {
+                    b64 += kTbl[(val >> bits) & 0x3F];
+                    bits -= 6;
+                }
+            }
+            if (bits > -6)
+                b64 += kTbl[((val << 8) >> (bits + 8)) & 0x3F];
+            while (b64.size() % 4) b64 += '=';
+
+            return HTTPResponse::OK({
+                {"root",      root},
+                {"name",      name},
+                {"path",      path.string()},
+                {"bytes",     (uint64_t)bytes.size()},
+                {"bytes_b64", b64}
+            });
         }, AUTH_ADMIN);
 
         ELLE_INFO("Registered %zu API routes", m_router.Count());

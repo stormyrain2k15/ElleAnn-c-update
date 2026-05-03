@@ -28,10 +28,9 @@ import com.elleann.android.ui.shneditor.SHNScreen
 import com.elleann.android.ui.settings.*
 import com.elleann.android.ui.world.*
 import com.elleann.android.ui.world.sections.*
+import com.elleann.android.data.models.ShnSaveRequest
 import kotlinx.coroutines.launch
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
-import okhttp3.RequestBody.Companion.toRequestBody
+import android.util.Base64 as AndroidBase64
 
 /**
  * ElleNavHost — root navigation graph.
@@ -340,17 +339,27 @@ private fun TabNavHost(
         composable(ElleRoutes.DEV_SHN_EDITOR) {
             val scope = rememberCoroutineScope()
             SHNScreen(
-                onSaveToServer = { bytes, name ->
+                api = containerExtended.extendedApi,
+                onSaveToServer = { root, name, bytes, onResult ->
                     scope.launch {
-                        runCatching {
-                            val filePart = MultipartBody.Part.createFormData(
-                                "file",
-                                name,
-                                bytes.toRequestBody("application/octet-stream".toMediaType())
+                        val result = runCatching {
+                            val b64 = AndroidBase64.encodeToString(
+                                bytes, AndroidBase64.NO_WRAP
                             )
-                            val namePart = name.toRequestBody("text/plain".toMediaType())
-                            containerExtended.extendedApi.saveSHN(filePart, namePart)
+                            containerExtended.extendedApi.saveSHN(
+                                ShnSaveRequest(root = root, name = name, bytesB64 = b64)
+                            )
                         }
+                        result.fold(
+                            onSuccess = { resp ->
+                                onResult(resp.ok,
+                                    if (resp.ok) "saved → ${resp.path} (${resp.bytes} bytes)"
+                                    else "server refused save")
+                            },
+                            onFailure = { e ->
+                                onResult(false, "save failed: ${e.message ?: e.javaClass.simpleName}")
+                            }
+                        )
                     }
                 }
             )

@@ -3,23 +3,27 @@ package com.elleann.android.ui.shneditor
 /*══════════════════════════════════════════════════════════════════════════════
  * SHNScreen.kt — SHN file editor screen for Elle-Ann Android app.
  *
- *   Ported from SHNDecryptor (C#) by Josh. Reads, edits, and saves Fiesta
- *   Online .shn binary data table files. Files can be opened from device
- *   storage or fetched from the Elle server, and saved back to either.
+ *   Port of SHNDecryptor v4.7 (C#) `SHNFile.cs` — Fiesta Online .shn binary
+ *   data table editor. Reads, edits, and saves Fiesta data tables on the fly.
  *
- *   SHN format:
- *     [0x20 bytes]  CryptHeader
- *     [4 bytes]     Total encrypted length (including this field + header)
- *     [N bytes]     Encrypted payload
+ *   Round-trips through the Elle HTTP service under:
+ *     GET  /api/shn/list?root=Hero|ReSystem        — enumerate server-side files
+ *     GET  /api/shn/get?root=...&name=...          — fetch bytes (base64)
+ *     POST /api/shn/save {root,name,bytes_b64}     — persist edits
  *
- *   Decrypt algo (same XOR as original C# Decrypt()):
- *     Walk backwards from end, XOR each byte with a rolling key derived from
- *     position and length. Encryption == Decryption (symmetric).
+ *   Files live under <exe_dir>\9Data\Hero\ and <exe_dir>\9Data\ReSystem\, the
+ *   two folders the Fiesta client reads from.  See
+ *   Services/Elle.Service.HTTP/HTTPServer.cpp for the server contract.
  *
- *   After decrypt, payload layout:
+ *   SHN binary layout:
+ *     [0x20]  CryptHeader (opaque — preserved bit-exact on save)
+ *     [4]     Total encrypted length (including CryptHeader + this field)
+ *     [N]     XOR-encrypted payload
+ *
+ *   Payload (after decrypt):
  *     uint32  Header
  *     uint32  RecordCount
- *     uint32  DefaultRecordLength
+ *     uint32  DefaultRecordLength     (must equal 2 + Σ col.length)
  *     uint32  ColumnCount
  *     for each column:
  *       char[0x30]  Name (null-terminated, zero-padded)
@@ -29,13 +33,19 @@ package com.elleann.android.ui.shneditor
  *       uint16      Row length prefix
  *       [columns]   Binary-packed column data
  *
- *   Column types:
- *     1,12,0x10 → Byte     2 → UShort    3,11,0x12,0x1b → UInt
- *     5 → Float            13,0x15 → Short              0x16 → Int
- *     20 → SByte           9,0x18 → fixed-len String    0x1a → null-term String
+ *   Type table (canonical SHNFile.cs):
+ *     1,12,0x10 → byte      2 → UInt16    3,11,0x12,0x1b → UInt32
+ *     5 → float             13,0x15 → Int16             0x16 → Int32
+ *     20 → SByte            9,0x18 → fixed-len string    0x1a → null-term string
+ *
+ *   Decrypt (symmetric): walk from end, XOR each byte with a rolling key
+ *   that's a function of position and a moving key byte seeded from the
+ *   payload length. Same routine encrypts and decrypts.
  *══════════════════════════════════════════════════════════════════════════════*/
 
 import android.net.Uri
+import android.util.Base64 as AndroidBase64
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -62,6 +72,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.elleann.android.data.ElleApiExtended
 import com.elleann.android.ui.components.*
 import com.elleann.android.ui.theme.*
 import kotlinx.coroutines.Dispatchers
@@ -75,6 +86,7 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.charset.Charset
 
 // ─── Data model ──────────────────────────────────────────────────────────────
 
@@ -92,21 +104,42 @@ data class SHNFile(
     val defaultRecordLength: UInt           = 0u,
 )
 
+/**
+ * Supported text encodings for string-typed columns.
+ * Canonical SHN Editor uses `Program.eT` — Western forks typically set
+ * windows-1252; Korean Fiesta uses EUC-KR; CN fork uses GB2312.
+ */
+enum class SHNEncoding(val displayName: String, val charsetName: String) {
+    WIN1252   ("Windows-1252 (Western)", "windows-1252"),
+    UTF8      ("UTF-8",                  "UTF-8"),
+    EUC_KR    ("EUC-KR (Korean)",        "EUC-KR"),
+    GB2312    ("GB2312 (Chinese)",       "GB2312"),
+    ISO_8859_1("ISO-8859-1 (legacy)",    "ISO-8859-1");
+
+    fun charset(): Charset = try { Charset.forName(charsetName) }
+                             catch (_: Exception) { Charsets.ISO_8859_1 }
+}
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
 data class SHNState(
-    val file:       SHNFile?    = null,
-    val fileName:   String      = "",
-    val loading:    Boolean     = false,
-    val saving:     Boolean     = false,
-    val error:      String?     = null,
-    val dirtyRows:  Set<Int>    = emptySet(),   // row indices with unsaved edits
-    val search:     String      = "",
-    val filterCol:  Int         = 0,
-    val saved:      Boolean     = false,
+    val file:         SHNFile?    = null,
+    val fileName:     String      = "",
+    val serverRoot:   String      = "Hero",     // "Hero" | "ReSystem"
+    val loading:      Boolean     = false,
+    val saving:       Boolean     = false,
+    val error:        String?     = null,
+    val dirtyRows:    Set<Int>    = emptySet(),
+    val search:       String      = "",
+    val filterCol:    Int         = 0,
+    val encoding:     SHNEncoding = SHNEncoding.WIN1252,
+    val statusBanner: String?     = null,
+    val statusIsOk:   Boolean     = false,
+    val serverFiles:  List<String> = emptyList(),
+    val showBrowser:  Boolean     = false,
 )
 
-// ─── Decrypt / Encrypt (symmetric) ───────────────────────────────────────────
+// ─── Decrypt / Encrypt (symmetric) — canonical SHNFile.cs:Decrypt ───────────
 
 private fun shnCrypt(data: ByteArray) {
     if (data.isEmpty()) return
@@ -124,34 +157,34 @@ private fun shnCrypt(data: ByteArray) {
 
 // ─── Binary reader helpers ────────────────────────────────────────────────────
 
-private fun ByteBuffer.readFixedString(len: Int): String {
+private fun ByteBuffer.readFixedString(len: Int, charset: Charset): String {
     val bytes = ByteArray(len)
     get(bytes)
     val nullIdx = bytes.indexOf(0)
     val end = if (nullIdx >= 0) nullIdx else len
-    return String(bytes, 0, end, Charsets.ISO_8859_1)
+    return String(bytes, 0, end, charset)
 }
 
-private fun ByteBuffer.readNullTermString(): String {
+private fun ByteBuffer.readNullTermString(charset: Charset): String {
     val buf = mutableListOf<Byte>()
     while (hasRemaining()) {
         val b = get()
         if (b == 0.toByte()) break
         buf.add(b)
     }
-    return String(buf.toByteArray(), Charsets.ISO_8859_1)
+    return String(buf.toByteArray(), charset)
 }
 
 // ─── Parse ───────────────────────────────────────────────────────────────────
 
-private fun parseSHN(raw: ByteArray): SHNFile {
-    if (raw.size < 0x28) throw IllegalArgumentException("File too small")
+private fun parseSHN(raw: ByteArray, charset: Charset): SHNFile {
+    if (raw.size < 0x28) throw IllegalArgumentException("File too small (<0x28 bytes)")
 
     val cryptHeader = raw.copyOf(0x20)
     val totalLen    = ByteBuffer.wrap(raw, 0x20, 4).order(ByteOrder.LITTLE_ENDIAN).int
     val payloadLen  = totalLen - 0x24
     if (payloadLen <= 0 || raw.size < 0x24 + payloadLen)
-        throw IllegalArgumentException("Payload length mismatch")
+        throw IllegalArgumentException("Payload length mismatch: totalLen=$totalLen raw=${raw.size}")
 
     val payload = raw.copyOfRange(0x24, 0x24 + payloadLen)
     shnCrypt(payload)
@@ -162,13 +195,26 @@ private fun parseSHN(raw: ByteArray): SHNFile {
     val recordCount   = bb.int.toUInt()
     val defRecLen     = bb.int.toUInt()
     val columnCount   = bb.int
+    if (columnCount <= 0 || columnCount > 4096)
+        throw IllegalArgumentException("Unreasonable column count: $columnCount")
 
+    var unkCols = 0
     val columns = (0 until columnCount).map {
-        var name = bb.readFixedString(0x30)
-        if (name.isBlank()) name = "UnkCol$it"
+        var name = bb.readFixedString(0x30, charset)
+        if (name.isBlank()) { name = "UnkCol$unkCols"; unkCols++ }
         val type = bb.int.toUInt()
         val len  = bb.int
         SHNColumn(name, type, len)
+    }
+
+    /* Record-length sanity check — canonical SHNFile.cs:139 throws
+     * "Wrong record length!" on mismatch. Matches the 2-byte row
+     * prefix + sum of column lengths.                                    */
+    val expectedRecLen = 2u + columns.sumOf { it.length.toUInt() }
+    if (expectedRecLen != defRecLen) {
+        throw IllegalArgumentException(
+            "Wrong record length: header says $defRecLen, columns sum to $expectedRecLen. " +
+            "Wrong encoding or corrupted file?")
     }
 
     val rows = (0u until recordCount).map {
@@ -182,8 +228,8 @@ private fun parseSHN(raw: ByteArray): SHNFile {
                 13, 0x15          -> bb.short.toLong()
                 0x16              -> bb.int.toLong()
                 20                -> bb.get().toLong()
-                9, 0x18           -> bb.readFixedString(col.length)
-                0x1a              -> bb.readNullTermString()
+                9, 0x18           -> bb.readFixedString(col.length, charset)
+                0x1a              -> bb.readNullTermString(charset)
                 else              -> bb.get().toLong()
             }
         }
@@ -200,65 +246,96 @@ private fun parseSHN(raw: ByteArray): SHNFile {
 
 // ─── Serialize back to SHN bytes ─────────────────────────────────────────────
 
-private fun serializeSHN(file: SHNFile): ByteArray {
-    val out = ByteArrayOutputStream()
-    fun writeLE32(v: Int)    { out.write(byteArrayOf(v.toByte(), (v shr 8).toByte(), (v shr 16).toByte(), (v shr 24).toByte())) }
-    fun writeLE16(v: Int)    { out.write(byteArrayOf(v.toByte(), (v shr 8).toByte())) }
-    fun writeFloat(v: Float) { val bits = java.lang.Float.floatToIntBits(v); writeLE32(bits) }
-    fun writeFixedStr(s: String, len: Int) {
-        val bytes = s.toByteArray(Charsets.ISO_8859_1)
+private fun serializeSHN(file: SHNFile, charset: Charset): ByteArray {
+    val payloadOut = ByteArrayOutputStream()
+    fun writeLE32(out: ByteArrayOutputStream, v: Int) {
+        out.write(v and 0xFF); out.write((v shr 8) and 0xFF)
+        out.write((v shr 16) and 0xFF); out.write((v shr 24) and 0xFF)
+    }
+    fun writeLE16(out: ByteArrayOutputStream, v: Int) {
+        out.write(v and 0xFF); out.write((v shr 8) and 0xFF)
+    }
+    fun writeFloat(out: ByteArrayOutputStream, v: Float) {
+        writeLE32(out, java.lang.Float.floatToIntBits(v))
+    }
+    fun writeFixedStr(out: ByteArrayOutputStream, s: String, len: Int) {
+        val bytes = s.toByteArray(charset)
         val padded = ByteArray(len)
         bytes.copyInto(padded, 0, 0, minOf(len, bytes.size))
         out.write(padded)
     }
-    fun writeNullStr(s: String) { out.write(s.toByteArray(Charsets.ISO_8859_1)); out.write(0) }
+    fun writeNullStr(out: ByteArrayOutputStream, s: String) {
+        out.write(s.toByteArray(charset)); out.write(0)
+    }
 
-    writeLE32(file.header.toInt())
-    writeLE32(file.rows.size)
-    writeLE32(file.defaultRecordLength.toInt())
-    writeLE32(file.columns.size)
+    writeLE32(payloadOut, file.header.toInt())
+    writeLE32(payloadOut, file.rows.size)
+    /* Recompute DefaultRecordLength from current columns so column
+     * create/delete/edit round-trips correctly — matches canonical
+     * SHNFile.cs:GetDefaultRecLen().                                    */
+    val newDefRecLen = 2 + file.columns.sumOf { it.length }
+    writeLE32(payloadOut, newDefRecLen)
+    writeLE32(payloadOut, file.columns.size)
 
     for (col in file.columns) {
-        writeFixedStr(col.name, 0x30)
-        writeLE32(col.type.toInt())
-        writeLE32(col.length)
+        val nameToWrite = if (col.name.startsWith("UnkCol")) "" else col.name
+        writeFixedStr(payloadOut, nameToWrite, 0x30)
+        writeLE32(payloadOut, col.type.toInt())
+        writeLE32(payloadOut, col.length)
     }
 
+    /* Rows — compute & backfill the 2-byte length prefix per row.     */
     for (row in file.rows) {
-        val rowStart = out.size()
-        writeLE16(0) // placeholder for row length
+        val rowBuf = ByteArrayOutputStream()
+        writeLE16(rowBuf, 0) // placeholder
         for ((col, value) in file.columns.zip(row)) {
             when (col.type.toInt()) {
-                1, 12, 0x10       -> out.write((value as? Long ?: 0L).toInt() and 0xFF)
-                2                 -> writeLE16((value as? Long ?: 0L).toInt() and 0xFFFF)
-                3, 11, 0x12, 0x1b -> writeLE32((value as? Long ?: 0L).toInt())
-                5                 -> writeFloat((value as? Double ?: 0.0).toFloat())
-                13, 0x15          -> writeLE16((value as? Long ?: 0L).toInt() and 0xFFFF)
-                0x16              -> writeLE32((value as? Long ?: 0L).toInt())
-                20                -> out.write((value as? Long ?: 0L).toInt() and 0xFF)
-                9, 0x18           -> writeFixedStr(value as? String ?: "", col.length)
-                0x1a              -> writeNullStr(value as? String ?: "")
-                else              -> out.write((value as? Long ?: 0L).toInt() and 0xFF)
+                1, 12, 0x10       -> rowBuf.write((value as? Long ?: 0L).toInt() and 0xFF)
+                2                 -> writeLE16(rowBuf, (value as? Long ?: 0L).toInt() and 0xFFFF)
+                3, 11, 0x12, 0x1b -> writeLE32(rowBuf, (value as? Long ?: 0L).toInt())
+                5                 -> writeFloat(rowBuf, (value as? Double ?: 0.0).toFloat())
+                13, 0x15          -> writeLE16(rowBuf, (value as? Long ?: 0L).toInt() and 0xFFFF)
+                0x16              -> writeLE32(rowBuf, (value as? Long ?: 0L).toInt())
+                20                -> rowBuf.write((value as? Long ?: 0L).toInt() and 0xFF)
+                9, 0x18           -> writeFixedStr(rowBuf, value as? String ?: "", col.length)
+                0x1a              -> writeNullStr(rowBuf, value as? String ?: "")
+                else              -> rowBuf.write((value as? Long ?: 0L).toInt() and 0xFF)
             }
         }
-        // Back-fill row length
-        val rowLen = out.size() - rowStart
-        val buf = out.toByteArray()
-        buf[rowStart]     = (rowLen and 0xFF).toByte()
-        buf[rowStart + 1] = ((rowLen shr 8) and 0xFF).toByte()
-        out.reset()
-        out.write(buf)
+        val rowBytes = rowBuf.toByteArray()
+        val rowLen = rowBytes.size
+        rowBytes[0] = (rowLen and 0xFF).toByte()
+        rowBytes[1] = ((rowLen shr 8) and 0xFF).toByte()
+        payloadOut.write(rowBytes)
     }
 
-    val payload = out.toByteArray()
+    val payload = payloadOut.toByteArray()
     shnCrypt(payload)  // encrypt == decrypt (symmetric)
 
     val result = ByteArrayOutputStream()
     result.write(file.cryptHeader)
     val totalLen = payload.size + 0x24
-    writeLE32(totalLen).also { result.write(byteArrayOf(totalLen.toByte(), (totalLen shr 8).toByte(), (totalLen shr 16).toByte(), (totalLen shr 24).toByte())) }
+    writeLE32(result, totalLen)
     result.write(payload)
     return result.toByteArray()
+}
+
+// ─── CSV export (canonical SHNFile.cs:exportCVS) ─────────────────────────────
+
+private fun exportCsv(file: SHNFile, rows: List<List<Any>>): String {
+    val sb = StringBuilder()
+    file.columns.forEachIndexed { i, col ->
+        sb.append(col.name)
+        if (i + 1 < file.columns.size) sb.append(", ") else sb.append('\n')
+    }
+    for (row in rows) {
+        row.forEachIndexed { i, v ->
+            val s = v.toString().replace("\"", " ")
+            sb.append('"').append(s).append('"')
+            if (i + 1 < row.size) sb.append(',') else sb.append('\n')
+        }
+    }
+    return sb.toString()
 }
 
 // ─── ViewModel ───────────────────────────────────────────────────────────────
@@ -268,30 +345,67 @@ class SHNViewModel : ViewModel() {
     private val _state = MutableStateFlow(SHNState())
     val state: StateFlow<SHNState> = _state.asStateFlow()
 
-    // mutable copy of rows for editing
     private val _editRows = mutableStateListOf<MutableList<Any>>()
     val editRows: List<MutableList<Any>> get() = _editRows
 
+    private val _editColumns = mutableStateListOf<SHNColumn>()
+
     fun loadFromStream(stream: InputStream, name: String) {
+        val enc = _state.value.encoding.charset()
         viewModelScope.launch {
-            _state.update { it.copy(loading = true, error = null) }
+            _state.update { it.copy(loading = true, error = null, statusBanner = null) }
             runCatching {
                 withContext(Dispatchers.IO) {
                     val bytes = stream.readBytes()
-                    parseSHN(bytes)
+                    parseSHN(bytes, enc)
                 }
             }.onSuccess { file ->
-                _editRows.clear()
-                file.rows.forEach { row -> _editRows.add(row.toMutableList()) }
-                _state.update { it.copy(loading = false, file = file, fileName = name, dirtyRows = emptySet(), error = null) }
+                _editRows.clear(); file.rows.forEach { _editRows.add(it.toMutableList()) }
+                _editColumns.clear(); _editColumns.addAll(file.columns)
+                _state.update { it.copy(
+                    loading = false, file = file, fileName = name,
+                    dirtyRows = emptySet(), error = null,
+                    statusBanner = "loaded ${file.rows.size} records · ${file.columns.size} columns",
+                    statusIsOk = true
+                )}
             }.onFailure { e ->
                 _state.update { it.copy(loading = false, error = e.message ?: "parse error") }
             }
         }
     }
 
+    fun loadFromBytes(bytes: ByteArray, name: String) {
+        val enc = _state.value.encoding.charset()
+        viewModelScope.launch {
+            _state.update { it.copy(loading = true, error = null, statusBanner = null) }
+            runCatching {
+                withContext(Dispatchers.IO) { parseSHN(bytes, enc) }
+            }.onSuccess { file ->
+                _editRows.clear(); file.rows.forEach { _editRows.add(it.toMutableList()) }
+                _editColumns.clear(); _editColumns.addAll(file.columns)
+                _state.update { it.copy(
+                    loading = false, file = file, fileName = name,
+                    dirtyRows = emptySet(), error = null,
+                    statusBanner = "loaded from server: ${file.rows.size} records",
+                    statusIsOk = true
+                )}
+            }.onFailure { e ->
+                _state.update { it.copy(loading = false, error = e.message ?: "parse error") }
+            }
+        }
+    }
+
+    fun setEncoding(e: SHNEncoding) = _state.update { it.copy(encoding = e) }
+    fun setServerRoot(r: String) = _state.update { it.copy(serverRoot = r) }
+    fun toggleBrowser() = _state.update { it.copy(showBrowser = !it.showBrowser) }
+    fun setServerFiles(list: List<String>) =
+        _state.update { it.copy(serverFiles = list, showBrowser = true) }
+
+    fun setStatus(text: String?, ok: Boolean = false) =
+        _state.update { it.copy(statusBanner = text, statusIsOk = ok) }
+
     fun setCell(rowIdx: Int, colIdx: Int, raw: String) {
-        val col = _state.value.file?.columns?.getOrNull(colIdx) ?: return
+        val col = _editColumns.getOrNull(colIdx) ?: return
         val parsed: Any = when (col.type.toInt()) {
             1, 12, 0x10, 2, 3, 11, 0x12, 0x1b, 13, 0x15, 0x16, 20 ->
                 raw.toLongOrNull() ?: _editRows[rowIdx][colIdx]
@@ -299,12 +413,12 @@ class SHNViewModel : ViewModel() {
             else -> raw
         }
         _editRows[rowIdx][colIdx] = parsed
-        _state.update { it.copy(dirtyRows = it.dirtyRows + rowIdx, saved = false) }
+        _state.update { it.copy(dirtyRows = it.dirtyRows + rowIdx) }
     }
 
     fun addRow() {
-        val file = _state.value.file ?: return
-        val emptyRow: MutableList<Any> = file.columns.map { col ->
+        if (_editColumns.isEmpty()) return
+        val emptyRow: MutableList<Any> = _editColumns.map { col ->
             when (col.type.toInt()) {
                 5    -> 0.0
                 9, 0x18, 0x1a -> ""
@@ -312,12 +426,39 @@ class SHNViewModel : ViewModel() {
             }
         }.toMutableList()
         _editRows.add(emptyRow)
-        _state.update { it.copy(dirtyRows = it.dirtyRows + (_editRows.size - 1), saved = false) }
+        _state.update { it.copy(dirtyRows = it.dirtyRows + (_editRows.size - 1)) }
     }
 
     fun deleteRow(idx: Int) {
+        if (idx !in _editRows.indices) return
         _editRows.removeAt(idx)
-        _state.update { it.copy(dirtyRows = emptySet(), saved = false) }
+        _state.update { it.copy(dirtyRows = emptySet()) }
+    }
+
+    fun addColumn(name: String, type: UInt, length: Int) {
+        if (name.isBlank()) return
+        _editColumns.add(SHNColumn(name, type, length))
+        // default value per row
+        val defaultVal: Any = when (type.toInt()) {
+            5 -> 0.0; 9, 0x18, 0x1a -> ""; else -> 0L
+        }
+        for (r in _editRows) r.add(defaultVal)
+        _state.update { it.copy(
+            dirtyRows = _editRows.indices.toSet(),
+            statusBanner = "added column '$name' (type=${type.toInt()}, len=$length)",
+            statusIsOk = true
+        )}
+    }
+
+    fun deleteColumn(idx: Int) {
+        if (idx !in _editColumns.indices) return
+        val removed = _editColumns.removeAt(idx)
+        for (r in _editRows) if (idx < r.size) r.removeAt(idx)
+        _state.update { it.copy(
+            dirtyRows = _editRows.indices.toSet(),
+            statusBanner = "deleted column '${removed.name}'",
+            statusIsOk = true
+        )}
     }
 
     fun onSearch(q: String) = _state.update { it.copy(search = q) }
@@ -332,25 +473,41 @@ class SHNViewModel : ViewModel() {
         }
     }
 
-    fun saveTo(
-        file:     SHNFile,
-        fileName: String,
-        onBytes:  (ByteArray, String) -> Unit,
-    ) {
+    fun currentColumns(): List<SHNColumn> = _editColumns.toList()
+
+    fun snapshotFile(): SHNFile? {
+        val base = _state.value.file ?: return null
+        return base.copy(
+            columns = _editColumns.toList(),
+            rows    = _editRows.map { it.toList() }
+        )
+    }
+
+    fun serialize(): ByteArray? {
+        val file = snapshotFile() ?: return null
+        return serializeSHN(file, _state.value.encoding.charset())
+    }
+
+    fun saveTo(onBytes: (ByteArray, String) -> Unit) {
+        val file = snapshotFile() ?: return
+        val name = _state.value.fileName
+        val enc  = _state.value.encoding.charset()
         viewModelScope.launch {
             _state.update { it.copy(saving = true, error = null) }
             runCatching {
-                withContext(Dispatchers.IO) {
-                    val updated = file.copy(rows = _editRows.map { it.toList() })
-                    serializeSHN(updated)
-                }
+                withContext(Dispatchers.IO) { serializeSHN(file, enc) }
             }.onSuccess { bytes ->
-                _state.update { it.copy(saving = false, dirtyRows = emptySet(), saved = true) }
-                onBytes(bytes, fileName)
+                _state.update { it.copy(saving = false, dirtyRows = emptySet()) }
+                onBytes(bytes, name)
             }.onFailure { e ->
                 _state.update { it.copy(saving = false, error = e.message ?: "save error") }
             }
         }
+    }
+
+    fun csvExport(): String? {
+        val file = snapshotFile() ?: return null
+        return exportCsv(file, _editRows.map { it.toList() })
     }
 }
 
@@ -359,13 +516,15 @@ class SHNViewModel : ViewModel() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SHNScreen(
-    onSaveToServer: ((ByteArray, String) -> Unit)? = null,
+    api:            ElleApiExtended? = null,
+    onSaveToServer: ((root: String, name: String, bytes: ByteArray,
+                      onResult: (ok: Boolean, msg: String) -> Unit) -> Unit)? = null,
 ) {
     val vm: SHNViewModel = viewModel()
     val state by vm.state.collectAsState()
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    // File picker
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
@@ -376,16 +535,28 @@ fun SHNScreen(
         }
     }
 
-    // Save to device
     val saveToDevice = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val file = state.file ?: return@rememberLauncherForActivityResult
-        vm.saveTo(file, state.fileName) { bytes, _ ->
+        vm.saveTo { bytes, _ ->
             ctx.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+            vm.setStatus("saved to device (${bytes.size} bytes)", ok = true)
         }
     }
+
+    val saveCsvToDevice = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val csv = vm.csvExport() ?: run { vm.setStatus("no data to export"); return@rememberLauncherForActivityResult }
+        ctx.contentResolver.openOutputStream(uri)?.use {
+            it.write(csv.toByteArray(Charsets.UTF_8))
+        }
+        vm.setStatus("CSV exported (${csv.length} chars)", ok = true)
+    }
+
+    var addColDialog  by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = IsyaNight,
@@ -393,15 +564,20 @@ fun SHNScreen(
             IsyaTopBar(
                 title    = { Text(if (state.fileName.isEmpty()) "SHN Editor" else state.fileName) },
                 subtitle = state.file?.let { file ->
-                    { Text("${file.rows.size} records · ${file.columns.size} columns") }
+                    { Text("${file.rows.size} rec · ${vm.currentColumns().size} col · ${state.encoding.charsetName}") }
                 },
                 actions  = {
                     if (state.file != null) {
                         // Save to server
                         if (onSaveToServer != null) {
                             IconButton(onClick = {
-                                vm.saveTo(state.file!!, state.fileName) { bytes, name ->
-                                    onSaveToServer(bytes, name)
+                                vm.saveTo { bytes, name ->
+                                    onSaveToServer(state.serverRoot, name, bytes) { ok, msg ->
+                                        vm.setStatus(msg, ok)
+                                        Toast.makeText(ctx, msg,
+                                            if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                                        ).show()
+                                    }
                                 }
                             }, enabled = !state.saving) {
                                 if (state.saving)
@@ -410,16 +586,38 @@ fun SHNScreen(
                                     Icon(Icons.Rounded.CloudUpload, "Save to server", tint = IsyaMagic)
                             }
                         }
-                        // Save to device
                         IconButton(onClick = { saveToDevice.launch(state.fileName) }) {
                             Icon(Icons.Rounded.SaveAlt, "Save to device", tint = IsyaGold)
                         }
-                        // Add row
+                        IconButton(onClick = {
+                            saveCsvToDevice.launch(state.fileName.removeSuffix(".shn") + ".csv")
+                        }) {
+                            Icon(Icons.Rounded.Description, "Export CSV", tint = IsyaCream)
+                        }
+                        IconButton(onClick = { addColDialog = true }) {
+                            Icon(Icons.Rounded.ViewColumn, "Add column", tint = IsyaSuccess)
+                        }
                         IconButton(onClick = vm::addRow) {
                             Icon(Icons.Rounded.AddCircleOutline, "Add row", tint = IsyaSuccess)
                         }
                     }
-                    // Open file
+                    // Server browser
+                    if (api != null) {
+                        IconButton(onClick = {
+                            scope.launch {
+                                runCatching { api.listSHN(state.serverRoot) }
+                                    .onSuccess { vm.setServerFiles(it.files.map { e -> e.name }) }
+                                    .onFailure { e ->
+                                        vm.setStatus("list failed: ${e.message}")
+                                        Toast.makeText(ctx, "list failed: ${e.message}",
+                                            Toast.LENGTH_LONG).show()
+                                    }
+                            }
+                        }) {
+                            Icon(Icons.Rounded.CloudDownload, "Browse server", tint = IsyaMagic)
+                        }
+                    }
+                    // Open local file
                     IconButton(onClick = { filePicker.launch("*/*") }) {
                         Icon(Icons.Rounded.FolderOpen, "Open SHN", tint = IsyaCream)
                     }
@@ -429,19 +627,84 @@ fun SHNScreen(
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
 
-            // Error
-            state.error?.let {
-                IsyaErrorState(it)
+            // Root + encoding picker strip
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Root:", color = IsyaMuted, fontSize = 11.sp)
+                listOf("Hero", "ReSystem").forEach { r ->
+                    val active = state.serverRoot == r
+                    FilterChip(
+                        selected = active,
+                        onClick  = { vm.setServerRoot(r) },
+                        label    = { Text(r, fontSize = 10.sp) },
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text("Enc:", color = IsyaMuted, fontSize = 11.sp)
+                var encExpanded by remember { mutableStateOf(false) }
+                Box {
+                    OutlinedButton(
+                        onClick = { encExpanded = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text(state.encoding.charsetName, fontSize = 10.sp)
+                        Icon(Icons.Rounded.ArrowDropDown, null, Modifier.size(14.dp))
+                    }
+                    DropdownMenu(
+                        expanded = encExpanded,
+                        onDismissRequest = { encExpanded = false },
+                    ) {
+                        SHNEncoding.values().forEach { e ->
+                            DropdownMenuItem(
+                                text = { Text(e.displayName, fontSize = 12.sp) },
+                                onClick = { vm.setEncoding(e); encExpanded = false },
+                            )
+                        }
+                    }
+                }
             }
 
-            // Saved banner
-            if (state.saved) {
+            // Status
+            state.error?.let { IsyaErrorState(it) }
+            state.statusBanner?.let {
                 Box(
-                    Modifier.fillMaxWidth().background(IsyaSuccess.copy(alpha = 0.15f)).padding(8.dp),
+                    Modifier.fillMaxWidth()
+                        .background((if (state.statusIsOk) IsyaSuccess else IsyaWarn)
+                            .copy(alpha = 0.15f))
+                        .padding(8.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("Saved", color = IsyaSuccess, fontSize = 12.sp)
+                    Text(it,
+                        color    = if (state.statusIsOk) IsyaSuccess else IsyaWarn,
+                        fontSize = 12.sp)
                 }
+            }
+
+            // Server file browser
+            if (state.showBrowser && api != null) {
+                ServerBrowser(
+                    root  = state.serverRoot,
+                    files = state.serverFiles,
+                    onDismiss = { vm.toggleBrowser() },
+                    onPick = { name ->
+                        vm.toggleBrowser()
+                        scope.launch {
+                            runCatching { api.getSHN(state.serverRoot, name) }
+                                .onSuccess { resp ->
+                                    val bytes = AndroidBase64.decode(resp.bytesB64, AndroidBase64.DEFAULT)
+                                    vm.loadFromBytes(bytes, name)
+                                }
+                                .onFailure { e ->
+                                    vm.setStatus("fetch failed: ${e.message}")
+                                    Toast.makeText(ctx, "fetch failed: ${e.message}",
+                                        Toast.LENGTH_LONG).show()
+                                }
+                        }
+                    }
+                )
             }
 
             when {
@@ -451,47 +714,153 @@ fun SHNScreen(
                     }
                 }
 
-                state.file == null -> {
+                state.file == null && !state.showBrowser -> {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally,
+                               verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Icon(Icons.Rounded.TableChart, null, tint = IsyaMuted, modifier = Modifier.size(48.dp))
                             Text("Open a .shn file to edit", color = IsyaMuted, fontSize = 14.sp)
-                            OutlinedButton(
-                                onClick = { filePicker.launch("*/*") },
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = IsyaMagic),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, IsyaMagic.copy(alpha = 0.5f)),
-                            ) {
-                                Text("Open file")
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = { filePicker.launch("*/*") }) {
+                                    Icon(Icons.Rounded.FolderOpen, null, Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Local file")
+                                }
+                                if (api != null) {
+                                    OutlinedButton(onClick = {
+                                        scope.launch {
+                                            runCatching { api.listSHN(state.serverRoot) }
+                                                .onSuccess { vm.setServerFiles(it.files.map { e -> e.name }) }
+                                                .onFailure { e -> vm.setStatus("list failed: ${e.message}") }
+                                        }
+                                    }) {
+                                        Icon(Icons.Rounded.CloudDownload, null, Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("From server")
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                else -> {
-                    val file = state.file!!
-                    SHNTableView(
-                        vm       = vm,
-                        file     = file,
-                        state    = state,
+                state.file != null -> {
+                    SHNTableView(vm = vm, state = state, columns = vm.currentColumns())
+                }
+            }
+        }
+    }
+
+    if (addColDialog) {
+        AddColumnDialog(
+            onDismiss = { addColDialog = false },
+            onAdd = { name, type, len ->
+                vm.addColumn(name, type, len); addColDialog = false
+            }
+        )
+    }
+}
+
+// ─── Server browser ──────────────────────────────────────────────────────────
+
+@Composable
+private fun ServerBrowser(
+    root:      String,
+    files:     List<String>,
+    onDismiss: () -> Unit,
+    onPick:    (String) -> Unit,
+) {
+    Column(
+        Modifier.fillMaxWidth()
+            .background(IsyaNight)
+            .border(1.dp, IsyaMagic.copy(alpha = 0.3f))
+            .padding(8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Server · 9Data/$root", color = IsyaMagic, fontSize = 13.sp,
+                 fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                Icon(Icons.Rounded.Close, null, tint = IsyaMuted, modifier = Modifier.size(16.dp))
+            }
+        }
+        if (files.isEmpty()) {
+            Text("no .shn files found in 9Data/$root",
+                 color = IsyaMuted, fontSize = 11.sp,
+                 modifier = Modifier.padding(8.dp))
+        } else {
+            LazyColumn(Modifier.heightIn(max = 240.dp)) {
+                items(files.size) { i ->
+                    Text(files[i],
+                        color = IsyaCream, fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp, horizontal = 8.dp)
+                            .background(if (i % 2 == 0) IsyaNight else IsyaNight.copy(alpha = 0.7f))
                     )
+                    TextButton(
+                        onClick = { onPick(files[i]) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Open", fontSize = 10.sp) }
                 }
             }
         }
     }
 }
 
+// ─── Add Column dialog ───────────────────────────────────────────────────────
+
+@Composable
+private fun AddColumnDialog(
+    onDismiss: () -> Unit,
+    onAdd:     (name: String, type: UInt, length: Int) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var typeStr by remember { mutableStateOf("3") }   // default: UInt32
+    var lenStr  by remember { mutableStateOf("4") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add column", color = IsyaCream) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(value = name, onValueChange = { name = it },
+                    label = { Text("Name") }, singleLine = true)
+                OutlinedTextField(value = typeStr, onValueChange = { typeStr = it.filter(Char::isDigit) },
+                    label = { Text("Type (1=byte 2=u16 3=u32 5=float 13=i16 0x18=str)") },
+                    singleLine = true)
+                OutlinedTextField(value = lenStr, onValueChange = { lenStr = it.filter(Char::isDigit) },
+                    label = { Text("Length (bytes)") }, singleLine = true)
+                Text("Type 9/0x18 (fixed str) needs Length = buffer bytes. " +
+                     "0x1a (null-term str) Length is unused at parse time but we " +
+                     "store what you entered.",
+                     color = IsyaMuted, fontSize = 10.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val t = typeStr.toIntOrNull()?.toUInt() ?: 3u
+                val l = lenStr.toIntOrNull() ?: 4
+                if (name.isNotBlank() && l > 0) onAdd(name.trim(), t, l)
+            }) { Text("Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
 // ─── Table view ──────────────────────────────────────────────────────────────
 
 @Composable
 private fun SHNTableView(
-    vm:    SHNViewModel,
-    file:  SHNFile,
-    state: SHNState,
+    vm:      SHNViewModel,
+    state:   SHNState,
+    columns: List<SHNColumn>,
 ) {
     val hScroll = rememberScrollState()
 
     Column(Modifier.fillMaxSize()) {
-        // Search bar
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -503,31 +872,29 @@ private fun SHNTableView(
                 placeholder   = "Search column…",
                 modifier      = Modifier.weight(1f),
             )
-            // Column filter dropdown
-            if (file.columns.isNotEmpty()) {
+            if (columns.isNotEmpty()) {
                 var expanded by remember { mutableStateOf(false) }
                 Box {
                     OutlinedButton(
                         onClick = { expanded = true },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = IsyaMuted),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, IsyaMuted.copy(alpha = 0.3f)),
                     ) {
                         Text(
-                            file.columns.getOrNull(state.filterCol)?.name?.take(10) ?: "Col",
+                            columns.getOrNull(state.filterCol)?.name?.take(10) ?: "Col",
                             fontSize = 11.sp,
                             maxLines = 1,
                         )
                         Icon(Icons.Rounded.ArrowDropDown, null, Modifier.size(16.dp))
                     }
                     DropdownMenu(
-                        expanded         = expanded,
+                        expanded = expanded,
                         onDismissRequest = { expanded = false },
-                        modifier         = Modifier.background(IsyaNight),
+                        modifier = Modifier.background(IsyaNight),
                     ) {
-                        file.columns.forEachIndexed { i, col ->
+                        columns.forEachIndexed { i, col ->
                             DropdownMenuItem(
-                                text    = { Text(col.name, color = IsyaCream, fontSize = 12.sp, fontFamily = FontFamily.Monospace) },
+                                text = { Text(col.name, color = IsyaCream, fontSize = 12.sp,
+                                              fontFamily = FontFamily.Monospace) },
                                 onClick = { vm.onFilterCol(i); expanded = false },
                             )
                         }
@@ -536,32 +903,32 @@ private fun SHNTableView(
             }
         }
 
-        // Column headers
+        // Column headers with delete buttons
         Row(
-            Modifier
-                .fillMaxWidth()
-                .horizontalScroll(hScroll)
-                .background(IsyaNight)
-                .border(1.dp, IsyaMuted.copy(alpha = 0.2f)),
+            Modifier.fillMaxWidth().horizontalScroll(hScroll)
+                .background(IsyaNight).border(1.dp, IsyaMuted.copy(alpha = 0.2f)),
         ) {
-            // Row # header
             SHNHeaderCell("#", 40.dp)
-            file.columns.forEach { col ->
-                SHNHeaderCell(col.name, colWidth(col))
+            columns.forEachIndexed { idx, col ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SHNHeaderCell("${col.name}·T${col.type.toInt()}·L${col.length}", colWidth(col))
+                    IconButton(onClick = { vm.deleteColumn(idx) },
+                               modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Rounded.RemoveCircleOutline, "Delete column",
+                             tint = IsyaError.copy(alpha = 0.4f),
+                             modifier = Modifier.size(14.dp))
+                    }
+                }
             }
-            // Delete column header
             SHNHeaderCell("", 40.dp)
         }
 
-        // Rows
         val indices = vm.getFilteredIndices()
         LazyColumn(Modifier.fillMaxSize()) {
             itemsIndexed(indices) { _, rowIdx ->
                 val isDirty = rowIdx in state.dirtyRows
                 Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(hScroll)
+                    Modifier.fillMaxWidth().horizontalScroll(hScroll)
                         .background(
                             if (isDirty) IsyaWarn.copy(alpha = 0.07f)
                             else if (rowIdx % 2 == 0) IsyaNight else IsyaNight.copy(alpha = 0.7f)
@@ -572,12 +939,12 @@ private fun SHNTableView(
                         ),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // Row index
-                    Box(Modifier.width(40.dp).padding(2.dp), contentAlignment = Alignment.Center) {
-                        Text("$rowIdx", color = IsyaMuted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    Box(Modifier.width(40.dp).padding(2.dp),
+                        contentAlignment = Alignment.Center) {
+                        Text("$rowIdx", color = IsyaMuted, fontSize = 10.sp,
+                             fontFamily = FontFamily.Monospace)
                     }
-                    // Cells
-                    file.columns.forEachIndexed { colIdx, col ->
+                    columns.forEachIndexed { colIdx, col ->
                         SHNCell(
                             value    = vm.editRows.getOrNull(rowIdx)?.getOrNull(colIdx)?.toString() ?: "",
                             width    = colWidth(col),
@@ -585,19 +952,17 @@ private fun SHNTableView(
                             onChange = { vm.setCell(rowIdx, colIdx, it) },
                         )
                     }
-                    // Delete row
                     IconButton(
                         onClick  = { vm.deleteRow(rowIdx) },
                         modifier = Modifier.size(40.dp),
                     ) {
-                        Icon(Icons.Rounded.DeleteOutline, "Delete row", tint = IsyaError.copy(alpha = 0.6f), modifier = Modifier.size(16.dp))
+                        Icon(Icons.Rounded.DeleteOutline, "Delete row",
+                             tint = IsyaError.copy(alpha = 0.6f),
+                             modifier = Modifier.size(16.dp))
                     }
                 }
             }
-
-            item {
-                Spacer(Modifier.height(80.dp))
-            }
+            item { Spacer(Modifier.height(80.dp)) }
         }
     }
 }
@@ -605,19 +970,13 @@ private fun SHNTableView(
 @Composable
 private fun SHNHeaderCell(label: String, width: androidx.compose.ui.unit.Dp) {
     Box(
-        Modifier
-            .width(width)
-            .padding(horizontal = 4.dp, vertical = 6.dp),
+        Modifier.width(width).padding(horizontal = 4.dp, vertical = 6.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
-            label,
-            color      = IsyaGold,
-            fontSize   = 10.sp,
-            fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace,
-            maxLines   = 1,
-            overflow   = TextOverflow.Ellipsis,
+            label, color = IsyaGold, fontSize = 10.sp,
+            fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -632,7 +991,7 @@ private fun SHNCell(
     var text by remember(value) { mutableStateOf(value) }
 
     BasicTextField(
-        value         = text,
+        value = text,
         onValueChange = { text = it; onChange(it) },
         singleLine    = !isString,
         textStyle     = LocalTextStyle.current.copy(
@@ -641,9 +1000,7 @@ private fun SHNCell(
             fontFamily = FontFamily.Monospace,
         ),
         cursorBrush   = SolidColor(IsyaMagic),
-        modifier      = Modifier
-            .width(width)
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+        modifier      = Modifier.width(width).padding(horizontal = 4.dp, vertical = 4.dp),
     )
 }
 

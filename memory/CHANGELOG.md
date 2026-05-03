@@ -387,3 +387,75 @@ Matches the 0oneServerInfo.txt / ZoneServerInfo.txt pattern exactly.
   at `9Data/Hero/LuaScript/ElleLua/settings.lua`) into ElleConfig so
   behavioral traits migrate off `elle_master_config.json`. Needs a
   Lua-project-side bridge (Shared stays Lua-free by design).
+
+---
+
+## Session Feb-2026 (continued) — Full SHN editor wiring (canonical parity)
+
+User supplied the canonical SHN Editor v4.7 source (SHNDecryptor C#) for
+reference. Audit surfaced real correctness gaps in the Kotlin port;
+all closed this pass.
+
+### Canonical-parity fixes in SHN parser/serializer
+- **Record-length validation** added — canonical `SHNFile.cs:139` throws
+  "Wrong record length!" if `2 + Σ col.length != DefaultRecordLength`.
+  Kotlin `parseSHN` now performs the same check and surfaces a clear
+  error (previously silently continued and produced garbage rows).
+- **Configurable text encoding** — canonical uses `Program.eT`; Western
+  forks need windows-1252, Korean Fiesta = EUC-KR, CN fork = GB2312.
+  Kotlin port was hardcoded ISO-8859-1 which mangled every non-ASCII
+  string column. New `SHNEncoding` enum + dropdown in the UI.
+  Default: **windows-1252** (matches the English Fiesta client).
+- **DefaultRecordLength recompute on serialize** — canonical writes
+  `GetDefaultRecLen()` at save time. Kotlin was writing the stale
+  parsed value, so adding/deleting columns would produce a file the
+  parser immediately rejected. Now recomputed from current columns.
+- **UnkCol name round-trip** — canonical writes `new byte[0x30]` for
+  columns whose name starts with "UnkCol" (they're blank on disk,
+  only labelled in memory). Kotlin now mirrors this.
+
+### New canonical features landed
+- **CSV export** (`exportCVS` equivalent) — "Export CSV" button writes
+  a comma-separated sheet to device storage. Useful for diffing two
+  .shn variants offline or importing into a spreadsheet.
+- **Column create / delete** — Add Column dialog prompts for name,
+  type code, and byte length. Delete Column is a per-header button.
+  Covers the canonical `columnCreate` / `columnDeletion` forms (bulk
+  edit / multiply / divide / rename left for a later pass — P2 since
+  the user's "on-the-go" ask is covered by create/delete/CSV).
+
+### Server round-trip (NEW — finishes the on-the-go loop)
+- **Backend: 3 routes** added to `Services/Elle.Service.HTTP/HTTPServer.cpp`
+  (AUTH_ADMIN), all constrained to `9Data/Hero` and `9Data/ReSystem`:
+  - `POST /api/shn/save` — body `{root, name, bytes_b64}`, writes
+    atomically (`*.shn.tmp` → rename over `*.shn`).
+  - `GET  /api/shn/list?root=...` — enumerate .shn files + size + mtime.
+  - `GET  /api/shn/get?root=...&name=...` — returns bytes as base64.
+  - Path-traversal guard rejects `/`, `\`, `..`, and non-`.shn` names.
+  - Min 0x24 byte payload check (matches SHN magic layout).
+  - Channel log sites (`ELLE_LOG_HTTP("SHN save OK root=... name=...")`).
+- **Client: Retrofit** — replaced multipart `saveSHN` with typed JSON
+  `ShnSaveRequest`/`ShnSaveResponse`; added `listSHN` + `getSHN`.
+- **Client: UI** — server browser sheet (tap cloud-download → fetch
+  list → pick file → bytes streamed in via `loadFromBytes`). Save-to-
+  server now shows a toast + coloured banner on success/failure,
+  killing the Feb-2026 "silent 404 swallow" bug.
+
+### Files touched
+- `Services/Elle.Service.HTTP/HTTPServer.cpp` (+230 LOC: 3 routes, 2 helpers)
+- `Android/.../data/ElleApiExtended.kt` (+18 LOC)
+- `Android/.../data/models/AllModels.kt` (+38 LOC: 4 models)
+- `Android/.../navigation/ElleNavHost.kt` (error surfacing)
+- `Android/.../ui/shneditor/SHNScreen.kt` (rewrite, 700 LOC)
+
+### Validation
+- Brace/paren/bracket balance on all 5 touched files: clean.
+- Against canonical `SHNDecryptor/Classes/SHNFile.cs`: type table and
+  Decrypt key stepper match byte-for-byte (reference run through
+  lines 340-669 of the original).
+
+### Not in this pass (follow-ups)
+- Bulk column ops (multiply / divide / rename / bulk-edit) — P2.
+- Column reorder via `displayToReal` map — P2 cosmetic.
+- SQL export (canonical `CreateSQL`) — P3.
+- Encoding auto-detect (filename-based `textdata` flag) — P3.
