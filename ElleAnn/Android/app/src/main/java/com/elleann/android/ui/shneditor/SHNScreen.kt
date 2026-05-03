@@ -139,6 +139,8 @@ data class SHNState(
     val serverFiles:  List<String> = emptyList(),
     val showBrowser:  Boolean     = false,
     val diffSummary:  DiffSummary? = null,
+    /** Server history for the currently-loaded file. Newest-first.   */
+    val history:      List<com.elleann.android.data.models.ShnHistoryEntry> = emptyList(),
 )
 
 // ─── Decrypt / Encrypt (symmetric) — canonical SHNFile.cs:Decrypt ───────────
@@ -436,6 +438,9 @@ class SHNViewModel : ViewModel() {
     }
 
     fun closeDiff() = _state.update { it.copy(diffSummary = null) }
+
+    fun setHistory(list: List<com.elleann.android.data.models.ShnHistoryEntry>) =
+        _state.update { it.copy(history = list) }
 
     fun setCell(rowIdx: Int, colIdx: Int, raw: String) {
         val col = _editColumns.getOrNull(colIdx) ?: return

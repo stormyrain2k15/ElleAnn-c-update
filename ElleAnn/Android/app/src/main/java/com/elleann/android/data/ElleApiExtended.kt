@@ -683,4 +683,14 @@ interface ElleApiExtended {
         @Query("root") root: String,
         @Query("name") name: String
     ): ShnGetResponse
+
+    /**
+     * GET /api/shn/history?name=Mob.shn&limit=20 — recent save timeline
+     * for a single SHN file. Returned newest-first.
+     */
+    @GET("/api/shn/history")
+    suspend fun historySHN(
+        @Query("name") name: String,
+        @Query("limit") limit: Int = 20
+    ): ShnHistoryResponse
 }

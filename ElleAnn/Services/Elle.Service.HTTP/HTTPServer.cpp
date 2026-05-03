@@ -56,6 +56,7 @@
 #include <chrono>
 #include <fstream>
 #include <filesystem>
+#include <ctime>
 #include <condition_variable>
 
 using json = nlohmann::json;
@@ -2522,6 +2523,34 @@ private:
                     if (it != req.headers.end()) peer = it->second;
                 }
                 if (peer.empty()) peer = "unknown";
+
+                /* TESTING BYPASS — when http_server.no_auth=1 the login
+                 * gate is entirely off. The app still calls /api/auth/login
+                 * at startup to retrieve a token, so we mint a synthetic
+                 * admin session in-memory without touching the DB.  This
+                 * sidesteps SQL-pool issues, lockout state, bad passwords,
+                 * and missing Account rows — all of which would otherwise
+                 * block testing while auth is intentionally disabled.    */
+                const bool kTestNoAuth = (ElleConfig::Instance().GetInt(
+                    "http_server.no_auth", 0) != 0);
+                if (kTestNoAuth) {
+                    ELLE_INFO("login: no_auth=1 — issuing synthetic "
+                              "dev-tier token for user=\"%s\"",
+                              username.c_str());
+                    ELLE_LOG_HTTP("login SYNTHETIC user=\"%s\" peer=%s",
+                                  username.c_str(), peer.c_str());
+                    std::string tok = ElleCrypto::RandomHex(32);
+                    if (tok.empty()) tok = std::string(64, 'f');
+                    return HTTPResponse::OK({
+                        {"ok",         true},
+                        {"token",      tok},
+                        {"nUserNo",    1},
+                        {"sUserID",    username.empty() ? "single" : username},
+                        {"sUserName",  username.empty() ? "Single" : username},
+                        {"nAuthID",    9},
+                        {"mode",       "no_auth_testing"}
+                    });
+                }
 
                 const uint64_t now = (uint64_t)ELLE_MS_NOW();
                 const std::string lkey = LoginKey(peer, username);
@@ -6657,6 +6686,47 @@ private:
                           root.c_str(), name.c_str(), decoded.size());
                 ELLE_LOG_HTTP("SHN save OK root=%s name=%s size=%zu",
                               root.c_str(), name.c_str(), decoded.size());
+
+                /* Append to per-file history. One line per save:
+                 *   <iso8601>|<epoch_ms>|<user>|<bytes>|<root>
+                 * Read back via GET /api/shn/history?name=... Kept next
+                 * to the sqllogs/ dir so operators don't need to grep
+                 * the unified http_*.log.                                */
+                try {
+                    std::filesystem::path historyDir =
+                        std::filesystem::path(absDir).parent_path() / "shn_history";
+                    std::error_code hec;
+                    std::filesystem::create_directories(historyDir, hec);
+                    std::filesystem::path hpath = historyDir /
+                        (std::filesystem::path(name).stem().string() + ".log");
+                    std::ofstream hf(hpath, std::ios::app);
+                    if (hf.is_open()) {
+                        auto user = req.headers.count("x-auth-user-id")
+                            ? req.headers.at("x-auth-user-id")
+                            : std::string("anon");
+                        std::time_t tt = std::time(nullptr);
+                        std::tm lt{};
+#ifdef _WIN32
+                        localtime_s(&lt, &tt);
+#else
+                        localtime_r(&tt, &lt);
+#endif
+                        char iso[32];
+                        std::snprintf(iso, sizeof(iso),
+                            "%04d-%02d-%02dT%02d:%02d:%02d",
+                            lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday,
+                            lt.tm_hour, lt.tm_min, lt.tm_sec);
+                        uint64_t ms = (uint64_t)std::chrono::duration_cast<
+                            std::chrono::milliseconds>(
+                                std::chrono::system_clock::now()
+                                    .time_since_epoch()).count();
+                        hf << iso << '|' << ms << '|' << user << '|'
+                           << decoded.size() << '|' << root << '\n';
+                    }
+                } catch (...) {
+                    /* Best-effort — never 5xx a save over history logging. */
+                }
+
                 return HTTPResponse::OK({
                     {"ok",       true},
                     {"path",     path.string()},
@@ -6754,6 +6824,75 @@ private:
                 {"path",      path.string()},
                 {"bytes",     (uint64_t)bytes.size()},
                 {"bytes_b64", b64}
+            });
+        }, AUTH_ADMIN);
+
+        /* GET /api/shn/history?name=Mob.shn&limit=20 — recent save log
+         * for a single file. Lines are newline-delimited, oldest-first;
+         * we return them newest-first and capped at `limit` (default 20). */
+        m_router.Register("GET", "/api/shn/history",
+            [shnValidateName](const HTTPRequest& req) {
+            std::string name = req.QueryString("name", "");
+            std::string err;
+            if (!shnValidateName(name, err))
+                return HTTPResponse::Err(400, err);
+            int limit = 20;
+            try { limit = std::stoi(req.QueryString("limit", "20")); } catch (...) {}
+            if (limit <= 0 || limit > 500) limit = 20;
+
+            /* History dir is <exe_dir>/shn_history/ — same exe-anchored
+             * convention as debug/ and sqllogs/.                        */
+            char buf[MAX_PATH] = {0};
+            GetModuleFileNameA(nullptr, buf, MAX_PATH);
+            std::filesystem::path hdir =
+                std::filesystem::path(buf).parent_path() / "shn_history";
+            std::filesystem::path hpath = hdir /
+                (std::filesystem::path(name).stem().string() + ".log");
+
+            json entries = json::array();
+            std::error_code ec;
+            if (!std::filesystem::exists(hpath, ec)) {
+                return HTTPResponse::OK({
+                    {"name", name}, {"count", 0}, {"entries", entries}
+                });
+            }
+            std::ifstream f(hpath);
+            if (!f.is_open())
+                return HTTPResponse::Err(500,
+                    "cannot open history for " + name);
+
+            std::vector<std::string> lines;
+            std::string ln;
+            while (std::getline(f, ln)) {
+                if (!ln.empty() && ln.back() == '\r') ln.pop_back();
+                if (!ln.empty()) lines.push_back(ln);
+            }
+            /* newest first, capped at `limit`. */
+            const int n = (int)lines.size();
+            const int start = std::max(0, n - limit);
+            for (int i = n - 1; i >= start; --i) {
+                /* "<iso>|<ms>|<user>|<bytes>|<root>"                     */
+                const std::string& L = lines[i];
+                std::vector<std::string> parts;
+                std::string cur;
+                for (char c : L) {
+                    if (c == '|') { parts.push_back(cur); cur.clear(); }
+                    else cur.push_back(c);
+                }
+                parts.push_back(cur);
+                if (parts.size() < 5) continue;
+                entries.push_back({
+                    {"iso",   parts[0]},
+                    {"ts_ms", (uint64_t)std::strtoull(parts[1].c_str(), nullptr, 10)},
+                    {"user",  parts[2]},
+                    {"bytes", (uint64_t)std::strtoull(parts[3].c_str(), nullptr, 10)},
+                    {"root",  parts[4]},
+                });
+            }
+            return HTTPResponse::OK({
+                {"name",    name},
+                {"count",   (int)entries.size()},
+                {"entries", entries},
             });
         }, AUTH_ADMIN);
 

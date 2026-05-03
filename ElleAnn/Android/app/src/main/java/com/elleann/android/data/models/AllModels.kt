@@ -1291,3 +1291,19 @@ data class ShnGetResponse(
     val bytes: Long   = 0,
     @SerialName("bytes_b64") val bytesB64: String = "",
 )
+
+@Serializable
+data class ShnHistoryEntry(
+    val iso:   String = "",
+    @SerialName("ts_ms") val tsMs: Long = 0,
+    val user:  String = "",
+    val bytes: Long   = 0,
+    val root:  String = "",
+)
+
+@Serializable
+data class ShnHistoryResponse(
+    val name:    String = "",
+    val count:   Int    = 0,
+    val entries: List<ShnHistoryEntry> = emptyList(),
+)
