@@ -540,7 +540,7 @@ float MemoryEngine::ComputeEmotionSimilarity(const float a[ELLE_MAX_EMOTIONS],
     return denom > 0.0f ? dot / denom : 0.0f;
 }
 
-void MemoryEngine::DreamConsolidate(const std::string& narrativePrompt) {
+void MemoryEngine::DreamConsolidate(const std::string& /*narrativePrompt*/) {
     ELLE_INFO("Dream consolidation starting...");
 
     /* During dream: reorganize, strengthen important connections, prune weak */

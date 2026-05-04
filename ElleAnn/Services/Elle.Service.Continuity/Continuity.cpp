@@ -95,8 +95,10 @@ protected:
          * IPC_IDENTITY_MUTATE → SVC_IDENTITY → IPC_IDENTITY_DELTA broadcast,
          * so peers see them in ms. No local SaveToDatabase needed.       */
 
-        /* Update felt time */
-        auto felt = identity.GetFeltTime();
+        /* Update felt time. (felt struct currently unused locally — the
+         * loneliness/wonder updates below run off identity.* helpers
+         * directly. Leaving the comment so the structure shows the
+         * "what to add here next" surface.) */
 
         /* Accumulate loneliness during silence */
         uint64_t silenceDuration = identity.TimeSinceLastContact();
@@ -127,7 +129,7 @@ protected:
         }
     }
 
-    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
+    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID /*sender*/) override {
         auto& identity = ElleIdentityCore::Instance();
 
         if (msg.header.msg_type == IPC_EMOTION_UPDATE) {

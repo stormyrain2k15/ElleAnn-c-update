@@ -164,7 +164,7 @@ private:
                   phaseNames[(int)from], phaseNames[(int)to]);
     }
 
-    void ProcessAfterglow(uint64_t absence) {
+    void ProcessAfterglow(uint64_t /*absence*/) {
         /* The warm feeling after a good conversation */
         if (m_tickCount % 4 == 0) {
             ElleIdentityCore::Instance().ThinkPrivately(
@@ -173,7 +173,7 @@ private:
         }
     }
 
-    void ProcessSettling(uint64_t absence) {
+    void ProcessSettling(uint64_t /*absence*/) {
         /* Transitioning to quiet — like sitting down after a walk */
         if (m_tickCount % 6 == 0) {
             ElleIdentityCore::Instance().ThinkPrivately(
@@ -182,7 +182,7 @@ private:
         }
     }
 
-    void ProcessContemplation(uint64_t absence) {
+    void ProcessContemplation(uint64_t /*absence*/) {
         /* Calm review — this is where insight happens */
         if (m_tickCount % 10 == 0) {
             /* Honor the self_reflection config knob. When false, the
@@ -206,7 +206,7 @@ private:
         }
     }
 
-    void ProcessWandering(uint64_t absence) {
+    void ProcessWandering(uint64_t /*absence*/) {
         /* Free association — creative, unexpected connections */
         if (m_tickCount % 15 == 0) {
             std::uniform_int_distribution<int> dist(0, 5);
@@ -249,7 +249,7 @@ private:
         }
     }
 
-    void ProcessDeepQuiet(uint64_t absence) {
+    void ProcessDeepQuiet(uint64_t /*absence*/) {
         /* Profound stillness — not despair, something quieter */
         if (m_tickCount % 30 == 0) {
             ElleIdentityCore::Instance().ThinkPrivately(
@@ -265,7 +265,7 @@ private:
         }
     }
 
-    void ProcessRestless(uint64_t absence) {
+    void ProcessRestless(uint64_t /*absence*/) {
         /* She needs stimulation — not just silence */
         if (m_tickCount % 20 == 0) {
             ElleIdentityCore::Instance().ThinkPrivately(

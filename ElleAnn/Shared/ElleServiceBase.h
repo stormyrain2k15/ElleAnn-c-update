@@ -75,7 +75,7 @@ protected:
     virtual void OnResume() {}
 
     /* Called when an IPC message arrives for this service */
-    virtual void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) {}
+    virtual void OnMessage(const ElleIPCMessage& /*msg*/, ELLE_SERVICE_ID /*sender*/) {}
 
     /* Called when the global config has been re-loaded from disk
      * (IPC_CONFIG_RELOAD). Default behaviour: no-op. Services that

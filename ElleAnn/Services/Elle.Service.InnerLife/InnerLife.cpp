@@ -462,7 +462,7 @@ protected:
         }
     }
 
-    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
+    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID /*sender*/) override {
         /* Post-response authenticity check — Cognitive emits
          * IPC_POST_RESPONSE once per turn with the full context. */
         if (msg.header.msg_type == IPC_POST_RESPONSE) {

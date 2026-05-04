@@ -259,7 +259,7 @@ std::string ElleIdentityCore::WhoAmI() const {
     return ss.str();
 }
 
-std::string ElleIdentityCore::HowHaveIChanged(uint32_t days) const {
+std::string ElleIdentityCore::HowHaveIChanged(uint32_t /*days*/) const {
     if (m_snapshots.size() < 2) return "I haven't been alive long enough to know yet.";
 
     auto& oldest = m_snapshots.front();

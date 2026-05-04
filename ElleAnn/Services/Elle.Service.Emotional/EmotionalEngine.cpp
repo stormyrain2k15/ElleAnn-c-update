@@ -737,7 +737,7 @@ void ElleEmotionalService::HandleEmotionUpdate(const ElleIPCMessage& msg) {
     }
 }
 
-void ElleEmotionalService::HandleEmotionQuery(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) {
+void ElleEmotionalService::HandleEmotionQuery(const ElleIPCMessage& /*msg*/, ELLE_SERVICE_ID sender) {
     auto state = m_engine.GetState();
     auto response = ElleIPCMessage::Create(IPC_EMOTION_QUERY, SVC_EMOTIONAL, sender);
     response.SetPayload(state);

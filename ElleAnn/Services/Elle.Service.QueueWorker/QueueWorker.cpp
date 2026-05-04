@@ -106,7 +106,7 @@ protected:
         }
     }
 
-    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
+    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID /*sender*/) override {
         /* Forward responses back to SQL queues */
         if (msg.header.msg_type == IPC_INTENT_RESPONSE) {
             ELLE_INTENT_RECORD intent;

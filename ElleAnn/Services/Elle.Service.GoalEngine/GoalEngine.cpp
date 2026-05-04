@@ -206,7 +206,7 @@ public:
              * satisfied (below its threshold), credit a small progress step
              * so long-standing intents actually complete instead of sitting
              * at 0% forever.                                               */
-            if (drives && g.source_drive >= 0 && g.source_drive < ELLE_DRIVE_COUNT) {
+            if (drives && g.source_drive < (uint32_t)ELLE_DRIVE_COUNT) {
                 float intensity = drives->intensity[g.source_drive];
                 float threshold = drives->threshold[g.source_drive];
                 if (intensity < threshold * 0.8f && g.progress < 1.0f) {

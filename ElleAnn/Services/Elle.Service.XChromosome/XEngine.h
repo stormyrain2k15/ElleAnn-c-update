@@ -349,7 +349,7 @@ public:
 
 private:
     /* Engine-wide state mutex. Guards every m_* field below so that readers
-     * (HTTP /api/x/* handlers, modulation consumers, GetDerived/GetHistory)
+     * (HTTP api/x route handlers, modulation consumers, GetDerived/GetHistory)
      * never observe a half-updated struct while Tick() / AnchorCycle() /
      * ApplyStimulus() / AttemptConception() / Deliver() are writing.
      *

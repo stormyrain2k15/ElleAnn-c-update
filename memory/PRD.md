@@ -22,7 +22,25 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 
 ## Completed (this session — Feb 2026)
 
-### Phase 3 — Quality of Life Pass (THIS SESSION'S 3rd UPDATE)
+### Phase 4 — Compile-Audit Pass (this fork)
+- 6 real /WX-class bugs caught + fixed before next Windows MSBuild
+  (ElleConfig populate methods, JsonType Number/num_val typo,
+  HTTPServer orphan comment, GoalEngine uint32 redundant compare,
+  base OnMessage unused-param, set-but-not-used in SelfPrompt /
+  Continuity).
+- 7 nested-comment sites rewritten so MSVC `-Wcomment` stops firing.
+- Schema-coherence prune of `CountTable` whitelist (5 dead names
+  removed).
+- 4 Android pages elevated from "coming soon" placeholders to live
+  backend-driven content (PairedDevices delete, VideoWorkers,
+  LearningAdmin, EthicsAdmin).
+- New Linux winstub (`Debug/_winstub/windows.h`) lets portable tests
+  syntax-check Windows-native files; previous fork's only outstanding
+  test (`test_config_dump_redacted`) now compiles green.
+- New audit-pin regression test (`Debug/test_compile_audit_feb2026.cpp`)
+  runs in <1s and fails if any of the above patterns regress.
+
+### Phase 3 — Quality of Life Pass
 
 **Cold-open recap**
 - New `GET /api/me/recap` endpoint — single-shot "since you last opened

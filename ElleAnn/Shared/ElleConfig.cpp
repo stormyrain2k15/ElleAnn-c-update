@@ -425,8 +425,8 @@ void ElleConfig::RegisterReloadCallback(std::function<void()> cb) {
  * EMERGENCY DEFAULTS
  *
  *   Used when no config file is reachable at service start. Installs a
- *   minimum-viable tree so the service can come up to expose /api/diag/*
- *   and the operator can repair the config out-of-band.
+ *   minimum-viable tree so the service can come up to expose the
+ *   /api/diag routes and the operator can repair the config out-of-band.
  *
  *   Defaults match the Feb-2026 testing-mode contract:
  *     - http_server bound to 0.0.0.0:8000+offset
@@ -467,11 +467,7 @@ void ElleConfig::LoadDefaults() {
         return;
     }
     m_root = std::move(root);
-    PopulateLLMConfig();
-    PopulateEmotionConfig();
-    PopulateMemoryConfig();
-    PopulateHTTPConfig();
-    PopulateServiceConfig();
+    PopulateFromJSON(m_root);
     for (auto& cb : m_reloadCallbacks) cb();
 }
 
@@ -509,11 +505,7 @@ bool ElleConfig::LayerJsonOver(const std::string& jsonPath) {
         m_root.obj_val[kv.first] = kv.second;
     }
     /* Re-populate typed structs so consumers see the merged values. */
-    PopulateLLMConfig();
-    PopulateEmotionConfig();
-    PopulateMemoryConfig();
-    PopulateHTTPConfig();
-    PopulateServiceConfig();
+    PopulateFromJSON(m_root);
     for (auto& cb : m_reloadCallbacks) cb();
     return true;
 }
@@ -572,12 +564,15 @@ void DumpNode(std::ostringstream& out, const JsonValue& v,
     switch (v.type) {
         case JsonType::Null:    out << "null"; return;
         case JsonType::Bool:    out << (v.bool_val ? "true" : "false"); return;
-        case JsonType::Number:
+        case JsonType::Int:
+            out << v.int_val;
+            return;
+        case JsonType::Float:
             /* Print integers without trailing .0 when whole. */
-            if (v.num_val == (double)(long long)v.num_val) {
-                out << (long long)v.num_val;
+            if (v.float_val == (double)(long long)v.float_val) {
+                out << (long long)v.float_val;
             } else {
-                out << v.num_val;
+                out << v.float_val;
             }
             return;
         case JsonType::String: {

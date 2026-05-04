@@ -58,11 +58,11 @@ object ElleRoutes {
     const val WORLD  = "world"
     const val DEV    = "dev"
 
-    // Auth
+    // Auth — kept for legacy deeplink references; no_auth mode never navigates here.
     const val PAIR   = "pair"
 
     // Chat sub-screens
-    const val CONVERSATION_LIST = "chat/conversations"
+    const val CONVERSATION_LIST = "chat/conversations"  // alias for CHAT, retained for deeplinks
     const val CHAT_SCREEN       = "chat/conversation/{conversationId}"
     const val VIDEO_CALL        = "chat/video/{callId}"
 
@@ -70,7 +70,7 @@ object ElleRoutes {
     fun videoCall(callId: Long) = "chat/video/$callId"
 
     // Memory sub-screens
-    const val MEMORY_SPACE   = "memory/space"
+    const val MEMORY_SPACE   = "memory/space"           // alias for MEMORY, retained for deeplinks
     const val MEMORY_BROWSER = "memory/browser"
     const val MEMORY_DETAIL  = "memory/detail/{memoryId}"
 

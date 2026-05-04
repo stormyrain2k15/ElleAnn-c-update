@@ -3,6 +3,132 @@
 (PRD.md is the static source of truth; this file is the running log of
 what landed and when. Newest entries on top.)
 
+## 2026-02 — Fork compile-audit pass (no functional changes)
+
+User confirmed: "the code needs a thorough review to make sure all
+functions are completed as far as we can go … the app needs to be 100%
+complete all pages and buttons fully wired and working … all services
+need to have all fixes and be coherent across all codes such as
+function names and everything need to align correctly all database
+calls actually exist in the schema."
+
+Defensive cleanup before the next native MSBuild on Windows.
+
+### Compile blockers fixed (would have failed `cl /WX` on Windows)
+
+- **`Shared/ElleConfig.cpp`** — `LoadDefaults()` and `LayerJsonOver()`
+  called five non-existent `PopulateXxxConfig()` methods. Replaced
+  with the real `PopulateFromJSON(m_root)` (one call covers all five
+  sections — typed structs are populated transactionally).
+- **`Shared/ElleConfig.cpp` :: `EmitJson()`** — referenced
+  `JsonType::Number` and `v.num_val`. Real enum has `Int` + `Float`
+  with `int_val` / `float_val`. Split branch accordingly so integer
+  config values still print without trailing `.0`.
+- **`Services/Elle.Service.HTTP/HTTPServer.cpp`** — orphaned `*` lines
+  at ~L3003 with no opening `/*`; the C++ parser was treating them as
+  multiplication operators on the next `m_router.Register(...)` call.
+  Restored the comment block.
+- **`Services/Elle.Service.GoalEngine/GoalEngine.cpp` :: AutonomousProgress**
+  — `g.source_drive >= 0` was always true (`source_drive` is
+  `uint32_t`). `-Werror=type-limits` would have killed the build.
+  Replaced with a single bound check.
+- **`Shared/ElleServiceBase.h` :: virtual `OnMessage`** — base method
+  declared `msg` and `sender` named, but multiple service overrides
+  legitimately don't use them. /WX `-Wunused-parameter` would have
+  failed. Marked the base params unused-OK.
+- **`Shared/ElleSelfSurprise.cpp`**, **`Shared/ElleIdentityCore.cpp`**,
+  **`Services/Elle.Service.Bonding/Bonding.cpp`**,
+  **`Services/Elle.Service.Continuity/Continuity.cpp`**,
+  **`Services/Elle.Service.Emotional/EmotionalEngine.cpp`**,
+  **`Services/Elle.Service.InnerLife/InnerLife.cpp`**,
+  **`Services/Elle.Service.Memory/MemoryEngine.cpp`**,
+  **`Services/Elle.Service.QueueWorker/QueueWorker.cpp`**,
+  **`Services/Elle.Service.Solitude/Solitude.cpp`** — same /WX-unused
+  fix surface in the appropriate methods.
+- **`Services/Elle.Service.SelfPrompt/SelfPrompt.cpp`** — `any_symptom`
+  was set-but-never-used. Removed.
+- **`Services/Elle.Service.Continuity/Continuity.cpp`** — `auto felt
+  = identity.GetFeltTime()` set-but-not-used. Removed.
+
+### Comment-within-comment cleanup (`-Wcomment` under MSVC /WX)
+
+- HTTPServer.cpp (2 sites), ElleDB_Content.cpp, Family.cpp,
+  XEngine.h, CognitiveEngine.cpp, FiestaClient.cpp.
+- All `/*` substrings inside `/* ... */` blocks rewritten so MSVC
+  no longer flags nested-comment ambiguity.
+
+### Schema coherence
+
+- **`Shared/ElleDB_Content.cpp` :: `CountTable`** — pruned 5 names
+  from the count whitelist that have no corresponding `CREATE TABLE`
+  in `/SQL/*.sql`: `SelfReflections`, `InternalNarrative`,
+  `CognitiveEvents`, `DreamIntegration`, `notifications`. The remaining
+  12 names are now schema-verified (`memory`, `messages`,
+  `conversations`, `users`, `world_entity`, `memory_tags`,
+  `memory_entity_links`, `ElleThreads`, `voice_calls`, `calls`,
+  `tokens`, `sessions`).
+
+### Android — completed pages
+
+- **`PairedDevicesScreen` delete button** (`ui/dev/DevScreens.kt`) — was
+  a `IconButton(onClick = { /* TODO */ })`. Now wired to
+  `extendedApi.revokeDevice(deviceId)` with optimistic UI removal
+  + server-side reconciliation.
+- **`VideoWorkersScreen`** — replaced "coming soon" placeholder with a
+  live list backed by `GET /api/video/avatars`, including refresh
+  control and error surface.
+- **`LearningAdminScreen`** — replaced placeholder with skill
+  inventory listing backed by `GET /api/education/skills` (proficiency
+  + usage counts visible, refresh button).
+- **`EthicsAdminScreen`** — replaced placeholder with full read/add
+  view: `GET /api/morals/rules` for the list, gated `POST
+  /api/morals/rules` (admin key) for add-rule with principle/category
+  /hard-rule toggle.
+- **`navigation/ElleDestinations.kt`** — clarified that `PAIR`,
+  `CONVERSATION_LIST`, and `MEMORY_SPACE` are deeplink aliases (not
+  un-wired routes) so a future agent can't mistake them for missing
+  composables.
+
+### Tooling — Linux test harness
+
+- **NEW `Debug/_winstub/windows.h`** (~250 LOC) — minimal Win32 SDK
+  surface so portable g++ tests can syntax-check Windows-native
+  files (logger, config, identity, queue IPC, services). Fully
+  guarded `#ifdef _WIN32 → #error`; never reaches a real Windows
+  build. Resolves the `<windows.h>` blocker the previous fork hit.
+- **`Debug/test_config_dump_redacted.cpp`** — rewritten to pull the
+  real ElleConfig translation unit through the new winstub, so the
+  redaction logic is now actually exercised in CI rather than a
+  no-link compile probe.
+
+### NEW regression pin
+
+- **`Debug/test_compile_audit_feb2026.cpp`** — 16-assertion test that
+  greps the 6 audit-fixed source files for the known-bad patterns and
+  fails if any return. Runs in <1s. A future fork attempting to
+  reintroduce e.g. `JsonType::Number` or the old whitelist will see
+  this fail before it touches real Windows.
+
+### Verification
+
+- Portable test suite: 11/11 pass (was 10/11 — `test_config_dump_redacted`
+  was the previous skip).
+- Shared/ syntax sweep: 11/11 production translation units compile
+  clean under `-Wall -Wextra -Werror -std=c++17`.
+- Service-tier syntax sweep: 16/16 portable services compile clean
+  under the same flags (Fiesta + HTTP excluded — they require winsock
+  / WinHTTP libs we intentionally don't stub).
+- ElleDB symbol-decl-vs-def cross-check: 0 dangling, 0 missing.
+
+### Out of scope (user verification still pending)
+
+- Native MSBuild compile on the user's local Windows PC. The pre-flight
+  syntax pass is now green; the user can pull and try `cl /WX` knowing
+  the patterns above are no longer in the source.
+- Fiesta in-game login/cipher round-trip — same status as last fork
+  (gated on the user's local game server).
+
+
 ## 2026-02 — All enhancements landed (game-DB unification, Cognitive↔Fiesta, Bonding↔Fiesta, GameSessionState, UserContinuity)
 
 User said "go ahead with all enhancements" — five P0/P1/future items

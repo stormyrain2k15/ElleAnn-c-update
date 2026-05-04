@@ -751,7 +751,20 @@ fun PairedDevicesScreen(container: AppContainerExtended, onBack: () -> Unit) {
                             Text("ID: ${d.deviceId}", color = Color(0xFF3A7A3A), fontSize = 10.sp)
                             Text("Last Active: ${d.lastActive}", color = Color(0xFFCCFFCC), fontSize = 11.sp)
                         }
-                        IconButton(onClick = { /* TODO */ }) {
+                        IconButton(onClick = {
+                            scope.launch {
+                                runCatching {
+                                    container.extendedApi.revokeDevice(d.deviceId)
+                                }.onSuccess {
+                                    /* Optimistically remove from local list and re-pull
+                                     * to make sure server-side audit/state matches the
+                                     * UI (e.g. another admin revoked the same device). */
+                                    devices = devices.filterNot { it.deviceId == d.deviceId }
+                                    runCatching { container.api(true).getPairedDevices() }
+                                        .onSuccess { resp -> devices = resp.devices }
+                                }
+                            }
+                        }) {
                             Icon(Icons.Rounded.Delete, null, tint = IsyaError)
                         }
                     }
@@ -762,37 +775,260 @@ fun PairedDevicesScreen(container: AppContainerExtended, onBack: () -> Unit) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// VIDEO WORKERS
+// VIDEO WORKERS — live Avatara job queue.
+//   GET /api/video/avatars            → user-uploaded avatars
+//   GET /api/video/status/{job_id}    → polled per-job (driven from a list
+//                                       cached on disk by the worker).
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun VideoWorkersScreen(container: AppContainerExtended, onBack: () -> Unit) {
+    var avatars by remember { mutableStateOf<List<UserAvatar>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var err by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun reload() {
+        loading = true; err = null
+        scope.launch {
+            runCatching { container.extendedApi.getAvatars() }
+                .onSuccess { avatars = it.avatars }
+                .onFailure { err = it.message ?: it.javaClass.simpleName }
+            loading = false
+        }
+    }
+    LaunchedEffect(Unit) { reload() }
+
     DevScaffold("Video Generation Workers", onBack) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-            Text("Avatara job queue monitoring coming soon.", color = Color(0xFF3A7A3A))
+        if (loading) {
+            IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp))
+            return@DevScaffold
+        }
+        LazyColumn(
+            modifier         = Modifier.fillMaxSize().padding(padding),
+            contentPadding   = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            err?.let {
+                item {
+                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF2A0D0D), modifier = Modifier.fillMaxWidth()) {
+                        Text("Worker queue unreachable: $it", color = IsyaError, modifier = Modifier.padding(12.dp))
+                    }
+                }
+            }
+            item {
+                Text(
+                    "${avatars.size} avatar${if (avatars.size == 1) "" else "s"} registered",
+                    color = IsyaGold, fontWeight = FontWeight.Bold,
+                )
+            }
+            items(avatars) { a ->
+                Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(a.label?.takeIf { it.isNotBlank() } ?: "(unnamed)",
+                             color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                        Text("ID: ${a.id}${if (a.isDefault) "  (default)" else ""}",
+                             color = Color(0xFF3A7A3A), fontSize = 10.sp)
+                        Text("Path: ${a.filePath}",
+                             color = Color(0xFFCCFFCC), fontSize = 11.sp,
+                             maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            item {
+                IsyaButton(
+                    text     = "Refresh",
+                    onClick  = { reload() },
+                    variant  = IsyaButtonVariant.PRIMARY_GOLD,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// LEARNING ADMIN
+// LEARNING ADMIN — read/inspect Elle's skill inventory.
+//   GET /api/education/skills
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun LearningAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
+    var skills by remember { mutableStateOf<List<Skill>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var err by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun reload() {
+        loading = true; err = null
+        scope.launch {
+            runCatching { container.extendedApi.getSkills() }
+                .onSuccess { skills = it.skills }
+                .onFailure { err = it.message ?: it.javaClass.simpleName }
+            loading = false
+        }
+    }
+    LaunchedEffect(Unit) { reload() }
+
     DevScaffold("Learning Admin", onBack) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-            Text("Bulk skill and subject import tools.", color = Color(0xFF3A7A3A))
+        if (loading) {
+            IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp))
+            return@DevScaffold
+        }
+        LazyColumn(
+            modifier         = Modifier.fillMaxSize().padding(padding),
+            contentPadding   = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            err?.let {
+                item {
+                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF2A0D0D), modifier = Modifier.fillMaxWidth()) {
+                        Text("Could not load skills: $it", color = IsyaError, modifier = Modifier.padding(12.dp))
+                    }
+                }
+            }
+            item {
+                Text("${skills.size} skill${if (skills.size == 1) "" else "s"} inventoried",
+                     color = IsyaGold, fontWeight = FontWeight.Bold)
+            }
+            items(skills) { s ->
+                Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(s.skillName, color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                        Text("Category: ${s.category ?: "—"}", color = Color(0xFFCCFFCC), fontSize = 11.sp)
+                        Text("Proficiency: ${s.proficiency}  ·  Used ${s.timesUsed}×",
+                             color = Color(0xFF3A7A3A), fontSize = 10.sp)
+                    }
+                }
+            }
+            item {
+                IsyaButton(
+                    text     = "Refresh",
+                    onClick  = { reload() },
+                    variant  = IsyaButtonVariant.PRIMARY_GOLD,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ETHICS ADMIN
+// ETHICS ADMIN — view + add to Elle's moral framework.
+//   GET  /api/morals/rules                   (USER)
+//   POST /api/morals/rules  (ADMIN)         carried via container.adminApi
 // ══════════════════════════════════════════════════════════════════════════════
 @Composable
 fun EthicsAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
+    var rules by remember { mutableStateOf<List<MoralRule>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    var err by remember { mutableStateOf<String?>(null) }
+    var newPrinciple by remember { mutableStateOf("") }
+    var newCategory by remember { mutableStateOf("") }
+    var newHard by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun reload() {
+        loading = true; err = null
+        scope.launch {
+            runCatching { container.extendedApi.getMoralRules() }
+                .onSuccess { rules = it.rules }
+                .onFailure { err = it.message ?: it.javaClass.simpleName }
+            loading = false
+        }
+    }
+    LaunchedEffect(Unit) { reload() }
+
     DevScaffold("Ethics Admin", onBack) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-            Text("Moral framework rule management.", color = Color(0xFF3A7A3A))
+        LazyColumn(
+            modifier         = Modifier.fillMaxSize().padding(padding),
+            contentPadding   = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            err?.let {
+                item {
+                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF2A0D0D), modifier = Modifier.fillMaxWidth()) {
+                        Text("Could not load rules: $it", color = IsyaError, modifier = Modifier.padding(12.dp))
+                    }
+                }
+            }
+            item {
+                /* Add-rule card. Hidden behind admin key — if the
+                 * container has no admin key configured the POST below
+                 * will 401 and surface in `err`. */
+                Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF1A1A0A), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Add Rule (ADMIN)", color = IsyaGold, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value           = newPrinciple,
+                            onValueChange   = { newPrinciple = it },
+                            label           = { Text("Principle") },
+                            singleLine      = false,
+                            modifier        = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value           = newCategory,
+                            onValueChange   = { newCategory = it },
+                            label           = { Text("Category (optional)") },
+                            singleLine      = true,
+                            modifier        = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Switch(checked = newHard, onCheckedChange = { newHard = it })
+                            Spacer(Modifier.width(8.dp))
+                            Text("Hard rule (un-overridable)", color = IsyaCream)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        IsyaButton(
+                            text     = if (saving) "Saving…" else "Add Rule",
+                            onClick  = {
+                                if (newPrinciple.isNotBlank() && !saving) {
+                                    saving = true
+                                    scope.launch {
+                                        runCatching {
+                                            container.api(true).createMoralRule(
+                                                CreateMoralRuleRequest(
+                                                    principle  = newPrinciple.trim(),
+                                                    category   = newCategory.trim().ifEmpty { null },
+                                                    isHardRule = newHard,
+                                                )
+                                            )
+                                        }.onSuccess {
+                                            newPrinciple = ""; newCategory = ""; newHard = false
+                                            reload()
+                                        }.onFailure { err = it.message ?: it.javaClass.simpleName }
+                                        saving = false
+                                    }
+                                }
+                            },
+                            variant  = IsyaButtonVariant.PRIMARY_GOLD,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
+            if (loading) {
+                item { IsyaLoadingIndicator(Modifier.fillMaxWidth().padding(16.dp)) }
+            } else {
+                item {
+                    Text("${rules.size} rule${if (rules.size == 1) "" else "s"} active",
+                         color = IsyaGold, fontWeight = FontWeight.Bold)
+                }
+                items(rules) { r ->
+                    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(r.principle, color = Color(0xFF00FF88), fontWeight = FontWeight.Bold)
+                            Text(
+                                "Category: ${r.category ?: "—"}  ·  ${if (r.isHardRule) "HARD" else "soft"}",
+                                color    = if (r.isHardRule) IsyaError else Color(0xFF3A7A3A),
+                                fontSize = 10.sp,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

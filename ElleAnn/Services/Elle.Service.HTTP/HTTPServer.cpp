@@ -748,9 +748,10 @@ public:
              *          1 = normal user (login allowed)
              *          5 = admin
              *          9 = dev
-             *        Threshold defaults to 9 so /api/diag/* is dev-only;
-             *        drop it to 5 in elle_master_config.json if your
-             *        operations admins also need diagnostic endpoints.
+             *        Threshold defaults to 9 so the /api/diag routes are
+             *        dev-only; drop it to 5 in elle_master_config.json
+             *        if your operations admins also need diagnostic
+             *        endpoints.
              *     5. For AUTH_INTERNAL_ONLY, same + loopback-only peer.
              *     6. Stash identity columns on the request for handlers.
              *     7. Best-effort LastSeenMs touch.
@@ -3001,10 +3002,11 @@ private:
             });
         }, AUTH_ADMIN);
 
+        /* ============== /api/diag/routes — registered route inventory ===========
          * Returns every registered route with its HTTP method and auth
          * level. Exists so the auditor can verify that a route they
          * expect to be AUTH_ADMIN actually IS AUTH_ADMIN, instead of
-         * greppingfor Register() calls. Also flushes out the failure
+         * grepping for Register() calls. Also flushes out the failure
          * mode "new route shipped without specifying auth level" — those
          * routes show up here as AUTH_USER (the fail-closed default).  */
         m_router.Register("GET", "/api/diag/routes", [this](const HTTPRequest&) {
@@ -4121,7 +4123,7 @@ private:
         });
 
         /* ==================================================================
-         *  /api/identity/* (USER)
+         *  /api/identity routes (USER)
          *
          *  These 8 read-only endpoints replace the previous Apache
          *  reverse-proxy stripe on port 8080.  The Android companion

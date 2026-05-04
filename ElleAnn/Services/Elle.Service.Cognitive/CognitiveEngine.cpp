@@ -1260,8 +1260,8 @@ private:
         /* 7. Call LLM (language surface only) */
         std::vector<LLMMessage> conv;
         /* Hand the assembled context to the model.  We log the system-
-         * prompt length so /api/diag/* (and operator log scans) can
-         * spot the moment a prompt blows past the model's context
+         * prompt length so the /api/diag routes (and operator log scans)
+         * can spot the moment a prompt blows past the model's context
          * window.  Most local models cap around 8K tokens and the
          * tokenizer ratio is ~4 bytes/token in English, so >32KB of
          * system prompt is a strong signal we're truncating server-side

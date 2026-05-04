@@ -2,17 +2,16 @@
  * test_config_dump_redacted.cpp — verifies ElleConfig::DumpJsonRedacted
  *   strips the standard sensitive-key set + preserves structure.
  *
- *   Compile: g++ -std=c++17 -Wall -Wextra -Werror -o tcdr test_config_dump_redacted.cpp
+ *   Compile:
+ *     g++ -std=c++17 -Wall -Wextra -Werror \
+ *         -I /app/ElleAnn/Debug/_winstub \
+ *         -I /app/ElleAnn/Shared \
+ *         test_config_dump_redacted.cpp -o tcdr
  *══════════════════════════════════════════════════════════════════════════════*/
-#define ELLE_INFO(...)  ((void)0)
-#define ELLE_WARN(...)  ((void)0)
-#define ELLE_ERROR(...) ((void)0)
-#define ELLE_DEBUG(...) ((void)0)
-#define ELLE_TRACE(...) ((void)0)
-#define ELLE_FATAL(...) ((void)0)
-class ElleLogger { public: static ElleLogger& Instance() { static ElleLogger i; return i; } };
-class ElleServerInfoFile {};
-inline bool LoadElleServerInfo(const std::string&, ElleServerInfoFile&, std::string&) { return false; }
+/* The real logger pulls in <windows.h> via ElleTypes.h. The _winstub
+ * windows.h handles that. We don't need to override the ELLE_* macros
+ * — the real logger is header-inline and works on Linux too. */
+#include <string>
 
 #include "/app/ElleAnn/Shared/ElleConfig.h"
 #include "/app/ElleAnn/Shared/ElleConfig.cpp"

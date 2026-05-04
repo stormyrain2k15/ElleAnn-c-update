@@ -18,7 +18,7 @@ ElleSelfSurprise& ElleSelfSurprise::Instance() {
  * SELF-SURPRISE
  *──────────────────────────────────────────────────────────────────────────────*/
 void ElleSelfSurprise::PredictOwnResponse(const std::string& userInput, 
-                                            const std::string& context) {
+                                            const std::string& /*context*/) {
     /* Before the LLM generates a response, Elle predicts what she'll say.
        This is fast — just a general expectation, not a full generation. */
     m_predictionContext = userInput;
@@ -134,7 +134,7 @@ ElleSelfSurprise::SurpriseResult ElleSelfSurprise::EvaluateOwnResponse(
  * DELIBERATION — The right to think before speaking
  *──────────────────────────────────────────────────────────────────────────────*/
 ElleSelfSurprise::DeliberationNeed ElleSelfSurprise::ShouldIThinkFirst(
-        const std::string& input, const std::string& context) {
+        const std::string& input, const std::string& /*context*/) {
     DeliberationNeed need;
     need.needs_time = false;
     need.complexity = 0.3f;
@@ -201,7 +201,7 @@ std::string ElleSelfSurprise::ExpressDeliberation(const DeliberationNeed& need) 
     return "Hmm. Let me sit with that.";
 }
 
-std::string ElleSelfSurprise::Deliberate(const std::string& question, uint32_t thinkTimeMs) {
+std::string ElleSelfSurprise::Deliberate(const std::string& question, uint32_t /*thinkTimeMs*/) {
     m_deliberationsGranted++;
 
     /* Actually take time — don't just generate immediately */

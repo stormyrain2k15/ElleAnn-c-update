@@ -4,8 +4,8 @@
  *
  *   See FiestaClient.h for the state machine documentation.  Each
  *   `Send*` and `On*` helper here corresponds to ONE PDB-verified
- *   PROTO_NC_* struct, populated bit-exactly from the recovered
- *   `_re_artifacts/pdb/extracted/*.md` layouts.
+ *   PROTO_NC_ struct, populated bit-exactly from the recovered
+ *   `_re_artifacts/pdb/extracted/` layouts.
  *══════════════════════════════════════════════════════════════════════════════*/
 #include "FiestaClient.h"
 

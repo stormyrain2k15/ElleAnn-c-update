@@ -96,7 +96,7 @@ std::string GetSubjective(const std::string& key) {
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
- * MEMORY CRUD helpers for /api/memory/* endpoints
+ * MEMORY CRUD helpers for the /api/memory routes
  *──────────────────────────────────────────────────────────────────────────────*/
 static void FillMemoryRow(ElleDB::MemoryRow& r, const SQLRow& row) {
     r.id = row.GetIntOr(0, 0);
@@ -255,12 +255,17 @@ bool EndVoiceCall(const std::string& callId) {
 }
 
 int64_t CountTable(const std::string& table) {
-    /* Table name is caller-controlled so restrict to whitelist. */
+    /* Table name is caller-controlled so restrict to whitelist of
+     * tables that actually exist in the live schema (verified against
+     * the SQL DDL files).  Names not in this list — historical or
+     * aspirational tables like InternalNarrative / CognitiveEvents —
+     * would silently return -1 from the SQL probe; pruning them here
+     * means the /api/diag count endpoint stays a single source of
+     * truth. */
     static const std::set<std::string> whitelist = {
         "memory","messages","conversations","users","world_entity",
-        "memory_tags","memory_entity_links","SelfReflections","ElleThreads",
-        "voice_calls","calls","notifications","InternalNarrative",
-        "CognitiveEvents","DreamIntegration","tokens","sessions"
+        "memory_tags","memory_entity_links","ElleThreads",
+        "voice_calls","calls","tokens","sessions"
     };
     if (whitelist.find(table) == whitelist.end()) return -1;
     auto rs = ElleSQLPool::Instance().Query(

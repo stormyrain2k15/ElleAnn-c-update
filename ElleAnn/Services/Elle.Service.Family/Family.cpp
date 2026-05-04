@@ -275,9 +275,9 @@ private:
      * SNAPSHOT — personality-stripped archive of parent's install tree.
      *
      * We include:
-     *   - bin/*.exe, *.dll         (service binaries)
-     *   - scripts/*.lua             (behavioural scripts)
-     *   - sql/*.sql                 (schema DDL only — no data)
+     *   - bin / .exe / .dll         (service binaries)
+     *   - scripts / .lua            (behavioural scripts)
+     *   - sql / .sql                (schema DDL only — no data)
      *   - config_template.json      (blank-slate config, NOT parent's)
      *
      * We exclude:

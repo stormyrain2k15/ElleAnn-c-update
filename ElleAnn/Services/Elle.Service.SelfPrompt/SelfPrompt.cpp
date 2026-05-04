@@ -250,14 +250,12 @@ private:
         if (preg.success && !preg.rows.empty()) pregnant = preg.rows[0].GetIntOr(0, 0) != 0;
 
         bool high_fatigue = false;
-        bool any_symptom  = false;
         auto sy = ElleSQLPool::Instance().QueryParams(
             "SELECT TOP 1 kind, intensity FROM ElleHeart.dbo.x_symptoms "
             " WHERE observed_ms >= ? AND intensity >= 0.5 "
             " ORDER BY intensity DESC;",
             { std::to_string((long long)(ELLE_MS_NOW() - 2ULL * 3600000ULL)) });
         if (sy.success && !sy.rows.empty()) {
-            any_symptom = true;
             const std::string& k = sy.rows[0].values.size() > 0 ? sy.rows[0].values[0] : std::string();
             if (k == "fatigue" || k == "cramps" || k == "headache" ||
                 k == "hot_flash" || k == "insomnia") high_fatigue = true;

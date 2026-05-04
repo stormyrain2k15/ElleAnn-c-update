@@ -110,7 +110,7 @@ public:
     }
 
     /* Called after every interaction */
-    void ProcessInteraction(const std::string& userMessage, const std::string& elleResponse,
+    void ProcessInteraction(const std::string& userMessage, const std::string& /*elleResponse*/,
                             float conversationDepth, float emotionalIntensity) {
         m_state.total_interactions++;
 
@@ -721,7 +721,7 @@ protected:
         ElleIdentityCore::Instance().DecayPreferences();
     }
 
-    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
+    void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID /*sender*/) override {
         /* Cognitive emits IPC_INTERACTION_RECORDED once per completed
          * chat turn. Payload: JSON string with user/assistant text and
          * conversation-depth / emotional-intensity metrics. Route that
