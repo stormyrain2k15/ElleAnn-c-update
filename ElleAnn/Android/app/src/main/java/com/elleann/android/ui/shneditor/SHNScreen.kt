@@ -703,6 +703,8 @@ fun SHNScreen(
     var addColDialog  by remember { mutableStateOf(false) }
     var bulkOpDialog  by remember { mutableStateOf<Int?>(null) }   // colIdx
     var renameColDialog by remember { mutableStateOf<Int?>(null) } // colIdx
+    var pendingSaveToServer by remember { mutableStateOf(false) }
+    var pendingSaveToDevice by remember { mutableStateOf(false) }
 
     /* Refresh server history whenever the loaded filename changes — gives
      * the operator the "last saved 2h ago by admin" line under the title. */
@@ -727,14 +729,16 @@ fun SHNScreen(
                         // Save to server
                         if (onSaveToServer != null) {
                             IconButton(onClick = {
-                                vm.saveTo { bytes, name ->
-                                    onSaveToServer(state.serverRoot, name, bytes) { ok, msg ->
-                                        vm.setStatus(msg, ok)
-                                        Toast.makeText(ctx, msg,
-                                            if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
-                                        ).show()
-                                    }
-                                }
+                                /* CANONICAL-PARITY GUARD: SHN string columns
+                                 * are encoded via the active SHNEncoding.
+                                 * If the operator opens an EUC-KR file with
+                                 * Win1252 (default), all string cells decode
+                                 * as garbled Latin-1 — and saving re-encodes
+                                 * with Win1252, permanently corrupting the
+                                 * file.  We surface a one-tap confirm so the
+                                 * encoding choice is explicit before we
+                                 * touch bytes on the server.                */
+                                pendingSaveToServer = true
                             }, enabled = !state.saving) {
                                 if (state.saving)
                                     CircularProgressIndicator(Modifier.size(18.dp), color = IsyaMagic, strokeWidth = 2.dp)
@@ -1006,6 +1010,65 @@ fun SHNScreen(
             }
         )
     }
+
+    if (pendingSaveToServer) {
+        EncodingConfirmDialog(
+            encodingDisplay = state.encoding.displayName,
+            saveTarget      = "server (${state.serverRoot})",
+            onDismiss       = { pendingSaveToServer = false },
+            onConfirm       = {
+                pendingSaveToServer = false
+                vm.saveTo { bytes, name ->
+                    onSaveToServer?.invoke(state.serverRoot, name, bytes) { ok, msg ->
+                        vm.setStatus(msg, ok)
+                        Toast.makeText(ctx, msg,
+                            if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+        )
+    }
+}
+
+/* SHN bytes round-trip through the active encoding. Silent re-encoding
+ * with the wrong charset is the #1 cause of a save permanently breaking
+ * a file (canonical SHN Editor has the same gotcha — there's just no
+ * UI confirmation there).  This dialog forces an explicit acknowledgment
+ * before we touch the bytes.                                           */
+@Composable
+private fun EncodingConfirmDialog(
+    encodingDisplay: String,
+    saveTarget:      String,
+    onDismiss:       () -> Unit,
+    onConfirm:       () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Confirm encoding before save", color = IsyaCream) },
+        text  = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Active encoding: $encodingDisplay",
+                     color = IsyaGold, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                Text("Saving to: $saveTarget",
+                     color = IsyaCream, fontSize = 12.sp)
+                Text(
+                    "If this isn't the encoding the file was created with, " +
+                    "every string column will be re-encoded into the wrong charset " +
+                    "and the file will be permanently corrupted. " +
+                    "If column[0] (usually the ID) looks like garbage when you " +
+                    "view it, switch encoding (top bar) BEFORE saving.",
+                    color = IsyaWarn, fontSize = 11.sp,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Save anyway") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel — let me check") }
+        },
+    )
 }
 
 // ─── Bulk Op dialog ──────────────────────────────────────────────────────────

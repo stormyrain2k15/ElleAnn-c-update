@@ -41,9 +41,10 @@ class MainActivity : ComponentActivity() {
                 ElleNavHost(
                     container         = app.container,
                     containerExtended = containerExtended,
-                    /* Real pair-state: routes the user to PairScreen on
-                     * cold start when no host is configured.            */
-                    isPaired          = containerExtended.isPaired,
+                    /* Personal AI — always treated as paired. The default
+                     * host (158.62.137.73:8000) is hardcoded in
+                     * AppContainerExtended; pair flow is not a gate. */
+                    isPaired          = true,
                     onPaired          = { },
                     onUnpair          = { },
                 )

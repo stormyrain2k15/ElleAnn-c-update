@@ -566,7 +566,26 @@ fun DictionaryAdminScreen(container: AppContainerExtended, onBack: () -> Unit) {
                 LinearProgressIndicator(progress = { s.progress }, modifier = Modifier.fillMaxWidth(), color = Color(0xFF00FF88), trackColor = Color(0xFF0A1A0A))
             }
             Spacer(Modifier.weight(1f))
-            IsyaButton(text = "Trigger Full Re-Index", onClick = { /* TODO */ }, variant = IsyaButtonVariant.PRIMARY_GOLD, modifier = Modifier.fillMaxWidth())
+            val scope = rememberCoroutineScope()
+            var feedback by remember { mutableStateOf<String?>(null) }
+            feedback?.let {
+                Text(it, color = if (it.startsWith("ok")) Color(0xFF00FF88) else IsyaError,
+                     fontSize = 11.sp)
+            }
+            IsyaButton(
+                text = "Trigger Full Re-Index",
+                onClick = {
+                    scope.launch {
+                        feedback = runCatching { container.extendedApi.commitMemory() }
+                            .fold(
+                                onSuccess = { "ok — memory consolidation queued" },
+                                onFailure = { "fail: ${it.message ?: "unknown"}" }
+                            )
+                    }
+                },
+                variant = IsyaButtonVariant.PRIMARY_GOLD,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }
@@ -598,9 +617,32 @@ fun BackupsScreen(container: AppContainerExtended, onBack: () -> Unit) {
 
     DevScaffold("SQL Backups", onBack) { padding ->
         if (loading) { IsyaLoadingIndicator(Modifier.padding(padding).fillMaxWidth().padding(32.dp)); return@DevScaffold }
+        val scope = rememberCoroutineScope()
+        var feedback by remember { mutableStateOf<String?>(null) }
         LazyColumn(modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
-                IsyaButton(text = "Trigger Instant Backup", onClick = { /* TODO */ }, variant = IsyaButtonVariant.PRIMARY_GOLD, modifier = Modifier.fillMaxWidth())
+                IsyaButton(
+                    text = "Trigger Instant Backup",
+                    onClick = {
+                        scope.launch {
+                            feedback = runCatching { container.extendedApi.createBackup() }
+                                .fold(
+                                    onSuccess = { "ok — backup written" },
+                                    onFailure = { "fail: ${it.message ?: "unknown"}" }
+                                )
+                            // refresh
+                            runCatching { container.extendedApi.getBackups() }
+                                .onSuccess { backups = it.backups }
+                        }
+                    },
+                    variant = IsyaButtonVariant.PRIMARY_GOLD,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                feedback?.let {
+                    Text(it,
+                        color = if (it.startsWith("ok")) Color(0xFF00FF88) else IsyaError,
+                        fontSize = 11.sp)
+                }
             }
             items(backups) { b ->
                 Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFF0D2B0D), modifier = Modifier.fillMaxWidth()) {
@@ -641,7 +683,30 @@ fun ConfigScreen(container: AppContainerExtended, onBack: () -> Unit) {
                 Text("Max Connections: ${s.maxConnections}", color = Color(0xFFCCFFCC))
             }
             Spacer(Modifier.weight(1f))
-            IsyaButton(text = "Reload Config File", onClick = { /* TODO */ }, variant = IsyaButtonVariant.PRIMARY_GOLD, modifier = Modifier.fillMaxWidth())
+            val scope = rememberCoroutineScope()
+            var feedback by remember { mutableStateOf<String?>(null) }
+            feedback?.let {
+                Text(it,
+                    color = if (it.startsWith("ok")) Color(0xFF00FF88) else IsyaError,
+                    fontSize = 11.sp)
+            }
+            IsyaButton(
+                text = "Reload Config File",
+                onClick = {
+                    scope.launch {
+                        feedback = runCatching { container.extendedApi.reloadConfig() }
+                            .fold(
+                                onSuccess = { "ok — config re-read from disk" },
+                                onFailure = { "fail: ${it.message ?: "unknown"}" }
+                            )
+                        // refresh display
+                        runCatching { container.extendedApi.getServerSettings() }
+                            .onSuccess { settings = it }
+                    }
+                },
+                variant = IsyaButtonVariant.PRIMARY_GOLD,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }

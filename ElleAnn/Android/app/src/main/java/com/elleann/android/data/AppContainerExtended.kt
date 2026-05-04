@@ -73,21 +73,19 @@ class AppContainerExtended(
     /**
      * Get API instance.
      *
-     *  Resolution rule (Feb-2026):
-     *    1. Persisted host:port from TokenStore (set via PairScreen)
-     *    2. Else 10.0.2.2:8000 — emulator-only convenience.  This NEVER
-     *       resolves on a real device, but throwing here would crash
-     *       the whole UI cold; we let OkHttp surface the connect failure
-     *       so the screens can show "Pair Elle's host first".
+     *  Resolution rule (Feb-2026 personal-AI build):
+     *    1. Persisted host:port from TokenStore (if ever set via Settings)
+     *    2. Else operator's home server: 158.62.137.73:8000
      *
-     *  The server's `no_auth=1` mode means we never need to attach a
-     *  bearer token here — auth is intentionally off.  See
-     *  `/app/memory/test_credentials.md`.
+     *  This is a personal AI with auth intentionally OFF (`no_auth=1` on
+     *  the server). External security happens out-of-band (firewall,
+     *  WireGuard, Cloudflare Tunnel, etc).  The app NEVER attaches a
+     *  Bearer header — `AuthInterceptorExtended` is a passthrough.
      */
     fun getApi(): ElleApiExtended {
         val stored = tokenStore.load()
-        val host = stored?.host?.takeIf { it.isNotBlank() } ?: "10.0.2.2"
-        val port = stored?.port?.takeIf { it > 0 } ?: 8000
+        val host = stored?.host?.takeIf { it.isNotBlank() } ?: DEFAULT_HOST
+        val port = stored?.port?.takeIf { it > 0 } ?: DEFAULT_PORT
 
         return Retrofit.Builder()
             .baseUrl("http://$host:$port/")
@@ -107,31 +105,27 @@ class AppContainerExtended(
 
     fun pairedExtendedApi(): ElleApiExtended? = getApi()
 
-    /** True iff the operator has paired a host (PairScreen). UI uses this
-     *  to gate connect attempts and show a "pair first" banner.          */
-    val isPaired: Boolean
-        get() {
-            val stored = tokenStore.load() ?: return false
-            return stored.host.isNotBlank() && stored.port > 0
-        }
+    /** Always paired — this is a personal AI; no pair-flow gate. */
+    val isPaired: Boolean get() = true
 
     val restBaseUrl: String?
         get() {
-            val stored = tokenStore.load() ?: return null
-            if (stored.host.isBlank() || stored.port <= 0) return null
-            return "http://${stored.host}:${stored.port}"
+            val stored = tokenStore.load()
+            val host = stored?.host?.takeIf { it.isNotBlank() } ?: DEFAULT_HOST
+            val port = stored?.port?.takeIf { it > 0 } ?: DEFAULT_PORT
+            return "http://$host:$port"
         }
 
     fun initWebSocket() {
         val stored = tokenStore.load()
-        val host = stored?.host?.takeIf { it.isNotBlank() } ?: return
-        val port = stored?.port?.takeIf { it > 0 } ?: return
+        val host = stored?.host?.takeIf { it.isNotBlank() } ?: DEFAULT_HOST
+        val port = stored?.port?.takeIf { it > 0 } ?: DEFAULT_PORT
 
         _webSocket?.disconnect()
         _webSocket = ElleWebSocket(
             host   = host,
             port   = port,
-            jwt    = stored.jwt,
+            jwt    = stored?.jwt ?: "",
             client = okHttpClient,
         )
         _webSocket?.connect()
@@ -166,6 +160,11 @@ class AppContainerExtended(
 
     companion object {
         private const val KEY_DEV_PIN_HASH = "elle_dev_pin_hash"
+        /** Operator's home server — used as the fallback host:port when
+         *  nothing has been persisted via Settings yet.  This is a
+         *  personal AI; "from anywhere" public reach is the design. */
+        const val DEFAULT_HOST = "158.62.137.73"
+        const val DEFAULT_PORT = 8000
     }
 
     fun setDevPin(pin: String) =

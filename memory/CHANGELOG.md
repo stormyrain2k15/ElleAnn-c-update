@@ -745,3 +745,80 @@ behavior beyond fixes; nothing in the working stack regressed.
 ### Re-enabling auth after testing
 Single config flip — see "Re-enabling production security" earlier
 in this CHANGELOG.
+
+---
+
+## Session Feb-2026 (continued) — Personal-AI hardening + button audit
+
+### Operator directives
+- **No login screen — period.** Auth stays disabled; external security
+  is operator-managed (firewall/tunnel/WireGuard).
+- **No pair-screen gate.** Cold start always lands on the main Elle
+  scaffold. Pair flow only reachable via Settings (kept for fallback).
+- **Default IP is the operator's home server**: `158.62.137.73:8000`.
+- **Every button must do something.** Audited.
+
+### Implementation
+- `AppContainerExtended`:
+    - new constants `DEFAULT_HOST = "158.62.137.73"`, `DEFAULT_PORT = 8000`
+    - `getApi() / restBaseUrl / initWebSocket` now fall back to defaults
+      when nothing is persisted (no more silent 10.0.2.2 emulator-only
+      fallback that broke real-device builds)
+    - `isPaired` always returns `true` (personal AI; pair flow is not a
+      gate — the cold-start UX never asks the operator to do setup)
+- `ElleNavHost`: removed PairScreen as the cold-start route. Always
+  starts at `ElleRoutes.ELLE`.
+- `MainActivity`: `isPaired = true` hardcode restored — we don't gate
+  the UI behind any sign-in or pair flow.
+
+### Button audit — every TODO wired
+Found 4 dead onClick handlers in `ui/dev/DevScreens.kt`. All four had
+backing API endpoints; wired them up with feedback banners:
+
+| Button | Now calls | Endpoint |
+|--------|-----------|----------|
+| Trigger Full Re-Index | `commitMemory()` | `POST /api/server/commit-memory` |
+| Trigger Instant Backup | `createBackup()` + refresh list | `POST /api/server/backup` |
+| Reload Config File | `reloadConfig()` + refresh display | `POST /api/admin/reload` |
+| Delete paired device | `revokeDevice(id)` + remove from list | `DELETE /api/auth/devices/{id}` |
+
+Each shows a one-line status pill (green for ok / red for fail) under
+the button so the operator gets immediate feedback.
+
+Other "TODO" text in the codebase: documentation comments only — no
+remaining `onClick = { /* TODO */ }` patterns.
+
+### SHN encoding-corruption guard
+Operator's "1 wrong key breaks every shn it opens" warning was about
+silent re-encoding. Canonical SHN Editor has the same trap with no UI.
+Fix: **explicit confirmation dialog** before any save-to-server action,
+showing:
+  - active encoding (e.g. "Windows-1252 (Western)")
+  - target (server folder + filename)
+  - explicit warning that wrong encoding permanently corrupts the file
+
+If column[0] (typically a numeric ID) looks like garbage when viewing,
+operator switches encoding via the top-bar dropdown BEFORE saving.
+The confirm dialog forces an "are you sure" tap so saving on the wrong
+encoding can't happen as a fat-finger anymore.
+
+### Per-service .json question
+Operator asked: "so each service has to have a json?" — **NO.**
+Only `elle_master_config.json` is JSON; it lives once at the install
+root. Each of the 21 services has a tiny `_<svc>serverinfo.txt`
+(Fiesta-grammar, ~10 lines) under `9Data\ServerInfo\` declaring its
+identity (`MY_SERVER` line) and `#include`-ing the shared
+`_ServerInfo.txt`. The runtime `LayerJsonOver()` call merges the master
+JSON on top of the per-service identity at start, so every service
+reads its own identity AND the same global behavioral keys (LLM
+provider, no_auth flag, http_server.bind_address, etc.) — no .json
+duplication, no stale-config drift between services.
+
+### Files touched
+- `Android/MainActivity.kt`
+- `Android/data/AppContainerExtended.kt`
+- `Android/navigation/ElleNavHost.kt`
+- `Android/ui/dev/DevScreens.kt`
+- `Android/ui/shneditor/SHNScreen.kt`
+
+5/5 balance-clean (canary).
