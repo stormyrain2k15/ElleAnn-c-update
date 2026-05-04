@@ -9,6 +9,12 @@
 #include <algorithm>
 #include <cctype>
 #include <iostream>
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
 
 
 /* Lua config loading is implemented in LuaHost (Lua project).
@@ -55,15 +61,30 @@ bool ElleConfig::LoadFromServerInfo(const std::string& serverInfoPath) {
         m_service.sql_connection_string = itCore->second.dsn;
     }
 
-    /* Lua extras live under 9Data/Hero/LuaScript/ElleLua/ (one folder deeper).
-     * Derive from the ServerInfo folder so installs remain portable. */
+    /* Lua scripts live alongside Fiesta's own LuaScript/ directory —
+     * NOT under a sub-folder. Operator's verified layout (Feb 2026):
+     *      <exe>\9Data\Hero\LuaScript\elle_*.lua
+     * Each Elle file is `elle_`-prefixed so the names never collide
+     * with whatever the existing Fiesta deploy ships.
+     *
+     * Derived from the EXE directory via GetModuleFileNameA so the
+     * resolution is independent of where the operator placed
+     * _ServerInfo.txt — previously this was derived from the
+     * ServerInfo path which produced doubled-up `9Data\ServerInfo\
+     * 9Data\Hero\LuaScript\` paths when ServerInfo was loaded from
+     * its canonical sub-folder.                                       */
     {
-        auto slash = serverInfoPath.find_last_of("\\/");
-        std::string baseDir = (slash == std::string::npos) ? "" : serverInfoPath.substr(0, slash + 1);
-        std::string luaDir = baseDir + "9Data\\Hero\\LuaScript\\ElleLua";
+        char modPath[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, modPath, MAX_PATH);
+        std::string exeDir(modPath);
+        size_t s = exeDir.find_last_of("\\/");
+        if (s != std::string::npos) exeDir.resize(s + 1);
+        std::string luaDir = exeDir + "9Data\\Hero\\LuaScript";
         m_root.obj_val["lua"].type = JsonType::Object;
         m_root.obj_val["lua"].obj_val["scripts_directory"].type = JsonType::String;
         m_root.obj_val["lua"].obj_val["scripts_directory"].str_val = luaDir;
+        m_root.obj_val["lua"].obj_val["file_prefix"].type = JsonType::String;
+        m_root.obj_val["lua"].obj_val["file_prefix"].str_val = "elle_";
     }
 
     m_configPath = serverInfoPath;
@@ -398,6 +419,103 @@ bool ElleConfig::Reload() {
 
 void ElleConfig::RegisterReloadCallback(std::function<void()> cb) {
     m_reloadCallbacks.push_back(std::move(cb));
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * EMERGENCY DEFAULTS
+ *
+ *   Used when no config file is reachable at service start. Installs a
+ *   minimum-viable tree so the service can come up to expose /api/diag/*
+ *   and the operator can repair the config out-of-band.
+ *
+ *   Defaults match the Feb-2026 testing-mode contract:
+ *     - http_server bound to 0.0.0.0:8000+offset
+ *     - auth disabled (no_auth=1, auth_enabled=false)
+ *     - cors open
+ *     - no rate limit
+ *────────────────────────────────────────────────────────────────────────────*/
+void ElleConfig::LoadDefaults() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    static const char* kDefaultsJson = R"DEFAULTS({
+        "llm": { "mode": "hybrid", "primary_provider": "groq",
+                 "fallback_provider": "local_llama", "providers": {} },
+        "emotions": { "decay_rate": 0.05, "tick_interval_ms": 1000 },
+        "memory":   { "short_term_capacity": 256, "consolidation_interval_ms": 60000 },
+        "http_server": {
+            "bind_address": "0.0.0.0",
+            "port": 8000,
+            "websocket_path": "/command",
+            "max_connections": 256,
+            "cors_enabled": true,
+            "cors_origins": ["*"],
+            "no_auth": 1,
+            "auth_enabled": false,
+            "admin_auth_id_threshold": 9,
+            "rate_limit_rpm": 0,
+            "max_upload_bytes": 10485760
+        },
+        "services": {
+            "named_pipes": { "prefix": "\\\\.\\pipe\\elle_" },
+            "sql_connection_string": "",
+            "sql_pool_size": 4
+        },
+        "logging": { "level": "info" }
+    })DEFAULTS";
+    JsonValue root;
+    if (!ParseJSON(kDefaultsJson, root)) {
+        ELLE_ERROR("LoadDefaults: built-in defaults JSON failed to parse");
+        return;
+    }
+    m_root = std::move(root);
+    PopulateLLMConfig();
+    PopulateEmotionConfig();
+    PopulateMemoryConfig();
+    PopulateHTTPConfig();
+    PopulateServiceConfig();
+    for (auto& cb : m_reloadCallbacks) cb();
+}
+
+/*──────────────────────────────────────────────────────────────────────────────
+ * MASTER-LAYER MERGE
+ *
+ *   Merge keys from `jsonPath` on top of the currently-loaded tree.
+ *   Used so a service can carry its identity from `_<svc>serverinfo.txt`
+ *   AND its behavioral keys from `elle_master_config.json` simultaneously.
+ *   Existing keys are overwritten; keys absent from the layer file are
+ *   preserved.
+ *────────────────────────────────────────────────────────────────────────────*/
+bool ElleConfig::LayerJsonOver(const std::string& jsonPath) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::ifstream f(jsonPath);
+    if (!f.is_open()) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string json = ss.str();
+    f.close();
+
+    JsonValue layer;
+    if (!ParseJSON(json, layer)) {
+        ELLE_WARN("LayerJsonOver: parse failed for %s", jsonPath.c_str());
+        return false;
+    }
+    if (layer.type != JsonType::Object) return false;
+
+    /* Shallow merge — top-level keys replace existing ones. Nested
+     * objects are taken whole. This matches the user's "master config
+     * is authoritative for behavioral keys" expectation: if you change
+     * the LLM section in elle_master_config.json, you don't want a
+     * stale ServerInfo fragment shadowing it. */
+    for (auto& kv : layer.obj_val) {
+        m_root.obj_val[kv.first] = kv.second;
+    }
+    /* Re-populate typed structs so consumers see the merged values. */
+    PopulateLLMConfig();
+    PopulateEmotionConfig();
+    PopulateMemoryConfig();
+    PopulateHTTPConfig();
+    PopulateServiceConfig();
+    for (auto& cb : m_reloadCallbacks) cb();
+    return true;
 }
 
 bool ElleConfig::ParseJSON(const std::string& json, JsonValue& root) {

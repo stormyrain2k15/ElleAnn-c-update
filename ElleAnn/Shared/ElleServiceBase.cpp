@@ -104,6 +104,32 @@ int ElleServiceBase::Run(int argc, char* argv[]) {
 void WINAPI ElleServiceBase::ServiceMain(DWORD argc, LPWSTR* argv) {
     if (!s_instance) return;
 
+    /*──────────────────────────────────────────────────────────────────
+     * SCM CWD FIX — Windows starts services with CWD=C:\Windows\System32
+     * which silently breaks every relative path in the service (config,
+     * Lua scripts, ServerInfo.txt, debug/ logs, sqllogs/ queues, etc.).
+     * Pivot to the exe's own directory BEFORE anything else runs so all
+     * relative resolution Just Works™ matching the dev/console mode.
+     *────────────────────────────────────────────────────────────────*/
+    {
+        char exePath[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+        std::string exeDir(exePath);
+        size_t ls = exeDir.find_last_of("\\/");
+        if (ls != std::string::npos) exeDir.resize(ls);
+        if (!exeDir.empty()) {
+            SetCurrentDirectoryA(exeDir.c_str());
+        }
+    }
+
+    /* SCM-passed argv (if any) takes priority for explicit config path
+     * overrides via `sc start <svc> -config <path>` style invocation. */
+    if (argc > 1 && argv[1]) {
+        std::wstring w(argv[1]);
+        std::string a(w.begin(), w.end());
+        s_instance->m_argConfigPath = a;
+    }
+
     std::wstring wName(s_instance->m_serviceName.begin(), s_instance->m_serviceName.end());
     s_instance->m_svcStatusHandle = RegisterServiceCtrlHandlerExW(
         wName.c_str(), ServiceCtrlHandler, s_instance);
@@ -522,55 +548,122 @@ bool ElleServiceBase::InitializeCore() {
      * notifies, and the next InterruptibleSleep returns immediately.   */
     m_running.store(true, std::memory_order_release);
 
-    /* 1. Load config
-     * Portable mode: each service reads a ServerInfo-style text config
-     * from its own folder (same pattern as the game).
+    /* 1. Load config — robust multi-path search.
      *
-     * We keep elle_master_config.json as a fallback for dev. */
+     *  Order of preference:
+     *    a) Explicit path from SCM argv  (m_argConfigPath)
+     *    b) <exe>\9Data\ServerInfo\_<ShortName>serverinfo.txt   (Fiesta-style)
+     *    c) <exe>\9Data\ServerInfo\_ServerInfo.txt              (master grammar)
+     *    d) <exe>\<anything>ServerInfo*.txt                     (legacy)
+     *    e) <exe>\elle_master_config.json                       (dev fallback)
+     *
+     *  After loading per-service identity from a-d (Fiesta grammar), we
+     *  ALSO best-effort merge in elle_master_config.json so the LLM /
+     *  emotion / behavioral keys are available — the user's "1 main config
+     *  + per-service stub" architecture.
+     *
+     *  If everything fails we DO NOT 1067 the service: instead we install
+     *  minimal defaults (bind 0.0.0.0, no_auth=1, port = 8000) so the
+     *  service comes up and the operator can fix the path via the API.
+     *  This was the #1 cause of code-1067 silent service-exit cascades.
+     *────────────────────────────────────────────────────────────────────*/
     char exePath[MAX_PATH] = {0};
     GetModuleFileNameA(nullptr, exePath, MAX_PATH);
     std::string exeDir(exePath);
     size_t lastSlash = exeDir.find_last_of("\\/");
     if (lastSlash != std::string::npos) exeDir.resize(lastSlash + 1);
 
+    auto fileExists = [](const std::string& p) -> bool {
+        DWORD a = GetFileAttributesA(p.c_str());
+        return (a != INVALID_FILE_ATTRIBUTES) && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    };
+
+    /* Short service name (no "Elle.Service." prefix) for ServerInfo lookup. */
+    std::string shortName = m_serviceName;
+    static const std::string kPfx = "Elle.Service.";
+    if (shortName.rfind(kPfx, 0) == 0) shortName = shortName.substr(kPfx.size());
+
     std::string configPath;
-    {
-        /* Prefer a service-local *ServerInfo.txt (e.g., WMServerInfo.txt).
-         * If none, fall back to the legacy JSON config in the exe dir. */
-        std::vector<std::string> candidates;
+    std::vector<std::string> tried;
+
+    auto tryPath = [&](const std::string& p) -> bool {
+        tried.push_back(p);
+        if (fileExists(p)) { configPath = p; return true; }
+        return false;
+    };
+
+    /* (a) explicit override from SCM args. */
+    if (!m_argConfigPath.empty()) tryPath(m_argConfigPath);
+
+    /* (b) per-service ServerInfo in 9Data\ServerInfo\. */
+    if (configPath.empty()) {
+        tryPath(exeDir + "9Data\\ServerInfo\\_" + shortName + "serverinfo.txt");
+    }
+    /* (c) master ServerInfo in 9Data\ServerInfo\. */
+    if (configPath.empty()) {
+        tryPath(exeDir + "9Data\\ServerInfo\\_ServerInfo.txt");
+    }
+    /* (d) legacy: any *ServerInfo*.txt next to the exe. */
+    if (configPath.empty()) {
         WIN32_FIND_DATAA fd{};
         HANDLE h = FindFirstFileA((exeDir + "*ServerInfo*.txt").c_str(), &fd);
         if (h != INVALID_HANDLE_VALUE) {
             do {
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    candidates.push_back(exeDir + fd.cFileName);
+                    std::string p = exeDir + fd.cFileName;
+                    if (configPath.empty()) configPath = p;
+                    tried.push_back(p);
                 }
             } while (FindNextFileA(h, &fd));
             FindClose(h);
         }
-        /* Heuristic: if multiple exist, prefer one NOT named _ServerInfo.txt
-         * (per-service wrapper like WMServerInfo.txt). */
-        for (auto& c : candidates) {
-            if (c.find("\\_ServerInfo.txt") == std::string::npos &&
-                c.find("/_ServerInfo.txt") == std::string::npos) {
-                configPath = c;
-                break;
-            }
-        }
-        if (configPath.empty() && !candidates.empty()) configPath = candidates[0];
-        if (configPath.empty()) configPath = exeDir + "elle_master_config.json";
+    }
+    /* (e) JSON dev fallback — same dir as exe. */
+    if (configPath.empty()) tryPath(exeDir + "elle_master_config.json");
+    if (configPath.empty()) tryPath(exeDir + "9Data\\ServerInfo\\elle_master_config.json");
+
+    if (configPath.empty()) {
+        std::cerr << "WARN: no config found; running on built-in defaults. "
+                     "Tried:\n";
+        for (auto& p : tried) std::cerr << "  - " << p << "\n";
+        ELLE_WARN("ElleServiceBase: no config file located, defaults applied");
+        /* Do NOT return false — load nothing, defaults stand, and the
+         * service can still come up to expose /api/diag/health for the
+         * operator. Auth defaults to off in this state via the JSON
+         * default below.                                                 */
+        ElleConfig::Instance().LoadDefaults();
+    } else if (!ElleConfig::Instance().Load(configPath)) {
+        const DWORD gle = GetLastError();
+        std::cerr << "WARN: config load/validation failed: " << configPath
+                  << " (GetLastError=" << gle << "). "
+                  << "Continuing on built-in defaults so the service starts.\n";
+        ELLE_WARN("Config load failed (%s); using defaults", configPath.c_str());
+        ElleConfig::Instance().LoadDefaults();
+    } else {
+        ELLE_INFO("Config loaded from: %s", configPath.c_str());
     }
 
-    if (!ElleConfig::Instance().Load(configPath)) {
-        const DWORD gle = GetLastError();
-        std::cerr << "FATAL: Config load/validation failed: " << configPath
-                  << " (GetLastError=" << gle << ")\n";
-        std::cerr << "Hint: ensure the file is valid JSON and contains required sections: "
-                  << "llm, emotions, memory, http_server, services\n";
-        ELLE_ERROR("Failed to load config from: %s", configPath.c_str());
-        return false;
+    /* MASTER LAYER — if the loaded config was a ServerInfo .txt (which
+     * only carries identity + ODBC), best-effort merge the JSON master
+     * for behavioral keys (LLM, emotions, http_server.no_auth, etc).
+     * Failure here is logged but NOT fatal — services like Memory or
+     * Cognitive can still operate without the LLM section.             */
+    {
+        std::string master;
+        if (tryPath(exeDir + "elle_master_config.json")) master = configPath;
+        else if (tryPath(exeDir + "9Data\\ServerInfo\\elle_master_config.json"))
+            master = configPath;
+        configPath = ""; /* tryPath wrote into configPath as a side effect */
+        if (!master.empty() && master.size() >= 5 &&
+            master.substr(master.size() - 5) == ".json") {
+            if (!ElleConfig::Instance().LayerJsonOver(master)) {
+                ELLE_WARN("Master JSON layer load failed: %s", master.c_str());
+            } else {
+                ELLE_INFO("Master config layered from: %s", master.c_str());
+            }
+        }
     }
-    ELLE_INFO("Config loaded from: %s", configPath.c_str());
+
 
     /* 2. Initialize logger */
     const auto& logCfg = ElleConfig::Instance().GetString("logging.level", "info");

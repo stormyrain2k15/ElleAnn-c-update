@@ -165,11 +165,28 @@ class ElleWebSocket(
 
     private fun openConnection(attempt: Int = 0) {
         isConnecting = true
+        /* Guard against ws://: + bad host — would crash the OkHttp client.
+         * If the operator hasn't paired yet, bail without throwing.      */
+        if (host.isBlank() || port <= 0) {
+            isConnecting = false
+            shouldReconnect = false
+            scope.launch {
+                _events.emit(WsEvent.Error(
+                    "WebSocket not opened: no host paired yet. " +
+                    "Visit Pair screen first."))
+            }
+            return
+        }
         val url = "ws://$host:$port$WS_PATH"
-        val request = Request.Builder()
-            .url(url)
-            .addHeader("Authorization", "Bearer $jwt")
-            .build()
+        val builder = Request.Builder().url(url)
+        /* Only attach Authorization when a non-empty token is configured.
+         * In no_auth=1 testing mode the server accepts everything; sending
+         * `Bearer ` with a blank value tripped some proxies into a 401
+         * before the WS upgrade reached our handler.                      */
+        if (jwt.isNotBlank()) {
+            builder.addHeader("Authorization", "Bearer $jwt")
+        }
+        val request = builder.build()
 
         webSocket = wsClient.newWebSocket(request, object : WebSocketListener() {
 

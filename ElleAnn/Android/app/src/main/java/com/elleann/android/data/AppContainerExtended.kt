@@ -70,15 +70,25 @@ class AppContainerExtended(
 
     // ── REST API ─────────────────────────────────────────────────────────────
     
-    /** 
-     * Get API instance. In no-auth mode, we use the host from TokenStore 
-     * or fallback to 10.0.2.2 (emulator host) if nothing is configured.
+    /**
+     * Get API instance.
+     *
+     *  Resolution rule (Feb-2026):
+     *    1. Persisted host:port from TokenStore (set via PairScreen)
+     *    2. Else 10.0.2.2:8000 — emulator-only convenience.  This NEVER
+     *       resolves on a real device, but throwing here would crash
+     *       the whole UI cold; we let OkHttp surface the connect failure
+     *       so the screens can show "Pair Elle's host first".
+     *
+     *  The server's `no_auth=1` mode means we never need to attach a
+     *  bearer token here — auth is intentionally off.  See
+     *  `/app/memory/test_credentials.md`.
      */
     fun getApi(): ElleApiExtended {
         val stored = tokenStore.load()
-        val host = stored?.host ?: "10.0.2.2"
-        val port = stored?.port ?: 8000
-        
+        val host = stored?.host?.takeIf { it.isNotBlank() } ?: "10.0.2.2"
+        val port = stored?.port?.takeIf { it > 0 } ?: 8000
+
         return Retrofit.Builder()
             .baseUrl("http://$host:$port/")
             .client(okHttpClient)
@@ -94,27 +104,34 @@ class AppContainerExtended(
      * Admin-keyed API. In no-auth mode, this just returns extendedApi.
      */
     val adminApi: ElleApiExtended? get() = extendedApi
-    
+
     fun pairedExtendedApi(): ElleApiExtended? = getApi()
+
+    /** True iff the operator has paired a host (PairScreen). UI uses this
+     *  to gate connect attempts and show a "pair first" banner.          */
+    val isPaired: Boolean
+        get() {
+            val stored = tokenStore.load() ?: return false
+            return stored.host.isNotBlank() && stored.port > 0
+        }
 
     val restBaseUrl: String?
         get() {
-            val stored = tokenStore.load()
-            val host = stored?.host ?: "10.0.2.2"
-            val port = stored?.port ?: 8000
-            return "http://$host:$port"
+            val stored = tokenStore.load() ?: return null
+            if (stored.host.isBlank() || stored.port <= 0) return null
+            return "http://${stored.host}:${stored.port}"
         }
 
     fun initWebSocket() {
         val stored = tokenStore.load()
-        val host = stored?.host ?: "10.0.2.2"
-        val port = stored?.port ?: 8000
-        
+        val host = stored?.host?.takeIf { it.isNotBlank() } ?: return
+        val port = stored?.port?.takeIf { it > 0 } ?: return
+
         _webSocket?.disconnect()
         _webSocket = ElleWebSocket(
             host   = host,
             port   = port,
-            jwt    = stored?.jwt ?: "",
+            jwt    = stored.jwt,
             client = okHttpClient,
         )
         _webSocket?.connect()

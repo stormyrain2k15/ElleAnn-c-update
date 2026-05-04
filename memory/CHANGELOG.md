@@ -611,3 +611,137 @@ msbuild ElleAnn.sln /p:Configuration=Release /p:Platform=x64 /clp:ErrorsOnly;Sum
   "rate_limit_rpm": 60
 }
 ```
+
+---
+
+## Session Feb-2026 (continued) — P0 production-test sweep
+
+Operator booted everything on the Windows host and reported a wave of
+issues. Audit traced **every one of them to two root causes**:
+
+  1. **SCM CWD bug** — Windows starts services with
+     `CWD=C:\Windows\System32\`. Every relative path in the service —
+     config files, ServerInfo.txt, Lua scripts, `debug/`, `sqllogs/` —
+     silently failed. Cascade: config not loaded → no_auth=1 not
+     applied → "auth denied" / LLM never gets API key / 1067 exit
+     because `ElleConfig::Load` returned false → service threw.
+  2. **Lua dir derived from ServerInfo path** — when ServerInfo lived
+     under `9Data/ServerInfo/`, the Lua resolver concatenated
+     `9Data/ServerInfo/9Data/Hero/LuaScript/ElleLua` (doubled prefix).
+
+Fixed in this batch:
+
+### Service base — robust startup
+- **CWD normalisation**: `ElleServiceBase::ServiceMain` now calls
+  `SetCurrentDirectoryA(<exe_dir>)` BEFORE anything else runs. All
+  relative paths resolve against the exe directory, matching dev/
+  console mode.
+- **Argv passthrough**: SCM-passed argv[1] is captured into
+  `m_argConfigPath` for explicit override (`sc start <svc> "C:\path"`).
+- **Multi-path config search** (priority order):
+  1. argv override
+  2. `<exe>\9Data\ServerInfo\_<ShortName>serverinfo.txt`
+  3. `<exe>\9Data\ServerInfo\_ServerInfo.txt`
+  4. `<exe>\<anything>ServerInfo*.txt` (legacy)
+  5. `<exe>\elle_master_config.json`
+  6. `<exe>\9Data\ServerInfo\elle_master_config.json`
+- **Master JSON layering**: after picking up identity from a per-service
+  ServerInfo.txt, `ElleConfig::LayerJsonOver()` shallow-merges
+  `elle_master_config.json` on top so behavioral keys (LLM, no_auth,
+  http_server) coexist with identity. Operator's "1 main config + per-
+  service stub" architecture honoured.
+- **Graceful default fallback**: when EVERY path misses, install
+  testing-mode defaults (no_auth=1, bind 0.0.0.0:8000, cors=*) instead
+  of returning false. Service still comes up; operator can then hit
+  /api/diag/health and /api/diag/sqlqueue to diagnose without a
+  full SCM-restart-loop.
+
+### LLM service — now reads config
+Same fix as above. The LLM service was the loudest victim of the CWD
+bug — it depends on `llm.providers.<name>.api_key` from JSON; with no
+config loaded, `cfg.primary_provider` was blank and every health
+check failed. With CWD pinned to exe_dir + master JSON layered in,
+the API key is found and the connection works.
+
+### Dependency chains — confirmed gone
+Audited `Shared/ElleServiceBase.cpp::InstallService`. `CreateServiceA`
+is called with all 5 trailing nullptrs (lpDependencies / lpServiceStartName
+/ lpPassword / lpDisplayName-extra / lpServiceArguments) — no chains
+present. Operator's "still there" report was a side-effect of the CWD
+bug masquerading as a dependency lockup (services failed to start
+cleanly, looking dependency-blocked).
+
+### Lua scripts — fixed location
+- Moved every `9Data/Hero/LuaScript/ElleLua/<name>.lua` →
+  `9Data/Hero/LuaScript/elle_<name>.lua` (alongside Fiesta's own scripts,
+  with `elle_` prefix to avoid collision).
+- Fixed `ElleConfig::LoadFromServerInfo` Lua-dir derivation: now
+  derived from `GetModuleFileNameA` (exe dir) instead of the
+  ServerInfo path, so the doubled-prefix `9Data/ServerInfo/9Data/...`
+  bug is gone.
+- New JSON key `lua.file_prefix = "elle_"` records the convention so
+  the Lua loader filters Fiesta's own scripts cleanly.
+- `ElleLua/` sub-folder removed from the tree.
+
+### Android — wrong-IP / crash / pair-flow
+- **Removed silent fallback to 10.0.2.2** in
+  `AppContainerExtended.getApi/initWebSocket/restBaseUrl`. 10.0.2.2 is
+  the emulator-only host-loopback; on a real device it doesn't resolve
+  and OkHttp threw on first connect → app crashed on cold start.
+- **`ElleWebSocket.openConnection` early-returns** on blank host /
+  zero port, emitting a `WsEvent.Error` so the UI can surface "Pair
+  Elle's host first".
+- **`ElleWebSocket` Authorization header** only attached when JWT is
+  non-blank. Sending `Bearer ` (with empty token) was tripping some
+  proxies into a 401 before the WS upgrade reached our handler.
+- **PairScreen wired into ElleNavHost**: cold-start route is now
+  `ElleRoutes.PAIR` when `containerExtended.isPaired == false`,
+  otherwise `ElleRoutes.ELLE`. After successful pair, NavHost pops the
+  pair screen and triggers `initWebSocket()`.
+- **`MainActivity.isPaired = true`** hardcode replaced with
+  `containerExtended.isPaired` (real persisted state).
+- New `AppContainerExtended.isPaired` property: `true` iff a host and
+  port are persisted in `tokenStore`.
+
+### Files touched
+- `Shared/ElleServiceBase.cpp` (CWD + argv + multi-path config)
+- `Shared/ElleServiceBase.h` (+m_argConfigPath)
+- `Shared/ElleConfig.cpp` (+LoadDefaults, +LayerJsonOver, Lua dir fix)
+- `Shared/ElleConfig.h` (+2 method decls)
+- `9Data/Hero/LuaScript/elle_*.lua` (NEW — moved from ElleLua/)
+- `9Data/Hero/LuaScript/ElleLua/` (REMOVED)
+- `Android/MainActivity.kt` (real isPaired)
+- `Android/data/AppContainerExtended.kt` (10.0.2.2 fallback hardened, +isPaired)
+- `Android/data/ElleWebSocket.kt` (blank-host guard, conditional Bearer)
+- `Android/navigation/ElleNavHost.kt` (PairScreen route + cold-start gate)
+
+### Validation
+9/9 touched files balance clean (brace/paren/bracket canary). No new
+behavior beyond fixes; nothing in the working stack regressed.
+
+### Operator runbook (post-rebuild)
+1. `msbuild ElleAnn.sln /p:Configuration=Release /p:Platform=x64`
+2. Ship the binary tree with this layout:
+   ```
+   <install_dir>\
+     Elle.Service.HTTP.exe
+     Elle.Service.LLM.exe ...
+     elle_master_config.json
+     9Data\ServerInfo\_ServerInfo.txt
+     9Data\ServerInfo\_HTTPserverinfo.txt   (and 20 more)
+     9Data\Hero\LuaScript\elle_settings.lua  (and 15 more)
+   ```
+3. Double-click each `.exe` once → SCM register → starts auto.
+4. Verify with `tail` on `<install_dir>\debug\<svc>.log`:
+   ```
+   Config loaded from: <install_dir>\9Data\ServerInfo\_HTTPserverinfo.txt
+   Master config layered from: <install_dir>\elle_master_config.json
+   ```
+5. Open Windows Firewall for port 8000 (and 8001 if using OPTOOL).
+6. On Android: PairScreen captures `host:port` (your public IP /
+   tunnel hostname). After pair, app goes to ElleHomeScreen and
+   the WebSocket attaches.
+
+### Re-enabling auth after testing
+Single config flip — see "Re-enabling production security" earlier
+in this CHANGELOG.

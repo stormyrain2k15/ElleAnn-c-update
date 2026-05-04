@@ -109,6 +109,7 @@ private:
     ELLE_SERVICE_ID m_serviceId;
     std::string     m_serviceName;
     std::string     m_displayName;
+    std::string     m_argConfigPath;   // populated by ServiceMain from SCM argv
     std::string     m_description;
     std::atomic<bool> m_running{false};
     uint32_t        m_tickIntervalMs = 100;

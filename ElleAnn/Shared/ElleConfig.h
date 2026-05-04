@@ -184,6 +184,19 @@ public:
 
     bool Load(const std::string& configPath);
     bool LoadFromServerInfo(const std::string& serverInfoPath);
+
+    /** Install minimal in-memory defaults so a service can start even
+     *  when no config file is reachable. Used by ElleServiceBase as the
+     *  graceful-fallback path; matches no_auth=1 / bind=0.0.0.0 testing
+     *  defaults so the operator can hit /api/diag/health and recover.  */
+    void LoadDefaults();
+
+    /** Best-effort layer of additional JSON keys on top of the current
+     *  in-memory config tree. Used to combine a per-service ServerInfo
+     *  identity load with the master `elle_master_config.json` runtime
+     *  keys. Missing or malformed source files are no-ops (returns false
+     *  but does not clobber the existing tree).                         */
+    bool LayerJsonOver(const std::string& jsonPath);
     bool Reload();
     
     void RegisterReloadCallback(std::function<void()> cb);

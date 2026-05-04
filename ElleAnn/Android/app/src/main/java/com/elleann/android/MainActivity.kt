@@ -32,7 +32,8 @@ class MainActivity : ComponentActivity() {
             },
         )
 
-        // Always init WebSocket on start. It will use the configured host or default.
+        // Always init WebSocket on start. Bails gracefully (no throw)
+        // if no host has been paired yet — see ElleWebSocket.openConnection.
         containerExtended.initWebSocket()
 
         setContent {
@@ -40,7 +41,9 @@ class MainActivity : ComponentActivity() {
                 ElleNavHost(
                     container         = app.container,
                     containerExtended = containerExtended,
-                    isPaired          = true, // Always considered "in"
+                    /* Real pair-state: routes the user to PairScreen on
+                     * cold start when no host is configured.            */
+                    isPaired          = containerExtended.isPaired,
                     onPaired          = { },
                     onUnpair          = { },
                 )

@@ -47,10 +47,40 @@ fun ElleNavHost(
 ) {
     val navController = rememberNavController()
 
+    /* Cold-start gate: if the operator hasn't pointed the app at a host
+     * yet, route to the pair screen first.  This was the cause of the
+     * Feb-2026 "app crashes when opening" report — `MainActivity`
+     * unconditionally hit `initWebSocket()` against a default 10.0.2.2
+     * host that doesn't resolve on a real device.  The WebSocket layer
+     * now no-ops on a blank host (`ElleWebSocket.openConnection`), and
+     * the pair screen is the formal recovery surface.                  */
+    val startDest = if (containerExtended.isPaired)
+        ElleRoutes.ELLE else ElleRoutes.PAIR
+
     NavHost(
         navController    = navController,
-        startDestination = ElleRoutes.ELLE,
+        startDestination = startDest,
     ) {
+        // ── Pair / setup ──────────────────────────────────────────────────────
+        composable(ElleRoutes.PAIR) {
+            com.elleann.android.PairScreen(
+                container = container,
+                prefill   = prefill,
+                onPaired  = {
+                    onPaired()
+                    /* Route the user into Elle proper after pairing —
+                     * popUpTo so the back button doesn't return them to
+                     * the pair screen.                                  */
+                    navController.navigate(ElleRoutes.ELLE) {
+                        popUpTo(ElleRoutes.PAIR) { inclusive = true }
+                    }
+                    /* Spin up the WebSocket now that we have a real
+                     * host.  No-op if the operator left the WS disabled
+                     * — initWebSocket() bails on blank host already.   */
+                    containerExtended.initWebSocket()
+                },
+            )
+        }
         // ── Main scaffold with bottom nav ─────────────────────────────────────
         composable(ElleRoutes.ELLE) {
             MainScaffold(
