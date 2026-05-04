@@ -2933,6 +2933,74 @@ private:
             return HTTPResponse::OK(j);
         }, AUTH_ADMIN);
 
+        /* ============== /api/diag/fiesta — Fiesta connection state ===============
+         * Reads the snapshot file the Fiesta service drops every 5s
+         * at <exe>/diag/fiesta_state.json.  Cross-process via
+         * shared filesystem rather than IPC RPC — same pattern as
+         * shn_history and sqllogs.                                       */
+        m_router.Register("GET", "/api/diag/fiesta", [](const HTTPRequest&) {
+            char buf[MAX_PATH] = {0};
+            GetModuleFileNameA(nullptr, buf, MAX_PATH);
+            std::filesystem::path snap =
+                std::filesystem::path(buf).parent_path() /
+                "diag" / "fiesta_state.json";
+            std::error_code ec;
+            if (!std::filesystem::exists(snap, ec)) {
+                return HTTPResponse::OK({
+                    {"available", false},
+                    {"reason",
+                       "fiesta service has not written a snapshot yet "
+                       "(file missing): " + snap.string()}
+                });
+            }
+            std::ifstream f(snap, std::ios::binary);
+            if (!f.is_open()) {
+                return HTTPResponse::Err(500,
+                    "cannot open " + snap.string());
+            }
+            std::string body((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+            try {
+                json j = json::parse(body);
+                /* Tag staleness so the operator knows when the writer
+                 * has gone quiet (Fiesta service stopped or crashed). */
+                uint64_t now = (uint64_t)std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                        std::chrono::system_clock::now()
+                            .time_since_epoch()).count();
+                uint64_t updated = j.value("updated_ms", (uint64_t)0);
+                j["age_ms"]   = (updated && now >= updated) ? (now - updated) : 0;
+                j["stale"]    = (updated == 0) ||
+                                ((now - updated) > 30000);  /* 30s */
+                j["available"] = true;
+                return HTTPResponse::OK(j);
+            } catch (const std::exception& e) {
+                return HTTPResponse::Err(500,
+                    std::string("snapshot parse failed: ") + e.what());
+            }
+        }, AUTH_ADMIN);
+
+        /* ============== /api/diag/effective-config — merged config view =========
+         * Returns the in-memory ElleConfig tree with API keys redacted.
+         * Lets the operator confirm what each service actually loaded
+         * after the master-JSON layering, without log-diving.  Auth is
+         * AUTH_ADMIN — secrets are still partially exposed (known keys
+         * by name) and we want this endpoint behind the dev gate even
+         * when no_auth=1 is on.                                          */
+        m_router.Register("GET", "/api/diag/effective-config", [](const HTTPRequest&) {
+            auto raw = ElleConfig::Instance().DumpJsonRedacted();
+            json j;
+            try { j = json::parse(raw); }
+            catch (const std::exception& e) {
+                return HTTPResponse::Err(500,
+                    std::string("config dump parse failed: ") + e.what());
+            }
+            return HTTPResponse::OK({
+                {"loaded", true},
+                {"config", j}
+            });
+        }, AUTH_ADMIN);
+
          * Returns every registered route with its HTTP method and auth
          * level. Exists so the auditor can verify that a route they
          * expect to be AUTH_ADMIN actually IS AUTH_ADMIN, instead of

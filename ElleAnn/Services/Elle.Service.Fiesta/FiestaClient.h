@@ -125,6 +125,36 @@ public:
         return m_conn.GetCipher().Kind();
     }
 
+    /** Diagnostic snapshot for /api/diag/fiesta — fields are read-only,
+     *  cheap to obtain (atomic loads + a Cipher copy that's a couple of
+     *  POD members), and safe to call from any thread.                */
+    struct DiagSnapshot {
+        bool       connected;
+        std::string cipher_kind;
+        uint16_t   last_seed;
+        uint64_t   pkt_in;
+        uint64_t   pkt_out;
+        uint64_t   bytes_in;
+        uint64_t   bytes_out;
+        std::string login_host;
+        uint16_t   login_port;
+    };
+    DiagSnapshot GetDiagSnapshot() const {
+        std::lock_guard<std::mutex> lk(m_mx);
+        DiagSnapshot s;
+        s.connected   = m_conn.IsConnected();
+        s.cipher_kind = (m_conn.GetCipher().Kind() == CipherKind::XOR499)
+                            ? "xor499" : "lcg";
+        s.last_seed   = m_conn.GetCipher().LastSeed();
+        s.pkt_in      = m_conn.PacketsIn();
+        s.pkt_out     = m_conn.PacketsOut();
+        s.bytes_in    = m_conn.BytesIn();
+        s.bytes_out   = m_conn.BytesOut();
+        s.login_host  = "";   /* set by FiestaService externally */
+        s.login_port  = 0;
+        return s;
+    }
+
     /* Override the WILLLOGIN_REQ.spawnapps fingerprint string.
      * CN2012 accepts an empty string for headless clients. */
     void SetSpawnApps(const std::string& s) {

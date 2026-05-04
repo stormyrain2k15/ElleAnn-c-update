@@ -87,8 +87,13 @@ public:
         m_state_out = (uint32_t)seed;
         m_pos_in    = (int16_t)(seed % 499);
         m_pos_out   = (int16_t)(seed % 499);
+        m_lastSeed  = seed;
         m_enabled   = true;
     }
+
+    /** Last seed value handed to Reset() — surfaced on /api/diag/fiesta
+     *  so the operator can spot mismatched seeds without log diving. */
+    uint16_t LastSeed() const { return m_lastSeed; }
 
     /** Disable cipher (used during the very first frame on a fresh
      *  socket, before SEED_ACK arrives).                              */
@@ -154,6 +159,7 @@ private:
     uint32_t m_state_out = 0;
     int16_t  m_pos_in    = 0;       /* XOR499 inbound table position  */
     int16_t  m_pos_out   = 0;       /* XOR499 outbound table position */
+    uint16_t m_lastSeed  = 0;
     bool     m_enabled   = false;
     CipherKind m_kind    = CipherKind::LCG;
 

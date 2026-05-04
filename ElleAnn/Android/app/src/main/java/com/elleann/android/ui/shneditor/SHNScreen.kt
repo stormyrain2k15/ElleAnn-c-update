@@ -366,11 +366,15 @@ class SHNViewModel : ViewModel() {
             }.onSuccess { file ->
                 _editRows.clear(); file.rows.forEach { _editRows.add(it.toMutableList()) }
                 _editColumns.clear(); _editColumns.addAll(file.columns)
+                val mismatch = detectEncodingMismatch(file)
                 _state.update { it.copy(
                     loading = false, file = file, fileName = name,
                     dirtyRows = emptySet(), error = null,
-                    statusBanner = "loaded ${file.rows.size} records · ${file.columns.size} columns",
-                    statusIsOk = true
+                    statusBanner = if (mismatch != null)
+                        "encoding mismatch suspected: $mismatch — switch encoding before editing"
+                    else
+                        "loaded ${file.rows.size} records · ${file.columns.size} columns",
+                    statusIsOk = (mismatch == null)
                 )}
             }.onFailure { e ->
                 _state.update { it.copy(loading = false, error = e.message ?: "parse error") }
@@ -387,16 +391,56 @@ class SHNViewModel : ViewModel() {
             }.onSuccess { file ->
                 _editRows.clear(); file.rows.forEach { _editRows.add(it.toMutableList()) }
                 _editColumns.clear(); _editColumns.addAll(file.columns)
+
+                /* Auto-detect mismatched encoding — if the first
+                 * string-typed column's first row decodes mostly to
+                 * non-printable bytes, the active encoding is wrong.
+                 * Surface a clear banner so the operator switches
+                 * BEFORE editing & saving (silent re-encode would
+                 * otherwise corrupt the file).                          */
+                val mismatch = detectEncodingMismatch(file)
                 _state.update { it.copy(
                     loading = false, file = file, fileName = name,
                     dirtyRows = emptySet(), error = null,
-                    statusBanner = "loaded from server: ${file.rows.size} records",
-                    statusIsOk = true
+                    statusBanner = if (mismatch != null)
+                        "encoding mismatch suspected: $mismatch — try a different charset before editing"
+                    else
+                        "loaded from server: ${file.rows.size} records",
+                    statusIsOk = (mismatch == null)
                 )}
             }.onFailure { e ->
                 _state.update { it.copy(loading = false, error = e.message ?: "parse error") }
             }
         }
+    }
+
+    /* Heuristic: scan the first 8 rows' first string-typed column. If
+     * >40% of decoded chars are non-printable / replacement (U+FFFD),
+     * the active encoding is almost certainly wrong.  Returns null when
+     * no string column exists or sample looks fine.                    */
+    private fun detectEncodingMismatch(file: SHNFile): String? {
+        val strColIdx = file.columns.indexOfFirst {
+            it.type.toInt() in listOf(9, 0x18, 0x1a)
+        }
+        if (strColIdx < 0) return null
+        val sample = file.rows.take(8).mapNotNull {
+            (it.getOrNull(strColIdx) as? String)?.takeIf(String::isNotBlank)
+        }
+        if (sample.isEmpty()) return null
+        var bad = 0
+        var total = 0
+        for (s in sample) {
+            for (c in s) {
+                total++
+                if (c == '\uFFFD' ||
+                    (c.code < 0x20 && c != '\t' && c != '\n' && c != '\r')) bad++
+            }
+        }
+        if (total == 0) return null
+        val ratio = bad.toDouble() / total
+        return if (ratio > 0.40)
+            "${(ratio * 100).toInt()}% non-printable chars in '${file.columns[strColIdx].name}'"
+        else null
     }
 
     fun setEncoding(e: SHNEncoding) = _state.update { it.copy(encoding = e) }

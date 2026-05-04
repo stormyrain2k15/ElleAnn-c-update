@@ -128,11 +128,21 @@ public:
             p   += n;
             rem -= (size_t)n;
         }
+        m_pktOut.fetch_add(1,            std::memory_order_relaxed);
+        m_bytesOut.fetch_add(wire.size(), std::memory_order_relaxed);
         return true;
     }
 
     Cipher& MutableCipher() { return m_cipher; }
     const Cipher& GetCipher() const { return m_cipher; }
+
+    /* Lifetime counters — surfaced on /api/diag/fiesta so the operator
+     * can see at a glance whether traffic is flowing.  Atomic so the
+     * REST handler can read without blocking the recv loop. */
+    uint64_t PacketsIn()  const { return m_pktIn.load(std::memory_order_relaxed); }
+    uint64_t PacketsOut() const { return m_pktOut.load(std::memory_order_relaxed); }
+    uint64_t BytesIn()    const { return m_bytesIn.load(std::memory_order_relaxed); }
+    uint64_t BytesOut()   const { return m_bytesOut.load(std::memory_order_relaxed); }
 
     void SetOnPacket(PacketCallback cb)         { m_onPacket = std::move(cb); }
     void SetOnDisconnect(DisconnectCallback cb) { m_onDisconnect = std::move(cb); }
@@ -185,6 +195,10 @@ private:
 
                 if (m_onPacket) m_onPacket(pkt);
 
+                m_pktIn.fetch_add(1,    std::memory_order_relaxed);
+                m_bytesIn.fetch_add(bodyLen + headerLen,
+                                    std::memory_order_relaxed);
+
                 buf.erase(buf.begin(), buf.begin() + headerLen + bodyLen);
             }
         }
@@ -192,6 +206,10 @@ private:
 
     SOCKET                  m_sock = INVALID_SOCKET;
     std::atomic<bool>       m_running{false};
+    std::atomic<uint64_t>   m_pktIn{0};
+    std::atomic<uint64_t>   m_pktOut{0};
+    std::atomic<uint64_t>   m_bytesIn{0};
+    std::atomic<uint64_t>   m_bytesOut{0};
     std::thread             m_recvThread;
     std::mutex              m_sendMx;
     Cipher                  m_cipher;

@@ -141,10 +141,12 @@ protected:
 
             if (region == "china" || region == "cn" || region == "cn2012") {
                 m_client.SetCipherKind(Fiesta::CipherKind::LCG);
+                m_lastRegion = "china";
                 ELLE_INFO("Fiesta cipher: LCG (CN2012) — region=%s",
                           region.c_str());
             } else {
                 m_client.SetCipherKind(Fiesta::CipherKind::XOR499);
+                m_lastRegion = (region == "usa" || region.empty()) ? "usa" : region;
                 ELLE_INFO("Fiesta cipher: XOR499 (DragonFiesta) — region=%s",
                           region.c_str());
             }
@@ -205,6 +207,12 @@ protected:
     }
 
     void OnTick() override {
+        /* Persist a diag snapshot to <exe>/fiesta_state.json every ~5s.
+         * Read by HTTP service on GET /api/diag/fiesta — sidesteps
+         * cross-service IPC entirely (file-based, atomic-rename write).
+         * Lazy: only writes when state actually changes OR every 5s. */
+        WriteDiagSnapshotIfDue();
+
         /* Reconnect watchdog. Only auto-reconnect when:
          *   1. fiesta.auto_login is true, AND
          *   2. we have host + username, AND
@@ -411,6 +419,61 @@ private:
         return s;
     }
 
+    /*──────────────────────────────────────────────────────────────────
+     * Diag snapshot writer — drops a JSON file the HTTP service serves
+     * via GET /api/diag/fiesta.  Cheap (atomic rename, only writes on
+     * state-change OR every 5 seconds, never blocks OnTick).
+     *────────────────────────────────────────────────────────────────*/
+    void WriteDiagSnapshotIfDue() {
+        const uint64_t now = ELLE_MS_NOW();
+        auto snap = m_client.GetDiagSnapshot();
+
+        const bool dirty =
+            (snap.connected   != m_lastDiagSnap.connected) ||
+            (snap.cipher_kind != m_lastDiagSnap.cipher_kind) ||
+            (snap.last_seed   != m_lastDiagSnap.last_seed);
+        if (!dirty && now < m_lastDiagWriteMs + 5000) return;
+
+        snap.login_host = m_loginHost;
+        snap.login_port = m_loginPort;
+        m_lastDiagSnap   = snap;
+        m_lastDiagWriteMs = now;
+
+        char exePath[MAX_PATH] = {0};
+        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+        std::string exeDir(exePath);
+        size_t s = exeDir.find_last_of("\\/");
+        if (s != std::string::npos) exeDir.resize(s + 1);
+        std::string targetDir = exeDir + "diag\\";
+        CreateDirectoryA(targetDir.c_str(), nullptr);
+        std::string dst = targetDir + "fiesta_state.json";
+        std::string tmp = dst + ".tmp";
+
+        std::ostringstream js;
+        js << "{\n"
+           << "  \"connected\":   "  << (snap.connected ? "true" : "false") << ",\n"
+           << "  \"cipher_kind\": \""<< snap.cipher_kind          << "\",\n"
+           << "  \"last_seed\":   "  << snap.last_seed            << ",\n"
+           << "  \"pkt_in\":      "  << snap.pkt_in               << ",\n"
+           << "  \"pkt_out\":     "  << snap.pkt_out              << ",\n"
+           << "  \"bytes_in\":    "  << snap.bytes_in             << ",\n"
+           << "  \"bytes_out\":   "  << snap.bytes_out            << ",\n"
+           << "  \"login_host\":  \""<< snap.login_host           << "\",\n"
+           << "  \"login_port\":  "  << snap.login_port           << ",\n"
+           << "  \"updated_ms\":  "  << now                       << ",\n"
+           << "  \"region\":      \""<< m_lastRegion              << "\",\n"
+           << "  \"user_no\":     "  << m_nUserNo                 << "\n"
+           << "}\n";
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) return;
+        f << js.str();
+        f.close();
+
+        /* Atomic-ish: MoveFileEx with REPLACE_EXISTING so concurrent
+         * readers never see a torn file.                              */
+        MoveFileExA(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+
     Fiesta::Client m_client;
 
     std::string m_loginHost;
@@ -428,6 +491,11 @@ private:
     /* Reconnect backoff state — driven entirely from OnTick. */
     uint64_t m_backoffMs     = 0;
     uint64_t m_nextAttemptMs = 0;
+
+    /* Diag snapshot writer state. */
+    Fiesta::Client::DiagSnapshot m_lastDiagSnap{};
+    uint64_t                     m_lastDiagWriteMs = 0;
+    std::string                  m_lastRegion = "usa";
 };
 
 ELLE_SERVICE_MAIN(ElleFiestaService)

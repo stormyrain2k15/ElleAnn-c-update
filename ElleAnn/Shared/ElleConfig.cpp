@@ -518,6 +518,112 @@ bool ElleConfig::LayerJsonOver(const std::string& jsonPath) {
     return true;
 }
 
+/*──────────────────────────────────────────────────────────────────────────────
+ * DUMP (REDACTED) — for /api/diag/effective-config
+ *
+ *   Walks the in-memory JsonValue tree, serialising each node.  Any
+ *   string-valued leaf whose key matches a sensitive name list (api_key,
+ *   password, jwt_secret, admin_key, etc.) is replaced with `"***"`.
+ *   The redaction is structural (key-name driven), so adding a new
+ *   secret field in elle_master_config.json automatically gets covered
+ *   as long as the operator names it conventionally.
+ *────────────────────────────────────────────────────────────────────────────*/
+namespace {
+
+bool IsSensitiveKey(const std::string& key) {
+    static const std::vector<std::string> kPatterns = {
+        "password", "passwd", "secret", "api_key", "apikey",
+        "admin_key", "jwt", "token", "private_key", "auth_key",
+        "pwd",
+    };
+    std::string k = key;
+    for (auto& c : k) c = (char)std::tolower((unsigned char)c);
+    for (auto& pat : kPatterns) {
+        if (k.find(pat) != std::string::npos) return true;
+    }
+    return false;
+}
+
+void EscapeJsonString(std::ostringstream& out, const std::string& in) {
+    out.put('"');
+    for (unsigned char c : in) {
+        switch (c) {
+            case '"':  out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\n': out << "\\n";  break;
+            case '\r': out << "\\r";  break;
+            case '\t': out << "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    char b[8];
+                    std::snprintf(b, sizeof(b), "\\u%04x", (unsigned)c);
+                    out << b;
+                } else {
+                    out.put((char)c);
+                }
+        }
+    }
+    out.put('"');
+}
+
+void DumpNode(std::ostringstream& out, const JsonValue& v,
+              const std::string& parentKey, int indent) {
+    auto pad = [&](int n) { for (int i = 0; i < n; ++i) out.put(' '); };
+    switch (v.type) {
+        case JsonType::Null:    out << "null"; return;
+        case JsonType::Bool:    out << (v.bool_val ? "true" : "false"); return;
+        case JsonType::Number:
+            /* Print integers without trailing .0 when whole. */
+            if (v.num_val == (double)(long long)v.num_val) {
+                out << (long long)v.num_val;
+            } else {
+                out << v.num_val;
+            }
+            return;
+        case JsonType::String: {
+            const std::string& s = IsSensitiveKey(parentKey)
+                ? std::string("***") : v.str_val;
+            EscapeJsonString(out, s);
+            return;
+        }
+        case JsonType::Array: {
+            out << "[";
+            for (size_t i = 0; i < v.arr_val.size(); ++i) {
+                if (i) out << ",";
+                out << "\n"; pad(indent + 2);
+                DumpNode(out, v.arr_val[i], parentKey, indent + 2);
+            }
+            if (!v.arr_val.empty()) { out << "\n"; pad(indent); }
+            out << "]";
+            return;
+        }
+        case JsonType::Object: {
+            out << "{";
+            bool first = true;
+            for (auto& kv : v.obj_val) {
+                if (!first) out << ",";
+                first = false;
+                out << "\n"; pad(indent + 2);
+                EscapeJsonString(out, kv.first);
+                out << ": ";
+                DumpNode(out, kv.second, kv.first, indent + 2);
+            }
+            if (!v.obj_val.empty()) { out << "\n"; pad(indent); }
+            out << "}";
+            return;
+        }
+    }
+}
+
+} // namespace
+
+std::string ElleConfig::DumpJsonRedacted() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::ostringstream out;
+    DumpNode(out, m_root, "", 0);
+    return out.str();
+}
+
 bool ElleConfig::ParseJSON(const std::string& json, JsonValue& root) {
     JsonParser parser(json);
     root = parser.ParseValue();

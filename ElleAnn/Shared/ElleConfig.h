@@ -197,6 +197,12 @@ public:
      *  keys. Missing or malformed source files are no-ops (returns false
      *  but does not clobber the existing tree).                         */
     bool LayerJsonOver(const std::string& jsonPath);
+
+    /** Serialise the in-memory config tree to JSON, with sensitive
+     *  fields (api_key, password, jwt_secret, admin_key, sql passwords)
+     *  redacted.  Used by /api/diag/effective-config so the operator
+     *  can confirm what was actually loaded without secret exposure.   */
+    std::string DumpJsonRedacted() const;
     bool Reload();
     
     void RegisterReloadCallback(std::function<void()> cb);
