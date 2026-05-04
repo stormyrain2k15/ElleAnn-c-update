@@ -139,6 +139,25 @@ int main() {
         "<TargetExt>.lib</TargetExt>",
         "ElleCore.Shared must pin TargetExt to avoid VS2026 Insiders import-order race");
 
+    /* Bug 9 — Per-project <PlatformToolset>v145</PlatformToolset>
+     *         overrides locked the build to VS 2026 only. CI runners
+     *         (VS 2022 Enterprise) only have v143, fail with MSB8020.
+     *         All overrides stripped; everyone inherits v143 from
+     *         Directory.Build.props (works on VS 2022 + VS 2026).   */
+    {
+        const char* projects[] = {
+            "/app/ElleAnn/Shared/ElleCore.Shared.vcxproj",
+            "/app/ElleAnn/Services/Elle.Service.HTTP/Elle.Service.HTTP.vcxproj",
+            "/app/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj",
+            "/app/ElleAnn/ASM/Elle.ASM.Hardware/Elle.ASM.Hardware.vcxproj",
+            "/app/ElleAnn/Lua/Elle.Lua.Behavioral/Elle.Lua.Behavioral.vcxproj",
+        };
+        for (const char* p : projects) {
+            RequireNotContains(p, "<PlatformToolset>v145</PlatformToolset>",
+                "v145 toolset override must NOT pin to VS 2026 only — CI uses v143");
+        }
+    }
+
     if (g_failures) {
         std::fprintf(stderr, "\nFAIL — %d audit pin(s) regressed.\n", g_failures);
         return 1;

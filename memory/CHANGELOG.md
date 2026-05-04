@@ -8,6 +8,25 @@ what landed and when. Newest entries on top.)
 User confirmed: "the code needs a thorough review …". Defensive cleanup
 before the next native MSBuild on Windows.
 
+### CI unblock — VS 2022 vs VS 2026 toolset (this fork's 3rd pass)
+
+User pushed to GitHub, CI runner (VS 2022 Enterprise) failed with
+MSB8020: "build tools for v145 cannot be found." All 27 .vcxproj
+files had `<PlatformToolset>v145</PlatformToolset>` per-project
+overrides — only VS 2026 has v145.
+
+**Fix applied**:
+- Stripped `<PlatformToolset>v145</PlatformToolset>` from all 27
+  `.vcxproj` files (services, shared, ASM, Lua).
+- Cleaned up the empty `<PropertyGroup Label="Configuration"
+  Condition="...">` blocks the strip left behind.
+- All projects now inherit `v143` from `Directory.Build.props`
+  (single source of truth). v143 builds on both VS 2022 (CI runner)
+  and VS 2026 (user's local Insiders) — Microsoft maintains v143
+  backward-compat support across all current VS releases.
+- Audit-pin test extended with 5 new assertions (1 per major project
+  category) so a future agent doesn't silently pin to v145 again.
+
 ### MSBuild unblock — VS 2026 Insiders + v145 (this fork's 2nd pass)
 
 User pulled, ran Rebuild All, hit `5 succeeded, 22 failed`. Every
