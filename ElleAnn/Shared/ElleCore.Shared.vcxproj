@@ -47,6 +47,15 @@
     <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- Pin the lib's name + extension so $(OutputFile) below is identical
+       to the path consumers in Services/ link against. VS 2026 Insiders
+       has been observed to leave $(TargetExt) empty for StaticLibrary
+       projects when Microsoft.Cpp.props imports race the Configuration
+       evaluation; setting them explicitly removes that race entirely. -->
+  <PropertyGroup>
+    <TargetName>ElleCore.Shared</TargetName>
+    <TargetExt>.lib</TargetExt>
+  </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

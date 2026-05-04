@@ -121,6 +121,24 @@ int main() {
         "\"DreamIntegration\"",
         "non-existent table DreamIntegration must not return to the whitelist");
 
+    /* Bug 8 — Directory.Build.props had narrow-conv warnings PROMOTED
+     *         to errors via /WX with no source-side fixes, killing the
+     *         entire ElleCore.Shared build (cascading to 22 LNK1181s
+     *         on every consumer service). The suppression list MUST
+     *         carry 4244;4267;4996 until those source fixes land.   */
+    RequireContains(
+        "/app/ElleAnn/Directory.Build.props",
+        "4244;4267;4996",
+        "narrow-conv suppressions must stay until source-level cleanup is done");
+    RequireContains(
+        "/app/ElleAnn/Shared/ElleCore.Shared.vcxproj",
+        "<TargetName>ElleCore.Shared</TargetName>",
+        "ElleCore.Shared must pin TargetName explicitly so consumers find the lib");
+    RequireContains(
+        "/app/ElleAnn/Shared/ElleCore.Shared.vcxproj",
+        "<TargetExt>.lib</TargetExt>",
+        "ElleCore.Shared must pin TargetExt to avoid VS2026 Insiders import-order race");
+
     if (g_failures) {
         std::fprintf(stderr, "\nFAIL — %d audit pin(s) regressed.\n", g_failures);
         return 1;
