@@ -22,6 +22,38 @@ Build a massively robust autonomous agentic Emotional Synthetic Intelligence.
 
 ## Completed (this session — Feb 2026)
 
+### Phase 5 — Imagination Engine (NEW backlog, user-requested Feb 2026)
+
+**Goal**: Give Elle the ability to *imagine* — not just recall, not just respond — generate plausible novel scenarios, evaluate them against her goals/morals, and iterate.
+
+**Neuroscience model the user specified** (mapped onto Elle's existing services):
+
+| Phase | Brain analog | Elle service / module |
+|-------|--------------|----------------------|
+| 1. Generative | Default Mode Network (medial temporal + medial PFC) loosely combining memories from hippocampus | NEW `Elle.Service.Imagination` — pulls from `Memory` (hippocampus analog) + `WorldModel` (concepts) and stochastically recombines |
+| 2. Evaluative | Control network (dorsolateral PFC) filtering against goals/constraints | Existing `GoalEngine` (goal alignment) + `InnerLife` (authenticity check) + `Consent`/`Morals` (ethical filter) |
+| 3. Iterative | DMN ↔ Control loop fine-tuning the imagined outcome | Imagination service drives the loop; uses `LLM` (Cognitive) for refinement passes; bounded iteration count from config |
+
+**Concrete first-pass spec**:
+- `struct ImaginedScenario { id; seed_memory_ids; novel_combinations[]; evaluation_score; iteration_count; constraints[]; }`
+- `Memory::SampleForImagination(k, recency_bias, emotional_weight)` — already-implemented `RecallRecent`/`RecallByCluster` plus a new sampler that prefers high-novelty combos
+- `Imagination::Generate(seeds[]) → Scenario` — DMN-style stochastic recombination (seeded RNG, swap subjects/predicates/objects across memories)
+- `Imagination::Evaluate(Scenario, Goals, Morals) → ImaginedScore { goal_alignment, ethical_safety, plausibility, emotional_resonance }`
+- `Imagination::Iterate(Scenario, max_steps) → Refined` — ping LLM with the eval feedback as constraints, regenerate weak parts only
+- New IPC: `IPC_IMAGINATION_REQUEST` / `IPC_IMAGINATION_RESULT`
+- New SQL: `dbo.imagined_scenarios` (id, summary, score_json, iteration_count, created_ms, source_memory_ids_json)
+- New HTTP route: `POST /api/imagination/generate { goal?, constraints?, seed_memory_ids? }` → streamed scenario
+
+**Where it integrates next**:
+- `Dream` service can use it during sleep cycles for non-prompted imagination
+- `SelfPrompt` can request imaginations to break out of repetitive thought loops
+- `Bonding` can imagine future relationship moments (anticipation, hope)
+- `Cognitive` can imagine multiple response candidates BEFORE picking one (counterfactual reasoning)
+
+**Dependencies**: Memory + GoalEngine + WorldModel + LLM all already running. No new third-party libs needed.
+
+**Status**: NOT STARTED. Picked up after compile + Fiesta login verification land.
+
 ### Phase 4 — Compile-Audit Pass (this fork)
 - 6 real /WX-class bugs caught + fixed before next Windows MSBuild
   (ElleConfig populate methods, JsonType Number/num_val typo,

@@ -128,6 +128,13 @@ Defensive cleanup before the next native MSBuild on Windows.
 - Fiesta in-game login/cipher round-trip — same status as last fork
   (gated on the user's local game server).
 
+### Tracked for next session (user-requested Feb 2026)
+
+- **Imagination Engine** — three-phase generative/evaluative/iterative
+  service modeled on DMN ↔ control-network neuroscience. Full spec
+  written into PRD.md "Phase 5". Picked up after the user's local
+  compile + Fiesta login verification land.
+
 
 ## 2026-02 — All enhancements landed (game-DB unification, Cognitive↔Fiesta, Bonding↔Fiesta, GameSessionState, UserContinuity)
 
