@@ -499,6 +499,101 @@ class SHNViewModel : ViewModel() {
         )}
     }
 
+    /* Bulk column rename — cheap rename, no value change. Mirrors
+     * canonical `columnRename`.                                          */
+    fun renameColumn(idx: Int, newName: String) {
+        if (idx !in _editColumns.indices || newName.isBlank()) return
+        val old = _editColumns[idx]
+        _editColumns[idx] = old.copy(name = newName.trim())
+        _state.update { it.copy(
+            dirtyRows = _editRows.indices.toSet(),
+            statusBanner = "renamed '${old.name}' → '$newName'",
+            statusIsOk = true
+        )}
+    }
+
+    /* Bulk multiply/divide — applies a numeric operation to every row's
+     * cell in [colIdx]. Mirrors canonical `columnMultiply`/`columnDivide`.
+     * Skips string-typed columns. Multiply/divide-by-zero is rejected.   */
+    enum class BulkOp { Multiply, Divide, Add, Set }
+
+    fun bulkOpColumn(colIdx: Int, op: BulkOp, factorStr: String): String? {
+        if (colIdx !in _editColumns.indices) return "bad column"
+        val col = _editColumns[colIdx]
+        if (col.type.toInt() in listOf(9, 0x18, 0x1a))
+            return "string columns can't be ${op.name.lowercase()}-ed; use Set on a row instead"
+        val factor = factorStr.toDoubleOrNull() ?: return "factor must be a number"
+        if (op == BulkOp.Divide && factor == 0.0) return "cannot divide by zero"
+
+        val isFloat = col.type.toInt() == 5
+        for (i in _editRows.indices) {
+            val cur = _editRows[i].getOrNull(colIdx) ?: continue
+            val curD = (cur as? Long)?.toDouble() ?: (cur as? Double) ?: 0.0
+            val newD = when (op) {
+                BulkOp.Multiply -> curD * factor
+                BulkOp.Divide   -> curD / factor
+                BulkOp.Add      -> curD + factor
+                BulkOp.Set      -> factor
+            }
+            _editRows[i][colIdx] = if (isFloat) newD else newD.toLong()
+        }
+        _state.update { it.copy(
+            dirtyRows = _editRows.indices.toSet(),
+            statusBanner = "bulk ${op.name.lowercase()} on '${col.name}' by $factor",
+            statusIsOk = true
+        )}
+        return null
+    }
+
+    /* SQL export — generates a CREATE TABLE + INSERT script for the
+     * current file. Mirrors canonical `SHNFile.CreateSQL`. The table
+     * name defaults to the filename stem; types are mapped to SQL
+     * Server equivalents (Fiesta's deploy target).                     */
+    fun sqlExport(): String? {
+        val file = snapshotFile() ?: return null
+        val tableName = state.value.fileName.removeSuffix(".shn").ifBlank { "shn_table" }
+        val sb = StringBuilder()
+        sb.append("-- Generated from ").append(state.value.fileName)
+          .append(" (").append(file.rows.size).append(" rows)\n")
+        sb.append("DROP TABLE IF EXISTS [").append(tableName).append("];\n")
+        sb.append("CREATE TABLE [").append(tableName).append("] (\n")
+        file.columns.forEachIndexed { i, col ->
+            val sqlType = when (col.type.toInt()) {
+                1, 12, 0x10  -> "TINYINT"
+                2            -> "SMALLINT"   // unsigned 16
+                3, 11, 0x12, 0x1b -> "BIGINT"// unsigned 32 → BIGINT to keep range
+                5            -> "REAL"
+                13, 0x15     -> "SMALLINT"
+                0x16         -> "INT"
+                20           -> "TINYINT"
+                9, 0x18      -> "VARCHAR(${col.length})"
+                0x1a         -> "VARCHAR(MAX)"
+                else         -> "VARBINARY(${col.length})"
+            }
+            sb.append("  [").append(col.name).append("] ").append(sqlType)
+            if (i + 1 < file.columns.size) sb.append(',')
+            sb.append('\n')
+        }
+        sb.append(");\n\n")
+        for (row in file.rows) {
+            sb.append("INSERT INTO [").append(tableName).append("] VALUES (")
+            row.forEachIndexed { i, v ->
+                val col = file.columns[i]
+                val isStr = col.type.toInt() in listOf(9, 0x18, 0x1a)
+                if (isStr) {
+                    sb.append('\'')
+                      .append(v.toString().replace("'", "''"))
+                      .append('\'')
+                } else {
+                    sb.append(v.toString())
+                }
+                if (i + 1 < row.size) sb.append(", ")
+            }
+            sb.append(");\n")
+        }
+        return sb.toString()
+    }
+
     fun onSearch(q: String) = _state.update { it.copy(search = q) }
     fun onFilterCol(c: Int) = _state.update { it.copy(filterCol = c) }
 
@@ -594,7 +689,30 @@ fun SHNScreen(
         vm.setStatus("CSV exported (${csv.length} chars)", ok = true)
     }
 
+    val saveSqlToDevice = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/sql")
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val sql = vm.sqlExport() ?: run { vm.setStatus("no data to export"); return@rememberLauncherForActivityResult }
+        ctx.contentResolver.openOutputStream(uri)?.use {
+            it.write(sql.toByteArray(Charsets.UTF_8))
+        }
+        vm.setStatus("SQL exported (${sql.length} chars)", ok = true)
+    }
+
     var addColDialog  by remember { mutableStateOf(false) }
+    var bulkOpDialog  by remember { mutableStateOf<Int?>(null) }   // colIdx
+    var renameColDialog by remember { mutableStateOf<Int?>(null) } // colIdx
+
+    /* Refresh server history whenever the loaded filename changes — gives
+     * the operator the "last saved 2h ago by admin" line under the title. */
+    LaunchedEffect(state.fileName) {
+        if (api != null && state.fileName.isNotEmpty()) {
+            runCatching { api.historySHN(state.fileName, 5) }
+                .onSuccess { vm.setHistory(it.entries) }
+                .onFailure { vm.setHistory(emptyList()) }
+        }
+    }
 
     Scaffold(
         containerColor = IsyaNight,
@@ -652,6 +770,11 @@ fun SHNScreen(
                             saveCsvToDevice.launch(state.fileName.removeSuffix(".shn") + ".csv")
                         }) {
                             Icon(Icons.Rounded.Description, "Export CSV", tint = IsyaCream)
+                        }
+                        IconButton(onClick = {
+                            saveSqlToDevice.launch(state.fileName.removeSuffix(".shn") + ".sql")
+                        }) {
+                            Icon(Icons.Rounded.Storage, "Export SQL", tint = IsyaCream)
                         }
                         IconButton(onClick = { addColDialog = true }) {
                             Icon(Icons.Rounded.ViewColumn, "Add column", tint = IsyaSuccess)
@@ -742,6 +865,31 @@ fun SHNScreen(
                 }
             }
 
+            // History banner — last-N saves for the loaded file
+            if (state.history.isNotEmpty()) {
+                val last = state.history.first()
+                val ageMin = ((System.currentTimeMillis() - last.tsMs) / 60_000L).coerceAtLeast(0)
+                val ageStr = when {
+                    ageMin < 1     -> "just now"
+                    ageMin < 60    -> "${ageMin}m ago"
+                    ageMin < 1440  -> "${ageMin / 60}h ago"
+                    else           -> "${ageMin / 1440}d ago"
+                }
+                Box(
+                    Modifier.fillMaxWidth()
+                        .background(IsyaMagic.copy(alpha = 0.08f))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        "last saved $ageStr by ${last.user} · ${last.bytes}B " +
+                        "· ${state.history.size} recent edits",
+                        color    = IsyaMagic.copy(alpha = 0.85f),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+
             // Server file browser
             if (state.showBrowser && api != null) {
                 ServerBrowser(
@@ -804,7 +952,11 @@ fun SHNScreen(
                 }
 
                 state.file != null -> {
-                    SHNTableView(vm = vm, state = state, columns = vm.currentColumns())
+                    SHNTableView(
+                        vm = vm, state = state, columns = vm.currentColumns(),
+                        onBulkOp    = { idx -> bulkOpDialog = idx },
+                        onRenameCol = { idx -> renameColDialog = idx },
+                    )
                 }
             }
         }
@@ -828,6 +980,113 @@ fun SHNScreen(
             }
         )
     }
+
+    bulkOpDialog?.let { colIdx ->
+        BulkOpDialog(
+            colName   = vm.currentColumns().getOrNull(colIdx)?.name ?: "",
+            onDismiss = { bulkOpDialog = null },
+            onApply   = { op, factor ->
+                val err = vm.bulkOpColumn(colIdx, op, factor)
+                if (err != null) {
+                    Toast.makeText(ctx, err, Toast.LENGTH_LONG).show()
+                } else {
+                    bulkOpDialog = null
+                }
+            }
+        )
+    }
+
+    renameColDialog?.let { colIdx ->
+        val current = vm.currentColumns().getOrNull(colIdx)?.name ?: ""
+        RenameColumnDialog(
+            currentName = current,
+            onDismiss   = { renameColDialog = null },
+            onRename    = { newName ->
+                vm.renameColumn(colIdx, newName); renameColDialog = null
+            }
+        )
+    }
+}
+
+// ─── Bulk Op dialog ──────────────────────────────────────────────────────────
+
+@Composable
+private fun BulkOpDialog(
+    colName:   String,
+    onDismiss: () -> Unit,
+    onApply:   (SHNViewModel.BulkOp, String) -> Unit,
+) {
+    var op  by remember { mutableStateOf(SHNViewModel.BulkOp.Multiply) }
+    var fct by remember { mutableStateOf("1") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Bulk op · '$colName'", color = IsyaCream) },
+        text  = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Apply to every row's '$colName' cell:",
+                     color = IsyaMuted, fontSize = 11.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    SHNViewModel.BulkOp.values().forEach { o ->
+                        FilterChip(
+                            selected = op == o,
+                            onClick  = { op = o },
+                            label    = { Text(o.name, fontSize = 11.sp) },
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = fct, onValueChange = { fct = it },
+                    label = { Text(when (op) {
+                        SHNViewModel.BulkOp.Multiply -> "Factor (× this)"
+                        SHNViewModel.BulkOp.Divide   -> "Divisor (÷ this)"
+                        SHNViewModel.BulkOp.Add      -> "Delta (+ this)"
+                        SHNViewModel.BulkOp.Set      -> "Value (= this)"
+                    }) },
+                    singleLine = true,
+                )
+                Text("Skips string columns. Float columns keep precision; " +
+                     "integer columns are truncated.",
+                     color = IsyaMuted, fontSize = 10.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onApply(op, fct) }) { Text("Apply") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+// ─── Rename Column dialog ────────────────────────────────────────────────────
+
+@Composable
+private fun RenameColumnDialog(
+    currentName: String,
+    onDismiss:   () -> Unit,
+    onRename:    (String) -> Unit,
+) {
+    var name by remember(currentName) { mutableStateOf(currentName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename column", color = IsyaCream) },
+        text  = {
+            OutlinedTextField(
+                value = name, onValueChange = { name = it },
+                label = { Text("New name") }, singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (name.isNotBlank() && name != currentName) onRename(name.trim())
+                else onDismiss()
+            }) { Text("Rename") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 // ─── Server browser ──────────────────────────────────────────────────────────
@@ -926,6 +1185,8 @@ private fun SHNTableView(
     vm:      SHNViewModel,
     state:   SHNState,
     columns: List<SHNColumn>,
+    onBulkOp:    (Int) -> Unit = {},
+    onRenameCol: (Int) -> Unit = {},
 ) {
     val hScroll = rememberScrollState()
 
@@ -972,7 +1233,7 @@ private fun SHNTableView(
             }
         }
 
-        // Column headers with delete buttons
+        // Column headers with delete + rename + bulk ops
         Row(
             Modifier.fillMaxWidth().horizontalScroll(hScroll)
                 .background(IsyaNight).border(1.dp, IsyaMuted.copy(alpha = 0.2f)),
@@ -981,11 +1242,26 @@ private fun SHNTableView(
             columns.forEachIndexed { idx, col ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SHNHeaderCell("${col.name}·T${col.type.toInt()}·L${col.length}", colWidth(col))
+                    IconButton(onClick = { onRenameCol(idx) },
+                               modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Rounded.Edit, "Rename column",
+                             tint = IsyaCream.copy(alpha = 0.5f),
+                             modifier = Modifier.size(13.dp))
+                    }
+                    val isStr = col.type.toInt() in listOf(9, 0x18, 0x1a)
+                    if (!isStr) {
+                        IconButton(onClick = { onBulkOp(idx) },
+                                   modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Rounded.Calculate, "Bulk op",
+                                 tint = IsyaGold.copy(alpha = 0.5f),
+                                 modifier = Modifier.size(13.dp))
+                        }
+                    }
                     IconButton(onClick = { vm.deleteColumn(idx) },
                                modifier = Modifier.size(24.dp)) {
                         Icon(Icons.Rounded.RemoveCircleOutline, "Delete column",
                              tint = IsyaError.copy(alpha = 0.4f),
-                             modifier = Modifier.size(14.dp))
+                             modifier = Modifier.size(13.dp))
                     }
                 }
             }

@@ -2300,3 +2300,33 @@ User directive (with reference screenshots showing Fiesta Zone.exe
   dedicated dialogs for these. Can copy the per-column math loops.
 - Column reorder via `displayToReal` map.
 - SQL export (SHNFile.CreateSQL).
+
+---
+
+## Session Feb-2026 (continued) — Testing-mode lockdown
+
+(Full narrative: `/app/memory/CHANGELOG.md`.)
+
+### What flipped
+- Auth: **OFF** for testing (`no_auth=1`, `auth_enabled=false`).
+- Bind: **public** (`0.0.0.0`).
+- CORS: **open** (`*`).
+- Rate limit: **off** (`rate_limit_rpm=0`).
+- Login handler: short-circuits to synthetic dev token when no_auth.
+- Brute-force lockout: skipped (we never reach it).
+
+### What landed alongside
+- SHN history endpoint + Android banner ("last saved Xh ago by Y").
+- SHN bulk column ops (multiply/divide/add/set + rename).
+- SHN SQL export (canonical `CreateSQL` parity).
+- `/api/diag/sqlqueue` (offline SQL queue size).
+
+### Re-enabling production security (when testing wraps)
+See cheat-sheet at end of `CHANGELOG.md` "Re-enabling auth" section.
+
+### Backlog (deferred)
+- **P2 — Lua settings loader bridge**: vendoring Lua 5.4 into Shared
+  is architecturally invasive; should be its own focused session.
+- **P2 — Column reorder via `displayToReal`**: cosmetic only.
+- **P3 — IP allow-list / per-IP rate limit**: needed before re-public
+  exposure with auth on.

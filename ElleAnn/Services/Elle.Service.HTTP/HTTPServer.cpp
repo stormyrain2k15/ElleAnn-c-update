@@ -15,6 +15,7 @@
 #include "../../Shared/ElleLogger.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
+#include "../../Shared/ElleSQLFallback.h"
 #include "../../Shared/ElleLLM.h"
 #include "../../Shared/DictionaryLoader.h"
 #include "../../Shared/json.hpp"
@@ -2917,7 +2918,21 @@ private:
             return HTTPResponse::OK(j);
         }, AUTH_ADMIN);
 
-        /* ============== /api/diag/routes — authoritative route/auth map ==========
+        /* ============== /api/diag/sqlqueue — offline SQL fallback queue ===========
+         * Surfaces the disk-buffered SQL queue (`<exe>/sqllogs/`) so the
+         * operator can see at a glance whether the pool is currently
+         * absorbing a backlog. Useful during testing when SQL Server
+         * restarts or network blips would otherwise be invisible.       */
+        m_router.Register("GET", "/api/diag/sqlqueue", [](const HTTPRequest&) {
+            auto& fb = ElleSQLFallback::Instance();
+            json j = {
+                {"enabled",       fb.IsEnabled()},
+                {"file_count",    (uint64_t)fb.FileCount()},
+                {"pending_bytes", (uint64_t)fb.PendingBytes()}
+            };
+            return HTTPResponse::OK(j);
+        }, AUTH_ADMIN);
+
          * Returns every registered route with its HTTP method and auth
          * level. Exists so the auditor can verify that a route they
          * expect to be AUTH_ADMIN actually IS AUTH_ADMIN, instead of

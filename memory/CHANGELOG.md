@@ -498,3 +498,116 @@ which wouldn't match the actual client deploy. Fixed in
 - Brace/paren/bracket balance clean on all touched files.
 - No new backend routes needed — diff is an Android-side computation
   off the existing `GET /api/shn/get` response.
+
+---
+
+## Session Feb-2026 (continued) — Full lockdown release: testing-mode, history, bulk ops, SQL export, diag
+
+### Testing-mode bypass (all gates off — operator directive)
+`elle_master_config.json` flipped to public-test mode:
+- `bind_address = "0.0.0.0"`     (reachable from anywhere — "from Mars")
+- `cors_origins = ["*"]`
+- `no_auth = 1`                  (every protected route gets synthetic
+                                  nUserNo=1, nAuthID=9 dev token)
+- `auth_enabled = false`
+- `rate_limit_rpm = 0`           (no global throttling)
+
+`POST /api/auth/login` short-circuits when `no_auth=1`: returns a
+synthetic dev-tier token immediately, no DB lookup, no lockout check,
+no brute-force counter touch. The Android app's startup login flow
+keeps working without an SQL Server / Account row.
+
+A loud fingerprint (`mode: "no_auth_testing"`) is included in the login
+response so the operator can never miss that auth is currently off
+when reading logs.
+
+### SHN history endpoint + Android banner
+- `POST /api/shn/save` now appends a per-file history line to
+  `<exe>/shn_history/<stem>.log`:
+    `<iso>|<epoch_ms>|<user>|<bytes>|<root>`
+- New `GET /api/shn/history?name=<name>&limit=N` (default 20, max 500)
+  returns newest-first JSON.
+- Retrofit: `historySHN()` + `ShnHistoryResponse` / `ShnHistoryEntry`.
+- SHNScreen: `LaunchedEffect(state.fileName)` fetches latest 5 saves
+  on file open; renders a single-line banner under the status banner:
+  `last saved 2h ago by admin · 4321B · 5 recent edits`.
+
+### SHN bulk column ops (canonical parity)
+`SHNViewModel.BulkOp { Multiply, Divide, Add, Set }` + `bulkOpColumn()`:
+applies a numeric op to every row's cell in the selected column.
+Skips string columns; rejects divide-by-zero. Header now exposes a
+Calculate icon (numeric cols only) and an Edit icon (rename).
+
+Mirrors canonical SHNDecryptor `columnMultiply` / `columnDivide` /
+`columnRename` forms — covers the on-the-go workflow of "halve every
+mob's HP" / "rename column 'unknown1' to 'price'".
+
+### SQL export (canonical `SHNFile.CreateSQL`)
+`SHNViewModel.sqlExport()` produces a SQL Server-compatible script:
+```
+DROP TABLE IF EXISTS [<stem>];
+CREATE TABLE [<stem>] (
+  [col1] BIGINT,
+  ...
+);
+INSERT INTO [<stem>] VALUES (...);
+...
+```
+Type mapping follows Fiesta's deploy target (SQL Server). Reachable
+via the Storage icon → CreateDocument → `<stem>.sql` on device.
+
+### `/api/diag/sqlqueue`
+Surfaces the offline SQL fallback queue:
+```
+{ "enabled": true, "file_count": N, "pending_bytes": M }
+```
+Lets the operator confirm at a glance that nothing's buffered while
+testing — paired with the rest of the `/api/diag/*` family.
+
+### Files touched
+- `Services/Elle.Service.HTTP/HTTPServer.cpp`
+    - 1 #include (ElleSQLFallback.h)
+    - login no-auth bypass
+    - SHN history append on save
+    - GET /api/shn/history
+    - GET /api/diag/sqlqueue
+- `elle_master_config.json` (testing-mode flags)
+- `Android/.../data/ElleApiExtended.kt` (+historySHN)
+- `Android/.../data/models/AllModels.kt` (+ShnHistoryEntry, +ShnHistoryResponse)
+- `Android/.../ui/shneditor/SHNScreen.kt`
+    - history banner under status
+    - SQL export action
+    - bulk-op + rename column dialogs
+    - bulk-op + rename icons in column header
+    - `LaunchedEffect(state.fileName)` history fetch
+- (no changes to ElleNavHost; existing wiring still correct)
+
+### Validation
+All 7 touched files balance clean (brace/paren/bracket canary, including
+the JSON file). `elle_master_config.json` parses with python json.
+
+### Windows compile cheat-sheet
+```cmd
+cd C:\ElleAnn
+msbuild ElleAnn.sln /p:Configuration=Release /p:Platform=x64 /clp:ErrorsOnly;Summary
+```
+- `Shared\ElleSQLFallback.cpp` is wired in `ElleCore.Shared.vcxproj`
+  already; no project-level edit needed.
+- `Services\Elle.Service.HTTP\HTTPServer.cpp` picked up:
+  `<filesystem>`, `<ctime>`, `ElleSQLFallback.h`. All three are also
+  shipped already from earlier sessions or this one.
+- After install: navigate to `<exe>\sqllogs\`, `<exe>\shn_history\`,
+  `<exe>\debug\` to see the channel files actually being written.
+- Android: rebuild via Gradle; the new `material-icons-extended`
+  symbols are already pulled in from `gradle/libs.versions.toml:32`.
+
+### Re-enabling auth (future, when testing wraps)
+```jsonc
+"http_server": {
+  "bind_address":  "127.0.0.1",     // or your trusted subnet
+  "cors_origins":  ["http://localhost:3000"],
+  "no_auth":       0,
+  "auth_enabled":  true,
+  "rate_limit_rpm": 60
+}
+```
