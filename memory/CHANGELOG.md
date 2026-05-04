@@ -822,3 +822,85 @@ duplication, no stale-config drift between services.
 - `Android/ui/shneditor/SHNScreen.kt`
 
 5/5 balance-clean (canary).
+
+---
+
+## Session Feb-2026 (continued) — Floating Fiesta cipher (Lua-driven)
+
+Operator supplied DragonFiesta-Rewrite reference (`FiestaCrypto.h`,
+`HeadlessClient.cpp`).  Audit revealed the previous in-tree cipher
+(LCG, reverse-engineered from CN2012 5ZoneServer2.exe) was a different
+fork's algorithm — it would never decrypt a DragonFiesta server's
+traffic.  The two ciphers must coexist and be selectable per deploy.
+
+### Floating cipher selector (Lua-driven)
+- `FiestaCipher.h::Cipher` rewritten to support both backends behind
+  a single `CipherKind { LCG, XOR499 }` enum.  `EncryptOut` /
+  `DecryptIn` route to the matching XOR table or LCG byte stream.
+  State is independent per direction (matches both Fiesta forks).
+- `Cipher::SetKind(CipherKind)` — public switch, called BEFORE Connect.
+  Existing call sites that don't touch this default to LCG so old
+  CN2012-targeting builds still work.
+- 499-byte XOR table embedded inline in `FiestaCipher.h` as a static
+  constexpr array.  Same bytes as the standalone `FiestaNetCrypto.h`
+  (kept duplicated; if you change one, change both — comment says so).
+- `FiestaService::OnStart` reads `ElleAnn.fiesta.region` from
+  `elle_settings.lua` via the new `ElleLuaScalarReader`.  Maps:
+    "usa" / anything else → `XOR499` (DragonFiesta default)
+    "china" / "cn" / "cn2012" → `LCG` (CN2012 fork)
+  Logs the chosen cipher loud at start-up so the operator can verify.
+
+### `ElleLuaScalarReader` (stopgap until full Lua bridge)
+- New `Shared/ElleLuaScalarReader.{h,cpp}` — regex-grade reader for
+  `dotted.path = "string" | number | bool` lines in a Lua file.
+  Strips line and block comments, last-write-wins, partial-match
+  guarded.
+- Documented as a stopgap.  When the full Lua-5.4 bridge lands as P2,
+  every callsite gets ported to `lua_State` and this header is deleted.
+- Added to `Shared/ElleCore.Shared.vcxproj` (`<ClCompile>` + `<ClInclude>`).
+- 6/6 unit tests pass (`test_lua_scalar_reader.cpp`):
+    happy path, block-comment hiding, missing key default,
+    non-existent file, partial-match guard, helper-call rejection.
+
+### Cipher tests
+- `test_fiesta_net_crypto.cpp` — 8/8 pass: round-trip, table[0] check,
+  position wrap, explicit offset, opcode pack/unpack, department
+  constant sanity, FileCrypto round-trip, out-of-range throw.
+- `test_cipher_runtime_switch.cpp` — 4/4 pass: LCG round-trip,
+  XOR499 round-trip, table[0]=0x07 for seed=0, kind-switch + Reset
+  produces correct first byte.
+- All compiled under `g++ -std=c++17 -Wall -Wextra -Werror`.
+
+### Operator-facing change
+The single line that flips between regions:
+```lua
+-- 9Data\Hero\LuaScript\elle_settings.lua
+ElleAnn.fiesta = {
+    region = "usa",   -- "usa" → XOR499, "china" → LCG
+    ...
+}
+```
+Saved → service restart → next handshake uses the new cipher. No code
+changes, no rebuild.
+
+### Files touched
+- `Services/Elle.Service.Fiesta/FiestaCipher.h` (CipherKind, dual backend, embedded table)
+- `Services/Elle.Service.Fiesta/FiestaNetCrypto.h` (NEW — canonical reference port)
+- `Services/Elle.Service.Fiesta/FiestaConnection.h` (+GetCipher())
+- `Services/Elle.Service.Fiesta/FiestaClient.h` (+SetCipherKind / +GetCipherKind)
+- `Services/Elle.Service.Fiesta/FiestaService.cpp` (Lua region read on OnStart)
+- `Services/Elle.Service.Fiesta/test_fiesta_net_crypto.cpp` (NEW)
+- `Services/Elle.Service.Fiesta/test_cipher_runtime_switch.cpp` (NEW)
+- `Shared/ElleLuaScalarReader.{h,cpp}` (NEW)
+- `Shared/ElleCore.Shared.vcxproj` (+2 nodes)
+- `Debug/test_lua_scalar_reader.cpp` (NEW)
+- `9Data/Hero/LuaScript/elle_settings.lua` (+fiesta block)
+- `elle_master_config.json` (+fiesta.cipher_kind ref + headless_client placeholder)
+
+### What HeadlessClient.cpp gives us (deferred)
+The reference is the canonical SHN-load order + 50Hz tick + frame
+manager scaffold for a true Fiesta C++ headless client.  Not landed
+this session — it needs a multi-day port (TextData, ClassName,
+RaceNameInfo, MobInfo, ItemInfo, MapInfo loaders, FrameMgr, NetMgr).
+Keys preserved in `elle_master_config.json:fiesta.headless_client.*`
+so the eventual port has its config slots reserved.

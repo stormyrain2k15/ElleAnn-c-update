@@ -55,6 +55,7 @@
 #include "../../Shared/ElleServiceBase.h"
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleLogger.h"
+#include "../../Shared/ElleLuaScalarReader.h"
 #include "../../Shared/ElleUserContinuity.h"
 #include "../../Shared/json.hpp"
 
@@ -112,6 +113,42 @@ protected:
         m_password   = cfg.GetString("fiesta.password", "");
         m_autoLogin  = cfg.GetBool("fiesta.auto_login", false);
         m_nUserNo    = (int64_t)cfg.GetInt("fiesta.user_no", 0);
+
+        /*──────────────────────────────────────────────────────────────
+         * FLOATING CIPHER SELECTOR (per operator directive, Feb-2026).
+         *
+         *   `ElleAnn.fiesta.region` in 9Data\Hero\LuaScript\elle_settings.lua
+         *   decides which cipher family is wired into the next session:
+         *       "usa"   → DragonFiesta-Rewrite XOR-499 (default)
+         *       "china" → CN2012 LCG
+         *
+         *   We use ElleLuaScalarReader (a stopgap regex reader) until
+         *   the full Lua bridge lands as P2.  When that ships, this
+         *   block becomes a single `lua_State` getfield call.
+         *────────────────────────────────────────────────────────────────*/
+        {
+            char exePath[MAX_PATH] = {0};
+            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+            std::string exeDir(exePath);
+            size_t s = exeDir.find_last_of("\\/");
+            if (s != std::string::npos) exeDir.resize(s + 1);
+            std::string luaPath =
+                exeDir + "9Data\\Hero\\LuaScript\\elle_settings.lua";
+
+            ElleLuaScalarReader lua(luaPath);
+            std::string region = lua.GetString("region", "usa");
+            for (auto& c : region) c = (char)std::tolower((unsigned char)c);
+
+            if (region == "china" || region == "cn" || region == "cn2012") {
+                m_client.SetCipherKind(Fiesta::CipherKind::LCG);
+                ELLE_INFO("Fiesta cipher: LCG (CN2012) — region=%s",
+                          region.c_str());
+            } else {
+                m_client.SetCipherKind(Fiesta::CipherKind::XOR499);
+                ELLE_INFO("Fiesta cipher: XOR499 (DragonFiesta) — region=%s",
+                          region.c_str());
+            }
+        }
 
         m_client.SetVersionKey(
             cfg.GetString("fiesta.version_key", "SDO_FIESTA_NEW_VER_KEY"));

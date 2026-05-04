@@ -439,5 +439,15 @@
         "port_step":         100,
         "spawn_delay_ms":    300,
         "allow_recursion":   0
+    },
+    "fiesta": {
+        "cipher_kind":       "xor499",
+        "_cipher_kind_comment": "DragonFiesta-Rewrite uses 'xor499' (499-byte rolling XOR table). Set to 'lcg' for CN2012-style servers (5ZoneServer2.exe). Default is 'xor499' — most public Fiesta forks derive from DragonFiesta-Rewrite.",
+        "headless_client": {
+            "enabled":             false,
+            "tick_hz":             50,
+            "report_crash_to_zone": false,
+            "_comment":            "Reserved for the headless C++ client work (HeadlessClient.cpp reference). Disabled by default; not needed for Elle's day-to-day operation."
+        }
     }
 }

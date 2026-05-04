@@ -416,6 +416,32 @@ ElleAnn.family = {
     allow_recursion    = 0,
 }
 
+-- ── Fiesta server compatibility ────────────────────────────────────────────
+-- Floating cipher selector — flip this one value to swap between the two
+-- known Fiesta network cipher families.  Saves rebuilding when you move
+-- between deployment targets.
+--
+-- Valid values (case-insensitive):
+--    "usa"   → DragonFiesta-Rewrite (zepheus_fiesta 2012):
+--              499-byte rolling XOR table.  The default; matches every
+--              public Fiesta source release derived from zepheus_fiesta.
+--    "china" → CN2012 (5ZoneServer2.exe):
+--              MSVC LCG cipher (state * 0x343FD + 0x269EC3, >>16, &0x7FFF).
+--              Use this only when talking to a Chinese 2012 server fork.
+--
+-- The Fiesta service reads this single field via Shared/ElleLuaScalarReader
+-- and constructs the matching cipher at session start.  Hot-reload safe:
+-- next handshake picks up the new value.
+ElleAnn.fiesta = {
+    region = "usa",
+    -- Kept for forward-compat with the eventual full Lua bridge — these
+    -- fields are read only by the regex stopgap until the full bridge
+    -- lands (P2 in the roadmap).  Don't add new keys here without
+    -- updating Shared/ElleLuaScalarReader.cpp.
+    headless_client_enabled = false,
+    headless_tick_hz        = 50,
+}
+
 -- ── Dev profile overrides ──────────────────────────────────────────────────
 -- Example of a genuine Lua conditional — can't do this in a flat JSON.
 if IS_DEV then

@@ -113,6 +113,18 @@ public:
         m_versionKey = utf8Key;
     }
 
+    /** Floating cipher selector — operator-controlled via
+     *  `ElleAnn.fiesta.region` in elle_settings.lua. Must be called
+     *  BEFORE Connect(); switching mid-session is undefined.          */
+    void SetCipherKind(CipherKind kind) {
+        std::lock_guard<std::mutex> lk(m_mx);
+        m_conn.MutableCipher().SetKind(kind);
+    }
+    CipherKind GetCipherKind() const {
+        std::lock_guard<std::mutex> lk(m_mx);
+        return m_conn.GetCipher().Kind();
+    }
+
     /* Override the WILLLOGIN_REQ.spawnapps fingerprint string.
      * CN2012 accepts an empty string for headless clients. */
     void SetSpawnApps(const std::string& s) {

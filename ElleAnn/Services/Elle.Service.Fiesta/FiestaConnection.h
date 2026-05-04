@@ -132,6 +132,7 @@ public:
     }
 
     Cipher& MutableCipher() { return m_cipher; }
+    const Cipher& GetCipher() const { return m_cipher; }
 
     void SetOnPacket(PacketCallback cb)         { m_onPacket = std::move(cb); }
     void SetOnDisconnect(DisconnectCallback cb) { m_onDisconnect = std::move(cb); }
