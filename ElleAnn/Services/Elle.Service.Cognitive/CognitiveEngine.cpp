@@ -434,22 +434,29 @@ protected:
     void OnMessage(const ElleIPCMessage& msg, ELLE_SERVICE_ID sender) override {
         switch ((ELLE_IPC_MSG_TYPE)msg.header.msg_type) {
             case IPC_INTENT_REQUEST: {
-                /* QueueWorker polls dbo.IntentQueue and hands each pending
-                 * row to us as a full ELLE_INTENT_RECORD via SetPayload().
-                 * Our job: mark the row PROCESSING and route it to the
-                 * appropriate downstream service.
-                 *
-                 * WARNING: do NOT call ProcessInput() here — ProcessInput
-                 * re-parses the text and SubmitIntent()s a new row,
-                 * producing a tight loop (QueueWorker → Cognitive →
-                 * SubmitIntent → QueueWorker → …). We previously read
-                 * GetStringPayload() against the binary struct, which
-                 * garbled the text and fed garbage into ProcessInput —
-                 * both bugs fixed here.                                    */
+                /* QueueWorker sends intent fields as JSON (not binary
+                 * ELLE_INTENT_RECORD) to stay under ELLE_PIPE_BUFFER_SIZE.
+                 * Reconstruct the record from the JSON payload.           */
                 ELLE_INTENT_RECORD intent{};
-                if (msg.GetPayload(intent)) {
+                try {
+                    auto j = json::parse(msg.GetStringPayload());
+                    intent.id           = j.value("id",           (uint64_t)0);
+                    intent.type         = j.value("type",         (uint32_t)0);
+                    intent.status       = j.value("status",       (uint32_t)0);
+                    intent.source_drive = j.value("source_drive", (uint32_t)0);
+                    intent.urgency      = j.value("urgency",      0.0f);
+                    intent.confidence   = j.value("confidence",   0.0f);
+                    intent.required_trust = j.value("required_trust", (uint32_t)0);
+                    intent.created_ms   = j.value("created_ms",   (uint64_t)0);
+                    intent.timeout_ms   = j.value("timeout_ms",   (uint64_t)0);
+                    auto desc = j.value("description", std::string());
+                    auto prms = j.value("parameters",  std::string());
+                    strncpy_s(intent.description, desc.c_str(), ELLE_MAX_MSG - 1);
+                    strncpy_s(intent.parameters,  prms.c_str(), ELLE_MAX_MSG - 1);
                     ElleDB::UpdateIntentStatus(intent.id, INTENT_PROCESSING);
                     RouteIntent(intent);
+                } catch (const std::exception& e) {
+                    ELLE_WARN("IPC_INTENT_REQUEST JSON parse failed: %s", e.what());
                 }
                 break;
             }

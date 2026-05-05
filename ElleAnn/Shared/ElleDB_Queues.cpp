@@ -84,7 +84,7 @@ bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) 
      * measure consumer-deadline drift from claim time, not row
      * creation time.                                                   */
     auto rs = ElleSQLPool::Instance().QueryParams(
-        "UPDATE TOP (?) q WITH (ROWLOCK, READPAST) "
+        "UPDATE TOP (" + std::to_string(maxCount) + ") q WITH (ROWLOCK, READPAST) "
         "SET Status = ?, ProcessingMs = ? "
         "OUTPUT inserted.IntentId, inserted.IntentType, inserted.Status, "
         "       inserted.SourceDrive, inserted.Urgency, inserted.Confidence, "
@@ -92,8 +92,7 @@ bool GetPendingIntents(std::vector<ELLE_INTENT_RECORD>& out, uint32_t maxCount) 
         "       inserted.RequiredTrust, inserted.CreatedMs, inserted.TimeoutMs "
         "FROM ElleCore.dbo.IntentQueue AS q "
         "WHERE q.Status = ?;",
-        { std::to_string(maxCount),
-          std::to_string((int)INTENT_PROCESSING),
+        { std::to_string((int)INTENT_PROCESSING),
           std::to_string((long long)ELLE_MS_NOW()),
           std::to_string((int)INTENT_PENDING) });
     if (!rs.success) return false;
@@ -396,7 +395,7 @@ bool GetPendingActions(std::vector<ELLE_ACTION_RECORD>& out, uint32_t maxCount) 
      * the second caller skip the rows the first one is already
      * updating, and the OUTPUT clause emits each row exactly once.   */
     auto rs = ElleSQLPool::Instance().QueryParams(
-        "UPDATE TOP (?) q WITH (ROWLOCK, READPAST) "
+        "UPDATE TOP (" + std::to_string(maxCount) + ") q WITH (ROWLOCK, READPAST) "
         "SET status = ?, started_ms = ? "
         "OUTPUT inserted.id, ISNULL(inserted.intent_id,0), inserted.action_type, "
         "       inserted.status, ISNULL(inserted.command, N''), "
@@ -405,7 +404,6 @@ bool GetPendingActions(std::vector<ELLE_ACTION_RECORD>& out, uint32_t maxCount) 
         "FROM ElleCore.dbo.action_queue AS q "
         "WHERE q.status = ?;",
         {
-            std::to_string(maxCount),
             std::to_string((int)ACTION_LOCKED),
             std::to_string((int64_t)ELLE_MS_NOW()),
             std::to_string((int)ACTION_QUEUED)
