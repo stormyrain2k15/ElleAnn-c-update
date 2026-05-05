@@ -1,0 +1,84 @@
+From: Emergent agent
+Subject: [PATCH] WsEvent.Error→Failure rename, SHN picker stream race fix, ODBC Driver 18 connection string
+
+Three independent fixes for the running deployment, no functional changes elsewhere:
+
+  1. ElleWebSocket.kt — sealed class WsEvent referenced an undeclared
+     `Error` variant on line 174. Adding `Error` directly would collide
+     with kotlin.Error / java.lang.Error in nested-class resolution.
+     Renamed the variant to `Failure` to match Copilot's diagnosis.
+
+  2. SHNScreen.kt — the local file picker closed the InputStream via
+     .use{} before the coroutine launched inside it could read on the
+     IO dispatcher. Read bytes synchronously inside .use{}, hand the
+     ByteArray to the coroutine; surface a Toast on empty/denied reads.
+
+  3. elle_master_config.json — replaced .NET SqlClient connection
+     string format (which ODBC SQLDriverConnect cannot parse → IM002)
+     with Driver 18 ODBC format including TrustServerCertificate=yes
+     for local SQL Server Express instances with auto-generated certs.
+
+---
+--- a/ElleAnn/Android/app/src/main/java/com/elleann/android/data/ElleWebSocket.kt
++++ b/ElleAnn/Android/app/src/main/java/com/elleann/android/data/ElleWebSocket.kt
+@@ -77,6 +77,14 @@
+     /** Connection dropped or error */
+     data class Disconnected(val reason: String) : WsEvent()
+ 
++    /** Soft transport-level failure that doesn't necessarily mean the
++     *  socket dropped — e.g. "no host paired yet, refusing to open."
++     *  Named `Failure` (NOT `Error`) because the latter collides with
++     *  `kotlin.Error` and `java.lang.Error` in nested-class name
++     *  resolution for sealed hierarchies, producing an Unresolved
++     *  reference at every usage site. */
++    data class Failure(val reason: String) : WsEvent()
++
+     /** Unknown event type — raw JSON preserved for debugging */
+     data class Unknown(val type: String, val raw: String) : WsEvent()
+ }
+@@ -171,7 +179,7 @@
+             isConnecting = false
+             shouldReconnect = false
+             scope.launch {
+-                _events.emit(WsEvent.Error(
++                _events.emit(WsEvent.Failure(
+                     "WebSocket not opened: no host paired yet. " +
+                     "Visit Pair screen first."))
+             }
+--- a/ElleAnn/Android/app/src/main/java/com/elleann/android/ui/shneditor/SHNScreen.kt
++++ b/ElleAnn/Android/app/src/main/java/com/elleann/android/ui/shneditor/SHNScreen.kt
+@@ -707,9 +707,20 @@
+     ) { uri: Uri? ->
+         if (uri == null) return@rememberLauncherForActivityResult
+         val name = uri.lastPathSegment?.substringAfterLast('/') ?: "unknown.shn"
+-        ctx.contentResolver.openInputStream(uri)?.use { stream ->
+-            vm.loadFromStream(stream, name)
++        /* Read the bytes SYNCHRONOUSLY inside .use{} — the previous version
++         * launched a coroutine inside the .use block, which let .use{}
++         * close the stream BEFORE the coroutine read from it on the IO
++         * dispatcher.  Result: every "Local file" pick failed silently
++         * with a closed-stream IOException (or empty parse).            */
++        val bytes: ByteArray? = runCatching {
++            ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
++        }.getOrNull()
++        if (bytes == null || bytes.isEmpty()) {
++            Toast.makeText(ctx, "Could not read file (empty or denied)", Toast.LENGTH_LONG).show()
++            vm.setStatus("could not read picked file (empty / denied)")
++            return@rememberLauncherForActivityResult
+         }
++        vm.loadFromBytes(bytes, name)
+     }
+ 
+     val saveToDevice = rememberLauncherForActivityResult(
+--- a/ElleAnn/elle_master_config.json
++++ b/ElleAnn/elle_master_config.json
+@@ -297,7 +297,8 @@
+             "timeout_ms": 5000
+         },
+         "sql_pipes": {
+-            "connection_string": "Server=DESKTOP-IIREG0M\\ELLEANN;Database=ElleCore;Trusted_Connection=yes;",
++            "_comment_driver18": "ODBC Driver 18 enables encryption by default and rejects self-signed certificates. TrustServerCertificate=yes is REQUIRED for local SQL Server Express instances using auto-generated certs. Encrypt=optional lets the driver fall back to plaintext if the server doesn't offer TLS. Both flags are no-ops if your SQL Server has a real cert chain.",
++            "connection_string": "Driver={ODBC Driver 18 for SQL Server};Server=DESKTOP-IIREG0M\\ELLEANN;Database=ElleCore;Trusted_Connection=yes;TrustServerCertificate=yes;Encrypt=optional;",
+             "pool_size": 8,
+             "command_timeout_seconds": 30,
+             "retry_count": 3,
