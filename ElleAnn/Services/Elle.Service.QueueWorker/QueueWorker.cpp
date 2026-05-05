@@ -8,6 +8,8 @@
 #include "../../Shared/ElleConfig.h"
 #include "../../Shared/ElleSQLConn.h"
 #include <algorithm>
+#include "../../Shared/json.hpp"
+using json = nlohmann::json;
 
 class ElleQueueWorkerService : public ElleServiceBase {
 public:
@@ -43,7 +45,24 @@ protected:
         bool intentsOk = ElleDB::GetPendingIntents(intents, 10);
         for (auto& intent : intents) {
             auto msg = ElleIPCMessage::Create(IPC_INTENT_REQUEST, SVC_QUEUE_WORKER, SVC_COGNITIVE);
-            msg.SetPayload(intent);
+            /* Serialize only the fields Cognitive needs — ELLE_INTENT_RECORD
+             * contains response[65536] that QueueWorker never fills, making
+             * the binary payload 82 KB which exceeds ELLE_PIPE_BUFFER_SIZE
+             * (64 KB) and caused fragmented delivery + deserialization failure.
+             * JSON payload stays well under 10 KB for any real intent.     */
+            json j;
+            j["id"]             = intent.id;
+            j["type"]           = intent.type;
+            j["status"]         = intent.status;
+            j["source_drive"]   = intent.source_drive;
+            j["urgency"]        = intent.urgency;
+            j["confidence"]     = intent.confidence;
+            j["description"]    = std::string(intent.description);
+            j["parameters"]     = std::string(intent.parameters);
+            j["required_trust"] = intent.required_trust;
+            j["created_ms"]     = intent.created_ms;
+            j["timeout_ms"]     = intent.timeout_ms;
+            msg.SetStringPayload(j.dump());
             GetIPCHub().Send(SVC_COGNITIVE, msg);
             m_intentsRouted++;
         }

@@ -707,9 +707,20 @@ fun SHNScreen(
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         val name = uri.lastPathSegment?.substringAfterLast('/') ?: "unknown.shn"
-        ctx.contentResolver.openInputStream(uri)?.use { stream ->
-            vm.loadFromStream(stream, name)
+        /* Read the bytes SYNCHRONOUSLY inside .use{} — the previous version
+         * launched a coroutine inside the .use block, which let .use{}
+         * close the stream BEFORE the coroutine read from it on the IO
+         * dispatcher.  Result: every "Local file" pick failed silently
+         * with a closed-stream IOException (or empty parse).            */
+        val bytes: ByteArray? = runCatching {
+            ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        }.getOrNull()
+        if (bytes == null || bytes.isEmpty()) {
+            Toast.makeText(ctx, "Could not read file (empty or denied)", Toast.LENGTH_LONG).show()
+            vm.setStatus("could not read picked file (empty / denied)")
+            return@rememberLauncherForActivityResult
         }
+        vm.loadFromBytes(bytes, name)
     }
 
     val saveToDevice = rememberLauncherForActivityResult(

@@ -958,7 +958,14 @@ void ElleIPCHub::WorkerThread() {
             if (ovl) {
                 auto* elleOvl = reinterpret_cast<ELLE_IOCP_OVERLAPPED*>(ovl);
                 auto* conn    = reinterpret_cast<EllePipeConnection*>(completionKey);
-                DispatchIOComplete(elleOvl, 0, err, conn);
+                /* Pass bytesTransferred (not 0) — on ERROR_MORE_DATA the OS
+                 * still fills bytesTransferred with the bytes actually read into
+                 * the buffer. Passing 0 silently discarded the first chunk of
+                 * any message larger than ELLE_PIPE_BUFFER_SIZE, leaving only
+                 * the zero-filled tail in m_readBuffer, causing every
+                 * deserialization of large structs (e.g. ELLE_INTENT_RECORD)
+                 * to fail with "16496 bytes accumulated, all zeros".         */
+                DispatchIOComplete(elleOvl, bytesTransferred, err, conn);
             }
             continue;
         }

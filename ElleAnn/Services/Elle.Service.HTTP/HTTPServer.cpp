@@ -6156,14 +6156,26 @@ private:
         });
         m_router.Register("GET", "/api/server/console", [](const HTTPRequest& req) {
             int limit = std::max(1, req.QueryInt("limit", 100));
-            std::string level = req.QueryParam("level");
+            std::string levelParam = req.QueryParam("level");
+            // Map UI level label to ELLE_LOG_LEVEL int stored in the level column.
+            // App sends "INFO"/"WARN"/"ERROR"/"DEBUG"/"FATAL"; absent = all.
+            // Matches: LOG_TRACE=0,LOG_DEBUG=1,LOG_INFO=2,LOG_WARN=3,LOG_ERROR=4,LOG_FATAL=5
+            int levelInt = -1;
+            if      (levelParam == "TRACE") levelInt = 0;
+            else if (levelParam == "DEBUG") levelInt = 1;
+            else if (levelParam == "INFO")  levelInt = 2;
+            else if (levelParam == "WARN")  levelInt = 3;
+            else if (levelParam == "ERROR") levelInt = 4;
+            else if (levelParam == "FATAL") levelInt = 5;
+
             std::string sql =
-                "SELECT TOP (?) id, level, service, message, created_ms "
+                "SELECT TOP (" + std::to_string(limit) + ") "
+                "id, level, service, message, created_ms "
                 "FROM ElleCore.dbo.log_entries ";
-            std::vector<std::string> params; params.push_back(std::to_string(limit));
-            if (!level.empty()) {
+            std::vector<std::string> params;
+            if (levelInt >= 0) {
                 sql += "WHERE level = ? ";
-                params.push_back(level);
+                params.push_back(std::to_string(levelInt));
             }
             sql += "ORDER BY id DESC;";
             auto rs = ElleSQLPool::Instance().QueryParams(sql, params);
@@ -6182,7 +6194,7 @@ private:
             return HTTPResponse::OK({{"logs", logs}});
         });
         m_router.Register("DELETE", "/api/server/console", [](const HTTPRequest&) {
-            auto rs = ElleSQLPool::Instance().Exec("TRUNCATE TABLE ElleCore.dbo.log_entries;");
+            auto rs = ElleSQLPool::Instance().Exec("DELETE FROM ElleCore.dbo.log_entries;");
             return HTTPResponse::OK({{"cleared", rs}});
         });
         m_router.Register("GET", "/api/server/settings", [](const HTTPRequest&) {

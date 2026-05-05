@@ -41,12 +41,14 @@
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('Package','Install','Uninstall','Reinstall','Status')]
+  [ValidateSet('Package','Install','Uninstall','Reinstall','Repoint','Status')]
   [string]$Action = 'Package',
   [ValidateSet('Debug','Release')]
   [string]$Config = 'Release',
   [string]$Root       = $PSScriptRoot,
-  [string]$InstallDir = 'C:\ElleAnn'
+  [string]$InstallDir = 'C:\ElleAnn',
+  [switch]$ShortExeNames,
+  [switch]$Restart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,26 +58,26 @@ $ErrorActionPreference = 'Stop'
 # Each entry: service name (no ElleAnn_ prefix), exe filename.
 # ──────────────────────────────────────────────────────────────────────
 $Services = @(
-  @{ Name='Heartbeat'  ; Exe='Elle.Service.Heartbeat.exe'   },
-  @{ Name='QueueWorker'; Exe='Elle.Service.QueueWorker.exe' },
-  @{ Name='Emotional'  ; Exe='Elle.Service.Emotional.exe'   },
-  @{ Name='Memory'     ; Exe='Elle.Service.Memory.exe'      },
-  @{ Name='Cognitive'  ; Exe='Elle.Service.Cognitive.exe'   },
-  @{ Name='Action'     ; Exe='Elle.Service.Action.exe'      },
-  @{ Name='GoalEngine' ; Exe='Elle.Service.GoalEngine.exe'  },
-  @{ Name='WorldModel' ; Exe='Elle.Service.WorldModel.exe'  },
-  @{ Name='Identity'   ; Exe='Elle.Service.Identity.exe'    },
-  @{ Name='SelfPrompt' ; Exe='Elle.Service.SelfPrompt.exe'  },
-  @{ Name='Dream'      ; Exe='Elle.Service.Dream.exe'       },
-  @{ Name='Solitude'   ; Exe='Elle.Service.Solitude.exe'    },
-  @{ Name='Bonding'    ; Exe='Elle.Service.Bonding.exe'     },
-  @{ Name='InnerLife'  ; Exe='Elle.Service.InnerLife.exe'   },
-  @{ Name='XChromosome'; Exe='Elle.Service.XChromosome.exe' },
-  @{ Name='Consent'    ; Exe='Elle.Service.Consent.exe'     },
-  @{ Name='Family'     ; Exe='Elle.Service.Family.exe'      },
-  @{ Name='Continuity' ; Exe='Elle.Service.Continuity.exe'  },
-  @{ Name='LuaBehav'   ; Exe='Elle.Lua.Behavioral.exe'      },
-  @{ Name='HTTP'       ; Exe='Elle.Service.HTTP.exe'        }
+  @{ Name='Heartbeat'  ; Exe='Elle.Service.Heartbeat.exe'   ; ShortExe='ElleHeartbeat.exe'   },
+  @{ Name='QueueWorker'; Exe='Elle.Service.QueueWorker.exe' ; ShortExe='ElleQueueWorker.exe' },
+  @{ Name='Emotional'  ; Exe='Elle.Service.Emotional.exe'   ; ShortExe='ElleEmotional.exe'   },
+  @{ Name='Memory'     ; Exe='Elle.Service.Memory.exe'      ; ShortExe='ElleMemory.exe'      },
+  @{ Name='Cognitive'  ; Exe='Elle.Service.Cognitive.exe'   ; ShortExe='ElleCognitive.exe'   },
+  @{ Name='Action'     ; Exe='Elle.Service.Action.exe'      ; ShortExe='ElleAction.exe'      },
+  @{ Name='GoalEngine' ; Exe='Elle.Service.GoalEngine.exe'  ; ShortExe='ElleGoal.exe'        },
+  @{ Name='WorldModel' ; Exe='Elle.Service.WorldModel.exe'  ; ShortExe='ElleWorldModel.exe'  },
+  @{ Name='Identity'   ; Exe='Elle.Service.Identity.exe'    ; ShortExe='ElleIdentity.exe'    },
+  @{ Name='SelfPrompt' ; Exe='Elle.Service.SelfPrompt.exe'  ; ShortExe='ElleSelfPrompt.exe'  },
+  @{ Name='Dream'      ; Exe='Elle.Service.Dream.exe'       ; ShortExe='ElleDream.exe'       },
+  @{ Name='Solitude'   ; Exe='Elle.Service.Solitude.exe'    ; ShortExe='ElleSolitude.exe'    },
+  @{ Name='Bonding'    ; Exe='Elle.Service.Bonding.exe'     ; ShortExe='ElleBonding.exe'     },
+  @{ Name='InnerLife'  ; Exe='Elle.Service.InnerLife.exe'   ; ShortExe='ElleInnerLife.exe'   },
+  @{ Name='XChromosome'; Exe='Elle.Service.XChromosome.exe' ; ShortExe='ElleXChromosome.exe' },
+  @{ Name='Consent'    ; Exe='Elle.Service.Consent.exe'     ; ShortExe='ElleConsent.exe'     },
+  @{ Name='Family'     ; Exe='Elle.Service.Family.exe'      ; ShortExe='ElleFamily.exe'      },
+  @{ Name='Continuity' ; Exe='Elle.Service.Continuity.exe'  ; ShortExe='ElleContinuity.exe'  },
+  @{ Name='LuaBehav'   ; Exe='Elle.Lua.Behavioral.exe'      ; ShortExe='ElleLuaBehav.exe'    },
+  @{ Name='HTTP'       ; Exe='Elle.Service.HTTP.exe'        ; ShortExe='ElleHTTP.exe'        }
 )
 $SvcPrefix = 'ElleAnn_'
 
@@ -183,7 +185,19 @@ function Invoke-Install {
   Write-Step 'Registering services'
   foreach ($s in $Services) {
     $svcName = "$SvcPrefix$($s.Name)"
-    $exePath = Join-Path $InstallDir $s.Exe
+    # Each service has its own folder named the same as the service name
+    $svcDir = Join-Path $InstallDir $s.Name
+    $sourceExe = Join-Path $svcDir $s.Exe
+    $exePath = $sourceExe
+    if ($ShortExeNames) {
+      if (-not $s.ContainsKey('ShortExe') -or [string]::IsNullOrWhiteSpace($s.ShortExe)) {
+        throw "Short exe name missing for service '$($s.Name)'."
+      }
+      $exePath = Join-Path $svcDir $s.ShortExe
+      if (Test-Path $sourceExe) {
+        Copy-Item -Path $sourceExe -Destination $exePath -Force
+      }
+    }
     if (-not (Test-Path $exePath)) {
       Write-Warning "Skipping $svcName — exe missing at $exePath"
       continue
@@ -262,10 +276,92 @@ function Invoke-Status {
   $rows | Format-Table -AutoSize
 }
 
+function Set-ServiceBinPath($svcName, $exePath) {
+  if ([string]::IsNullOrWhiteSpace($exePath)) { throw 'exePath is empty.' }
+  $quoted = '"' + $exePath + '"'
+  sc.exe config $svcName binPath= $quoted *>$null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to set binPath for $svcName (exit $LASTEXITCODE)"
+  }
+}
+
+function Invoke-Repoint {
+  Assert-Elevated
+  Write-Step "Repointing existing services to $InstallDir"
+  $deploy = Get-DeployDir
+
+  if (-not (Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+  }
+
+  # Copy everything (so the service directories and deps are present)
+  Copy-Item (Join-Path $deploy '*') $InstallDir -Recurse -Force
+  $luaScripts = Join-Path $Root 'Lua\Elle.Lua.Behavioral\scripts'
+  if (Test-Path $luaScripts) {
+    Copy-Item $luaScripts (Join-Path $InstallDir 'scripts') -Recurse -Force
+  }
+
+  Write-Step 'Updating binPath for installed services'
+  foreach ($s in $Services) {
+    $svcName = "$SvcPrefix$($s.Name)"
+
+    sc.exe query $svcName *>$null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "Skipping $svcName — not installed"
+      continue
+    }
+
+    $svcDir = Join-Path $InstallDir $s.Name
+    $sourceExe = Join-Path $svcDir $s.Exe
+    $exePath = $sourceExe
+
+    if ($ShortExeNames) {
+      if (-not $s.ContainsKey('ShortExe') -or [string]::IsNullOrWhiteSpace($s.ShortExe)) {
+        throw "Short exe name missing for service '$($s.Name)'."
+      }
+      $exePath = Join-Path $svcDir $s.ShortExe
+      if (Test-Path $sourceExe) {
+        Copy-Item -Path $sourceExe -Destination $exePath -Force
+      }
+    }
+
+    if (-not (Test-Path $exePath)) {
+      Write-Warning "Skipping $svcName — exe missing at $exePath"
+      continue
+    }
+
+    Set-ServiceBinPath $svcName $exePath
+    Write-Host "  ~ $svcName -> $exePath" -ForegroundColor Green
+  }
+
+  if ($Restart) {
+    Write-Step 'Restarting services in dependency order'
+    foreach ($s in $Services) {
+      $svcName = "$SvcPrefix$($s.Name)"
+      sc.exe query $svcName *>$null
+      if ($LASTEXITCODE -ne 0) { continue }
+
+      sc.exe stop $svcName *>$null
+      Start-Sleep -Milliseconds 300
+      sc.exe start $svcName *>$null
+      if ($LASTEXITCODE -eq 0) {
+        Write-Host "  > $svcName" -ForegroundColor Green
+      } else {
+        Write-Warning "  ! $svcName failed to start (exit $LASTEXITCODE). Check the service's log."
+      }
+      Start-Sleep -Milliseconds 250
+    }
+  }
+
+  Write-Host ''
+  Write-Host 'Repoint complete. Check status with:  .\Deploy.ps1 -Action Status' -ForegroundColor Cyan
+}
+
 switch ($Action) {
   'Package'   { Invoke-Package }
   'Install'   { Invoke-Install }
   'Uninstall' { Invoke-Uninstall }
   'Reinstall' { Invoke-Uninstall; Invoke-Install }
-  'Status'    { Invoke-Status }
+  'Repoint'   { Invoke-Repoint }
+  'Status'    { Invoke-Status; }
 }

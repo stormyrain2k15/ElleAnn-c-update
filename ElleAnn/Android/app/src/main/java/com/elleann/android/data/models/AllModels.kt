@@ -660,7 +660,7 @@ data class LogEntry(
     @SerialName("created_ms") val createdMs: Long,
 ) {
     val levelLabel: String get() = when (level) {
-        0 -> "DEBUG"; 1 -> "INFO"; 2 -> "WARN"; 3 -> "ERROR"; 4 -> "FATAL"; else -> "?"
+        0 -> "TRACE"; 1 -> "DEBUG"; 2 -> "INFO"; 3 -> "WARN"; 4 -> "ERROR"; 5 -> "FATAL"; else -> "?"
     }
 }
 
