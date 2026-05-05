@@ -266,7 +266,7 @@ fun LogMonitorScreen(container: AppContainerExtended, onBack: () -> Unit) {
             if (loading) IsyaLoadingIndicator(Modifier.fillMaxWidth().padding(32.dp))
             else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 items(logs, key = { it.id }) { log ->
-                    val levelColor = when (log.level) { 3 -> IsyaError; 2 -> IsyaWarn; 1 -> Color(0xFF00FF88); else -> Color(0xFF3A7A3A) }
+                    val levelColor = when (log.level) { 4 -> IsyaError; 3 -> IsyaWarn; 2 -> Color(0xFF00FF88); 1 -> Color(0xFF6699CC); else -> Color(0xFF3A7A3A) }
                     Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp)) {
                         Text("[${log.levelLabel}]", style = MaterialTheme.typography.labelSmall, color = levelColor, fontFamily = FontFamily.Monospace, modifier = Modifier.width(52.dp))
                         Text(log.message, style = MaterialTheme.typography.labelSmall, color = Color(0xFFCCFFCC), fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)

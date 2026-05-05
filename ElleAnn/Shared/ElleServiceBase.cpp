@@ -234,7 +234,7 @@ bool ElleServiceBase::InstallService() {
         SERVICE_WIN32_OWN_PROCESS,
         SERVICE_AUTO_START,
         SERVICE_ERROR_NORMAL,
-        exePath,
+        (std::string("\"") + exePath + "\"").c_str(),
         nullptr, nullptr, nullptr, nullptr, nullptr
     );
 
@@ -246,7 +246,7 @@ bool ElleServiceBase::InstallService() {
             if (hService) {
                 ChangeServiceConfigA(hService, SERVICE_WIN32_OWN_PROCESS,
                     SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-                    exePath, nullptr, nullptr, nullptr, nullptr, nullptr,
+                    (std::string("\"") + exePath + "\"").c_str(), nullptr, nullptr, nullptr, nullptr, nullptr,
                     m_displayName.c_str());
             }
         } else {
