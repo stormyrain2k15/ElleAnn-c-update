@@ -8,6 +8,7 @@
  *   `_re_artifacts/pdb/extracted/` layouts.
  *══════════════════════════════════════════════════════════════════════════════*/
 #include "FiestaClient.h"
+#include "FiestaConsoleTrace.h"
 
 #include <cstdio>
 #include <cstring>
@@ -249,6 +250,12 @@ void Client::OnChatLike(const InPacket& pkt) {
       << ",\"text\":\"" << JsonEsc(text) << "\""
       << ",\"raw_hex\":\"" << ToHex(pkt.payload) << "\"}";
     EmitEvent(o.str());
+
+    /* Console trace — high-level decoded view. */
+    Fiesta::Trace::OnChat(speakerName.empty()
+                              ? std::string_view{"?"}
+                              : std::string_view{speakerName},
+                          text, channel);
 }
 
 void Client::OnWhisper(const InPacket& pkt) {
@@ -281,6 +288,8 @@ void Client::OnWhisper(const InPacket& pkt) {
       << ",\"speaker_name\":\"" << JsonEsc(sender) << "\""
       << ",\"text\":\"" << JsonEsc(text) << "\"}";
     EmitEvent(o.str());
+
+    Fiesta::Trace::OnChat(sender, text, "whisper");
 }
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -347,6 +356,7 @@ void Client::SetState(State s) {
         m_state  = s;
     }
     if (previous != s) {
+        Fiesta::Trace::OnStateChange(StateName(previous), StateName(s));
         std::ostringstream o;
         o << "{\"kind\":\"login_state\",\"state\":\"" << StateName(s) << "\"}";
         EmitEvent(o.str());
@@ -862,6 +872,10 @@ void Client::StopHeartbeat() {
  * Inbound packet dispatcher
  *──────────────────────────────────────────────────────────────────────────────*/
 void Client::HandlePacket(const InPacket& pkt) {
+    /* Live console trace — visible only when the service is launched
+     * with `--console`.  See FiestaConsoleTrace.h. */
+    Fiesta::Trace::OnRx(pkt.opcode, pkt.payload);
+
     switch (pkt.opcode) {
 
         /* ── Cipher / handshake ──────────────────────────────── */

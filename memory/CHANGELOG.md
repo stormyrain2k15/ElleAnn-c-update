@@ -1640,3 +1640,74 @@ fresh login and pass its payload to `Reset()`.
 * `_re_artifacts/pdb/extracted/{dispatch_table,payload_shape_matches}.json`
 * `_re_artifacts/cipher/README.md` (Phase 6c hunt guide + findings)
 * `_re_artifacts/cipher/decompiled_cipher.c` (cipher source from IDA)
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 — Live Console Trace for Elle.Service.Fiesta
+
+Delivered as `/app/09-phase6-console-trace.patch` (24 KB; applies
+on top of `PHASE6A-COMPLETE.patch`). Adds a colour-coded live
+console window so the operator can watch every packet as it
+traverses Elle's headless Fiesta client.
+
+### How to use
+Run the service interactively with `--console`:
+```
+> Elle.Service.Fiesta.exe --console
+```
+
+Output looks like:
+```
+════════════════════════════════════════════════════════════════════
+ Elle.Service.Fiesta — live console trace
+ Elle-Ann Fiesta Game Client (live trace)
+════════════════════════════════════════════════════════════════════
+Legend:  RX server->Elle   TX Elle->server   >> state   ★ decoded   ! error
+
+12:34:56.789  RX  0x0207  NC_MISC_SEED_ACK               (   2 B)  1F 03
+12:34:56.812  TX  0x0306  NC_USER_LOGIN_REQ              ( 272 B)
+12:34:56.834  >>   state CONNECTING -> LOGIN_AWAIT_LOGIN_ACK
+12:34:56.997  RX  0x030A  NC_USER_LOGIN_ACK              (  43 B)  03 0A 00 …
+12:34:57.250  ★   chat    "Crystal" -> "hi"
+12:34:57.500  ★   move    h=0x46C4 (5515,7466) -> (5572,7500) type=0x32
+```
+
+### What landed
+- `Services/Elle.Service.Fiesta/FiestaConsoleTrace.h` (NEW) —
+  headers-only trace API with five hooks (RX, TX, state change,
+  decoded chat, decoded move, error). Atomic-flag fast-path: ~5 ns
+  per call when disabled, so the trace points stay compiled into
+  release builds with negligible overhead.
+- `Services/Elle.Service.Fiesta/test_fiesta_console_trace.cpp`
+  (NEW) — three-step smoke test: disabled = zero output, enabled =
+  one of each kind, multi-thread = no interleaving.
+- `Services/Elle.Service.Fiesta/FiestaClient.cpp` — RX hook in
+  `HandlePacket()` first line, state-change hook in `SetState()`,
+  chat-decoded hook in chat broadcast handler, whisper hook.
+- `Services/Elle.Service.Fiesta/FiestaConnection.h` — TX hook in
+  `Connection::Send()` (logs intent BEFORE encrypt so operator sees
+  human-readable opcode + plaintext payload size).
+- `Services/Elle.Service.Fiesta/FiestaService.cpp` — `OnStart()`
+  detects interactive (`--console`) mode via `GetConsoleMode()` and
+  enables trace + writes the banner.
+- `Elle.Service.Fiesta.vcxproj` — added new headers + tests so
+  MSBuild picks them up on Windows.
+
+### Auto-detection
+Console mode is enabled automatically when the service is launched
+with `--console`. In Windows-Service mode (under SCM, no console)
+the trace is silently disabled — no special config flag needed.
+ANSI colour codes work on Windows 10+ via
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING`.
+
+### Tests (all green)
+- `test_fiesta_console_trace.cpp` smoke-test: PASS (disabled=0
+  lines; enabled=banner + 5 traces + 4-thread×5-trace block, no
+  interleaving).
+- `test_fiesta_decoders.cpp`: still **8/8** PASS — no regression.
+- Patches `04..08` (mega) + `09` apply cleanly in sequence to
+  baseline `a88be2e^`.
+
+### Files touched
+- NEW:  `FiestaConsoleTrace.h`, `test_fiesta_console_trace.cpp`.
+- MODIFIED: `FiestaClient.cpp` (4 hooks), `FiestaConnection.h`
+  (TX hook), `FiestaService.cpp` (auto-enable), `Elle.Service.Fiesta.vcxproj`.

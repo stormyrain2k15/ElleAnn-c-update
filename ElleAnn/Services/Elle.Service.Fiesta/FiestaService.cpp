@@ -60,6 +60,7 @@
 #include "../../Shared/json.hpp"
 
 #include "FiestaClient.h"
+#include "FiestaConsoleTrace.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -104,6 +105,25 @@ public:
 
 protected:
     bool OnStart() override {
+        /* Live console trace — enabled automatically when this service
+         * was launched with `--console` (i.e. interactive mode rather
+         * than under the SCM).  We detect that by checking whether
+         * stdout has been bound to a real console handle.
+         * See FiestaConsoleTrace.h for the per-event hooks. */
+        bool interactive = false;
+#ifdef _WIN32
+        DWORD mode_unused = 0;
+        interactive = (GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE),
+                                      &mode_unused) != 0);
+#else
+        interactive = (isatty(fileno(stdout)) != 0);
+#endif
+        if (interactive) {
+            Fiesta::Trace::SetEnabled(true);
+            Fiesta::Trace::EnsureWindowsConsole();  /* binds C streams + ANSI */
+            Fiesta::Trace::Banner("Elle-Ann Fiesta Game Client (live trace)");
+        }
+
         /* Pull connection settings from the master config. The actual
          * `fiesta.*` keys are populated by Deploy/Configs/fiesta.json
          * — see ElleConfig::Load. Defaults are deliberately empty so a

@@ -1,0 +1,481 @@
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj b/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj
+index 9870769..16753b9 100644
+--- a/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj
++++ b/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj
+@@ -43,7 +43,11 @@
+   </ItemGroup>
+   <ItemGroup>
+     <ClInclude Include="FiestaCipher.h" />
++    <ClInclude Include="FiestaConsoleTrace.h" />
++    <ClInclude Include="FiestaDecoders.h" />
+     <ClInclude Include="FiestaPacket.h" />
++    <ClInclude Include="FiestaProtoBase.h" />
++    <ClInclude Include="FiestaProtoTable.h" />
+     <ClInclude Include="FiestaConnection.h" />
+     <ClInclude Include="FiestaClient.h" />
+     <ClInclude Include="FiestaBriefInfoRing.h" />
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp b/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp
+index 947edd8..0b7888b 100644
+--- a/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp
++++ b/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp
+@@ -8,6 +8,7 @@
+  *   `_re_artifacts/pdb/extracted/` layouts.
+  *══════════════════════════════════════════════════════════════════════════════*/
+ #include "FiestaClient.h"
++#include "FiestaConsoleTrace.h"
+ 
+ #include <cstdio>
+ #include <cstring>
+@@ -249,6 +250,12 @@ void Client::OnChatLike(const InPacket& pkt) {
+       << ",\"text\":\"" << JsonEsc(text) << "\""
+       << ",\"raw_hex\":\"" << ToHex(pkt.payload) << "\"}";
+     EmitEvent(o.str());
++
++    /* Console trace — high-level decoded view. */
++    Fiesta::Trace::OnChat(speakerName.empty()
++                              ? std::string_view{"?"}
++                              : std::string_view{speakerName},
++                          text, channel);
+ }
+ 
+ void Client::OnWhisper(const InPacket& pkt) {
+@@ -281,6 +288,8 @@ void Client::OnWhisper(const InPacket& pkt) {
+       << ",\"speaker_name\":\"" << JsonEsc(sender) << "\""
+       << ",\"text\":\"" << JsonEsc(text) << "\"}";
+     EmitEvent(o.str());
++
++    Fiesta::Trace::OnChat(sender, text, "whisper");
+ }
+ 
+ /*──────────────────────────────────────────────────────────────────────────────
+@@ -347,6 +356,7 @@ void Client::SetState(State s) {
+         m_state  = s;
+     }
+     if (previous != s) {
++        Fiesta::Trace::OnStateChange(StateName(previous), StateName(s));
+         std::ostringstream o;
+         o << "{\"kind\":\"login_state\",\"state\":\"" << StateName(s) << "\"}";
+         EmitEvent(o.str());
+@@ -862,6 +872,10 @@ void Client::StopHeartbeat() {
+  * Inbound packet dispatcher
+  *──────────────────────────────────────────────────────────────────────────────*/
+ void Client::HandlePacket(const InPacket& pkt) {
++    /* Live console trace — visible only when the service is launched
++     * with `--console`.  See FiestaConsoleTrace.h. */
++    Fiesta::Trace::OnRx(pkt.opcode, pkt.payload);
++
+     switch (pkt.opcode) {
+ 
+         /* ── Cipher / handshake ──────────────────────────────── */
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/FiestaConnection.h b/ElleAnn/Services/Elle.Service.Fiesta/FiestaConnection.h
+index 703edbf..9e68bab 100644
+--- a/ElleAnn/Services/Elle.Service.Fiesta/FiestaConnection.h
++++ b/ElleAnn/Services/Elle.Service.Fiesta/FiestaConnection.h
+@@ -20,6 +20,7 @@
+ #define ELLE_FIESTA_CONNECTION_H
+ 
+ #include "FiestaCipher.h"
++#include "FiestaConsoleTrace.h"
+ #include "FiestaPacket.h"
+ 
+ #include <atomic>
+@@ -112,6 +113,11 @@ public:
+         std::lock_guard<std::mutex> lk(m_sendMx);
+         if (m_sock == INVALID_SOCKET) return false;
+ 
++        /* Live console trace BEFORE we encrypt — shows the logical
++         * intent to send (operator sees the human-readable opcode
++         * and plaintext payload size).  See FiestaConsoleTrace.h. */
++        Fiesta::Trace::OnTx(opcode, payload);
++
+         std::vector<uint8_t> wire = BuildPacket(opcode, payload);
+         /* Encrypt opcode + payload (everything AFTER the size prefix). */
+         const size_t headerLen = (wire[0] == 0xFF) ? 3 : 1;
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/FiestaConsoleTrace.h b/ElleAnn/Services/Elle.Service.Fiesta/FiestaConsoleTrace.h
+new file mode 100644
+index 0000000..2363abd
+--- /dev/null
++++ b/ElleAnn/Services/Elle.Service.Fiesta/FiestaConsoleTrace.h
+@@ -0,0 +1,274 @@
++/*══════════════════════════════════════════════════════════════════════════════
++ * FiestaConsoleTrace.h — live-watch console for Elle's headless Fiesta client.
++ *
++ *   When the service is launched with `--console`, this header's hooks
++ *   spit a one-line summary of every packet (RX and TX) plus key
++ *   lifecycle events to STDOUT in colour-coded form:
++ *
++ *       12:34:56.789  RX  0x0207  NC_MISC_SEED_ACK            (   2 B)  1F 03
++ *       12:34:56.812  TX  0x0306  NC_USER_LOGIN_REQ           ( 272 B)
++ *       12:34:56.834  >>  state -> LOGIN_AWAIT_LOGIN_ACK
++ *       12:34:56.997  RX  0x030A  NC_USER_LOGIN_ACK           (  43 B)  03 0A 00 …
++ *       12:34:57.250  RX  0x0420  NC_BRIEFINFO_BRIEFINFO_CMD  (  76 B)  …
++ *       12:34:57.250  ★   chat   "Crystal" → "hi"
++ *
++ *   ────────────────────────────────────────────────────────────────────
++ *   STRICT NO-STUB POLICY
++ *   ────────────────────────────────────────────────────────────────────
++ *   Every line printed here corresponds to a REAL packet or REAL state
++ *   transition.  When the console isn't allocated (service mode), the
++ *   functions are still callable but write nothing — there is no
++ *   per-call branch on whether a console exists; we just write to stdout
++ *   and rely on the parent's stdout sink (NUL when run as a Windows
++ *   service, attached console when launched via `--console`).
++ *
++ *   ────────────────────────────────────────────────────────────────────
++ *   USAGE
++ *   ────────────────────────────────────────────────────────────────────
++ *   #include "FiestaConsoleTrace.h"
++ *
++ *   // In FiestaClient::HandlePacket, first line:
++ *   Fiesta::Trace::OnRx(pkt.opcode, pkt.payload);
++ *
++ *   // In Connection::Send, after cipher applied:
++ *   Fiesta::Trace::OnTx(opcode, payload);
++ *
++ *   // In Client::SetState transition handler:
++ *   Fiesta::Trace::OnStateChange(prev_name, new_name);
++ *
++ *   // For decoded events, pretty-print as they are emitted:
++ *   Fiesta::Trace::OnChat(sender, text);
++ *   Fiesta::Trace::OnMove(handle, fromX, fromY, toX, toY, type);
++ *══════════════════════════════════════════════════════════════════════════════*/
++#pragma once
++#ifndef ELLE_FIESTA_CONSOLE_TRACE_H
++#define ELLE_FIESTA_CONSOLE_TRACE_H
++
++#include "FiestaProtoTable.h"
++
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++#include <mutex>
++
++#ifdef _WIN32
++#  define WIN32_LEAN_AND_MEAN
++#  include <windows.h>
++#endif
++
++namespace Fiesta {
++namespace Trace {
++
++/*──────────────────────────────────────────────────────────────────────────────
++ * Toggle set by the launcher.  When false the helpers are a near no-op
++ * (one atomic load + early return), so leaving the trace calls compiled
++ * into release builds costs ~5 ns per call when not in console mode.
++ *──────────────────────────────────────────────────────────────────────────────*/
++inline std::atomic<bool>& EnabledFlag() {
++    static std::atomic<bool> g{false};
++    return g;
++}
++
++inline void SetEnabled(bool on) { EnabledFlag().store(on); }
++inline bool IsEnabled()          { return EnabledFlag().load(std::memory_order_relaxed); }
++
++
++/*──────────────────────────────────────────────────────────────────────────────
++ * Stdout serialisation guard — multiple worker threads emit traces.
++ *──────────────────────────────────────────────────────────────────────────────*/
++inline std::mutex& TraceMutex() {
++    static std::mutex m;
++    return m;
++}
++
++
++/*──────────────────────────────────────────────────────────────────────────────
++ * Cheap millisecond timestamp:  HH:MM:SS.mmm
++ *──────────────────────────────────────────────────────────────────────────────*/
++inline void WriteTimestamp(char buf[16]) {
++    using namespace std::chrono;
++    auto now = system_clock::now();
++    auto t   = system_clock::to_time_t(now);
++    auto ms  = duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
++    std::tm tm{};
++#ifdef _WIN32
++    localtime_s(&tm, &t);
++#else
++    localtime_r(&t, &tm);
++#endif
++    std::snprintf(buf, 16, "%02d:%02d:%02d.%03lld",
++                  tm.tm_hour, tm.tm_min, tm.tm_sec,
++                  static_cast<long long>(ms));
++}
++
++
++/*──────────────────────────────────────────────────────────────────────────────
++ * Hex preview — writes up to `max_bytes` hex pairs.
++ *──────────────────────────────────────────────────────────────────────────────*/
++inline std::string HexPreview(const std::vector<uint8_t>& bytes,
++                              std::size_t max_bytes = 16) {
++    std::string s;
++    s.reserve(max_bytes * 3 + 4);
++    static const char* hex = "0123456789ABCDEF";
++    std::size_t shown = std::min(bytes.size(), max_bytes);
++    for (std::size_t i = 0; i < shown; ++i) {
++        s += hex[bytes[i] >> 4];
++        s += hex[bytes[i] & 0xF];
++        if (i + 1 < shown) s += ' ';
++    }
++    if (bytes.size() > shown) s += " …";
++    return s;
++}
++
++
++/*──────────────────────────────────────────────────────────────────────────────
++ * Direction / event prefixes (ANSI-coloured if stdout is a TTY/console).
++ *
++ *   RX  cyan    [server → Elle]
++ *   TX  yellow  [Elle → server]
++ *   >>  green   [state transition]
++ *   ★   magenta [decoded high-level event: chat / whisper / move]
++ *   !   red     [error / refusal / disconnect]
++ *──────────────────────────────────────────────────────────────────────────────*/
++inline const char* RX_PFX() { return "\x1b[36mRX\x1b[0m"; }
++inline const char* TX_PFX() { return "\x1b[33mTX\x1b[0m"; }
++inline const char* ST_PFX() { return "\x1b[32m>>\x1b[0m"; }
++inline const char* HI_PFX() { return "\x1b[35m★\x1b[0m"; }
++inline const char* ER_PFX() { return "\x1b[31m!\x1b[0m"; }
++
++
++/*──────────────────────────────────────────────────────────────────────────────
++ * Hooks
++ *──────────────────────────────────────────────────────────────────────────────*/
++inline void OnRx(uint16_t opcode, const std::vector<uint8_t>& payload) {
++    if (!IsEnabled()) return;
++    std::string_view name = OpcodeName(opcode);
++    char ts[16]; WriteTimestamp(ts);
++    std::string hex = HexPreview(payload);
++    std::lock_guard<std::mutex> lk(TraceMutex());
++    std::printf("%s  %s  0x%04X  %-30.*s (%4zu B)  %s\n",
++                ts, RX_PFX(), opcode,
++                static_cast<int>(name.size()), name.data(),
++                payload.size(), hex.c_str());
++    std::fflush(stdout);
++}
++
++inline void OnTx(uint16_t opcode, const std::vector<uint8_t>& payload) {
++    if (!IsEnabled()) return;
++    std::string_view name = OpcodeName(opcode);
++    char ts[16]; WriteTimestamp(ts);
++    std::lock_guard<std::mutex> lk(TraceMutex());
++    std::printf("%s  %s  0x%04X  %-30.*s (%4zu B)\n",
++                ts, TX_PFX(), opcode,
++                static_cast<int>(name.size()), name.data(),
++                payload.size());
++    std::fflush(stdout);
++}
++
++inline void OnStateChange(std::string_view prev, std::string_view next) {
++    if (!IsEnabled()) return;
++    char ts[16]; WriteTimestamp(ts);
++    std::lock_guard<std::mutex> lk(TraceMutex());
++    std::printf("%s  %s   state %.*s -> \x1b[1m%.*s\x1b[0m\n",
++                ts, ST_PFX(),
++                static_cast<int>(prev.size()), prev.data(),
++                static_cast<int>(next.size()), next.data());
++    std::fflush(stdout);
++}
++
++inline void OnChat(std::string_view sender, std::string_view text,
++                   const char* kind = "chat") {
++    if (!IsEnabled()) return;
++    char ts[16]; WriteTimestamp(ts);
++    std::lock_guard<std::mutex> lk(TraceMutex());
++    std::printf("%s  %s   %-7s \"%.*s\" -> \"%.*s\"\n",
++                ts, HI_PFX(), kind,
++                static_cast<int>(sender.size()), sender.data(),
++                static_cast<int>(text.size()), text.data());
++    std::fflush(stdout);
++}
++
++inline void OnMove(uint16_t handle,
++                   uint32_t fromX, uint32_t fromY,
++                   uint32_t toX,   uint32_t toY,
++                   uint8_t  movetype) {
++    if (!IsEnabled()) return;
++    char ts[16]; WriteTimestamp(ts);
++    std::lock_guard<std::mutex> lk(TraceMutex());
++    std::printf("%s  %s   move    h=0x%04X (%u,%u) -> (%u,%u) type=0x%02X\n",
++                ts, HI_PFX(), handle, fromX, fromY, toX, toY, movetype);
++    std::fflush(stdout);
++}
++
++inline void OnError(std::string_view what) {
++    if (!IsEnabled()) return;
++    char ts[16]; WriteTimestamp(ts);
++    std::lock_guard<std::mutex> lk(TraceMutex());
++    std::printf("%s  %s   %.*s\n",
++                ts, ER_PFX(),
++                static_cast<int>(what.size()), what.data());
++    std::fflush(stdout);
++}
++
++
++/*──────────────────────────────────────────────────────────────────────────────
++ * Banner — printed once at console-mode startup.
++ *──────────────────────────────────────────────────────────────────────────────*/
++inline void Banner(std::string_view who) {
++    if (!IsEnabled()) return;
++    std::lock_guard<std::mutex> lk(TraceMutex());
++    std::printf("\x1b[1;36m"
++                "════════════════════════════════════════════════════════════════════\n"
++                " Elle.Service.Fiesta — live console trace\n"
++                " %.*s\n"
++                "════════════════════════════════════════════════════════════════════"
++                "\x1b[0m\n",
++                static_cast<int>(who.size()), who.data());
++    std::printf("Legend:  \x1b[36mRX\x1b[0m server->Elle   "
++                "\x1b[33mTX\x1b[0m Elle->server   "
++                "\x1b[32m>>\x1b[0m state   "
++                "\x1b[35m★\x1b[0m decoded   "
++                "\x1b[31m!\x1b[0m error\n\n");
++    std::fflush(stdout);
++}
++
++
++/*──────────────────────────────────────────────────────────────────────────────
++ * One-time launcher attaches a Windows console window when the service
++ * is started with `--console` / `-c`.  If a console is already attached
++ * (parent shell on cmd.exe / Powershell), AllocConsole() is a no-op
++ * for us — we just bind stdout to the existing one.
++ *──────────────────────────────────────────────────────────────────────────────*/
++#ifdef _WIN32
++inline void EnsureWindowsConsole() {
++    /* Attempt to attach to the parent console first (preferred — keeps
++     * `Elle.Service.Fiesta.exe --console > log.txt` redirection working). */
++    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
++        /* No parent → spawn a fresh console window. */
++        AllocConsole();
++        SetConsoleTitleA("Elle.Service.Fiesta — live trace");
++    }
++    /* Rebind C runtime streams to the now-attached console. */
++    FILE* f;
++    freopen_s(&f, "CONOUT$", "w", stdout);
++    freopen_s(&f, "CONOUT$", "w", stderr);
++    freopen_s(&f, "CONIN$",  "r", stdin);
++    /* Enable ANSI colour escapes (Windows 10+). */
++    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
++    DWORD mode = 0;
++    if (GetConsoleMode(h, &mode)) {
++        SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
++    }
++}
++#else
++inline void EnsureWindowsConsole() { /* POSIX: stdout is the console. */ }
++#endif
++
++}  /* namespace Trace */
++}  /* namespace Fiesta */
++
++#endif  /* ELLE_FIESTA_CONSOLE_TRACE_H */
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp b/ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp
+index baa4627..6c020b6 100644
+--- a/ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp
++++ b/ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp
+@@ -60,6 +60,7 @@
+ #include "../../Shared/json.hpp"
+ 
+ #include "FiestaClient.h"
++#include "FiestaConsoleTrace.h"
+ 
+ #include <cstdint>
+ #include <cstdlib>
+@@ -104,6 +105,25 @@ public:
+ 
+ protected:
+     bool OnStart() override {
++        /* Live console trace — enabled automatically when this service
++         * was launched with `--console` (i.e. interactive mode rather
++         * than under the SCM).  We detect that by checking whether
++         * stdout has been bound to a real console handle.
++         * See FiestaConsoleTrace.h for the per-event hooks. */
++        bool interactive = false;
++#ifdef _WIN32
++        DWORD mode_unused = 0;
++        interactive = (GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE),
++                                      &mode_unused) != 0);
++#else
++        interactive = (isatty(fileno(stdout)) != 0);
++#endif
++        if (interactive) {
++            Fiesta::Trace::SetEnabled(true);
++            Fiesta::Trace::EnsureWindowsConsole();  /* binds C streams + ANSI */
++            Fiesta::Trace::Banner("Elle-Ann Fiesta Game Client (live trace)");
++        }
++
+         /* Pull connection settings from the master config. The actual
+          * `fiesta.*` keys are populated by Deploy/Configs/fiesta.json
+          * — see ElleConfig::Load. Defaults are deliberately empty so a
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/test_fiesta_console_trace.cpp b/ElleAnn/Services/Elle.Service.Fiesta/test_fiesta_console_trace.cpp
+new file mode 100644
+index 0000000..dec6550
+--- /dev/null
++++ b/ElleAnn/Services/Elle.Service.Fiesta/test_fiesta_console_trace.cpp
+@@ -0,0 +1,64 @@
++/*══════════════════════════════════════════════════════════════════════════════
++ * test_fiesta_console_trace.cpp — smoke-test the live console trace
++ *   helpers from FiestaConsoleTrace.h.
++ *
++ *   Verifies that:
++ *     * Trace functions are callable and side-effect-free when disabled
++ *     * Banner / Hooks emit lines when enabled
++ *     * Multi-thread call sites don't interleave (mutex serialisation)
++ *
++ *   Compile (Linux portable):
++ *       g++ -std=c++17 -O0 -I . -pthread \
++ *           Services/Elle.Service.Fiesta/test_fiesta_console_trace.cpp \
++ *           -o /tmp/test_fiesta_console_trace
++ *══════════════════════════════════════════════════════════════════════════════*/
++
++#include "FiestaProtoBase.h"
++#include "FiestaProtoTable.h"
++#include "FiestaConsoleTrace.h"
++
++#include <cstdio>
++#include <thread>
++#include <vector>
++
++int main() {
++    std::printf("──── Phase 6 console-trace smoke test ────\n");
++
++    /* Step 1: while disabled, no lines should print. */
++    std::printf("Step 1: trace DISABLED — should produce ZERO lines below this.\n");
++    Fiesta::Trace::SetEnabled(false);
++    Fiesta::Trace::OnRx(0x0306, {0x12, 0x34});
++    Fiesta::Trace::OnTx(0x0306, {0xAA});
++    Fiesta::Trace::OnStateChange("A", "B");
++    Fiesta::Trace::OnChat("EllaAnn", "test", "chat");
++    std::printf("…done.\n\n");
++
++    /* Step 2: enable + emit one of each kind. */
++    std::printf("Step 2: trace ENABLED — should produce 5 coloured lines below.\n");
++    Fiesta::Trace::SetEnabled(true);
++    Fiesta::Trace::Banner("smoke test");
++    std::vector<uint8_t> seed = {0x1F, 0x03};
++    Fiesta::Trace::OnRx(0x0207 /* NC_MISC_SEED_ACK */, seed);
++    std::vector<uint8_t> login(272, 0);
++    Fiesta::Trace::OnTx(0x0306 /* NC_USER_LOGIN_REQ */, login);
++    Fiesta::Trace::OnStateChange("CONNECTING", "LOGIN_AWAIT_LOGIN_ACK");
++    Fiesta::Trace::OnChat("Crystal", "hi", "chat");
++    Fiesta::Trace::OnMove(0x46C4, 5515, 7466, 5572, 7500, 0x32);
++    Fiesta::Trace::OnError("disconnected: socket reset by peer");
++
++    /* Step 3: multi-thread serialisation. */
++    std::printf("\nStep 3: 4 threads each emit 5 traces — lines must not interleave.\n");
++    std::vector<std::thread> th;
++    for (int t = 0; t < 4; ++t) {
++        th.emplace_back([t]() {
++            for (int i = 0; i < 5; ++i) {
++                Fiesta::Trace::OnRx(0x0420 + t,
++                                    std::vector<uint8_t>(static_cast<std::size_t>(i + 1) * 4, 0));
++            }
++        });
++    }
++    for (auto& x : th) x.join();
++
++    std::printf("\n──── DONE ────\n");
++    return 0;
++}

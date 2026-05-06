@@ -43,7 +43,11 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="FiestaCipher.h" />
+    <ClInclude Include="FiestaConsoleTrace.h" />
+    <ClInclude Include="FiestaDecoders.h" />
     <ClInclude Include="FiestaPacket.h" />
+    <ClInclude Include="FiestaProtoBase.h" />
+    <ClInclude Include="FiestaProtoTable.h" />
     <ClInclude Include="FiestaConnection.h" />
     <ClInclude Include="FiestaClient.h" />
     <ClInclude Include="FiestaBriefInfoRing.h" />
