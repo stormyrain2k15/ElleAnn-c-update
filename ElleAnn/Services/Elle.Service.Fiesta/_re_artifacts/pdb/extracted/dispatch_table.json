@@ -3772,9 +3772,13 @@
     "opcode_name": "NC_USER_RIGHTVERSION_ACK",
     "struct_name": null,
     "pdb_sizeof": null,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      2
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Inbound"
+    ],
     "category": "user_rightversion",
     "drift": null,
     "decoder": "unknown_struct"
@@ -5950,7 +5954,7 @@
     "wire_lengths": [
       97
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -5969,7 +5973,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -5988,7 +5992,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -6007,7 +6011,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -6058,14 +6062,15 @@
     "struct_name": "PROTO_NC_CHAR_OPTION_IMPROVE_SET_ETC3_ACK",
     "pdb_sizeof": 1,
     "wire_lengths": [
+      2,
       90
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
     "category": "char_option",
-    "drift": "wire 90 vs pdb 1 (delta +89)",
+    "drift": "wire 2,90 vs pdb 1",
     "decoder": "head+tail"
   },
   {
@@ -6207,7 +6212,7 @@
       262,
       800
     ],
-    "wire_count": 20,
+    "wire_count": 21,
     "directions": [
       "Inbound"
     ],
@@ -6226,7 +6231,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -6243,14 +6248,15 @@
     "struct_name": "PROTO_NC_CHAR_OPTION_IMPROVE_INIT_ETC4_REQ",
     "pdb_sizeof": 1,
     "wire_lengths": [
+      6,
       24
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
     "category": "char_option",
-    "drift": "wire 24 vs pdb 1 (delta +23)",
+    "drift": "wire 6,24 vs pdb 1",
     "decoder": "head+tail"
   },
   {
@@ -6265,7 +6271,7 @@
       2,
       86
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -7887,9 +7893,10 @@
     "struct_name": null,
     "pdb_sizeof": null,
     "wire_lengths": [
+      6,
       8
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -8028,7 +8035,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -8137,7 +8144,7 @@
     "wire_lengths": [
       16
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -8846,7 +8853,7 @@
     "wire_lengths": [
       238
     ],
-    "wire_count": 5,
+    "wire_count": 6,
     "directions": [
       "Inbound"
     ],
@@ -11682,12 +11689,16 @@
     "opcode_name": "NC_ACT_PLAY_SOUND_CMD",
     "struct_name": "PROTO_NC_ACT_PLAY_SOUND_CMD",
     "pdb_sizeof": 2,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      5
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
     "category": "act_play",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 5 vs pdb 2 (delta +3)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0879",
@@ -18765,7 +18776,7 @@
     "wire_lengths": [
       978
     ],
-    "wire_count": 3,
+    "wire_count": 4,
     "directions": [
       "Outbound"
     ],

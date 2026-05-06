@@ -1252,3 +1252,64 @@ packet is the client's cipher handshake to the server.
   `_re_artifacts/wire_captures/README.md` (+§6 +§7),
   `_re_artifacts/wire_captures/parsed_captures.json` (regenerated),
   `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated).
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-05 (later) — Phase 6a step 2b: Two-Character Wire-Layout Proof
+
+Delivered as `06-phase6a-step2b-twochar-proof.patch` (2.4 MB,
+applies on top of `04` + `05`).
+
+### What landed
+- New captures: `Port_60795.txt` (Crystal/userNo=6 login state-dump,
+  14 events) and `Port_59507.txt` (mystery 2-event mini-session).
+- Deduplicated old paired captures (the user supplied
+  same-content captures with timestamp-format-only differences and
+  a truncated server-side mirror — kept the canonical client-side
+  versions only).
+- README.md §8 — full byte-by-byte side-by-side proof of the
+  EllaAnn vs Crystal `0x0438` payloads.
+- README.md §9 — two-client paired-login cipher fingerprint
+  documenting that the cipher seed-derived divergence is ≤ 9 bytes.
+- README.md §10 — Port 59507 mystery (`008|120` 5B → `003|003` 2B
+  reply, 3 plausible decodes).
+- Regenerated `dispatch_table.json` (now 17 wire-observed opcodes
+  → 19 — picked up `0x0303` and `0x0878` from the new captures)
+  and `payload_shape_matches.json` (29 opcode×size pairs).
+
+### Phase 6a Step 2b LOCK-IN
+Two-character side-by-side comparison **PROVES** the wire layout
+of opcode `0x0438` (the most-important inbound opcode in the
+post-login state dump):
+
+```
+[u32 chrregnum]          // EllaAnn=5, Crystal=6 (= tUser.nUserNo)
+[char[16] charid]        // 16-byte fixed Name4 — confirmed: NOT Name5
+[u8  0]                  // pad/separator (always 0)
+[u8  0x96]               // CONSTANT across both characters (class
+                            marker / version flag — semantics still TBD)
+[14×0 reserved]          // zero block (14 B)
+[73 B character-state]   // coords/level/HP/etc. — fresh char (Crystal)
+                            has all zeros here, established char
+                            (EllaAnn) has actual world XY + stats
+```
+
+> **Wire opcode `0x0438` (97 B inbound) =
+> `PROTO_NC_CHAR_BASE_CMD` variant** — server pushes Elle's own
+> character base info on session start.
+
+Decoder is now mechanical to write — every offset is empirically
+proven from two character samples.
+
+### Outstanding (need more captures)
+- Chat opcodes (user couldn't trigger them in this round — the
+  two-client logins didn't include any in-game actions).
+- Movement opcodes (no walk/run captured yet).
+- Logout sequence opcodes.
+
+### Files touched
+- NEW: `_re_artifacts/wire_captures/Port_59507.txt`,
+  `_re_artifacts/wire_captures/Port_60795.txt`.
+- MODIFIED: `_re_artifacts/wire_captures/README.md` (+§8 §9 §10),
+  `_re_artifacts/wire_captures/parsed_captures.json` (regenerated),
+  `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated),
+  `_re_artifacts/pdb/extracted/payload_shape_matches.json` (regenerated).

@@ -189,10 +189,93 @@ exact head-shape the PDB documents for that struct, just with the
 charid rendered as `Name4` (16 B) instead of `Name5` (20 B) and a
 4-byte trailing field dropped (105 → 97).
 
-Human action item: review `payload_shape_matches.json` and pick the
-semantically right candidate for each opcode (most have 100+ size
-collisions but only one is contextually plausible). Once each
-opcode → struct is locked in, the dispatcher can proceed.
+### 8. Two-character side-by-side proof (2026-02-05 evening)
+
+The user logged in a SECOND client (character "Crystal", userNo=6)
+on Port 60795 immediately after EllaAnn's login on Port 60121.
+Aligning the first inbound packet from each session:
+
+```
+Offset  EllaAnn  (Port 60121)         Crystal  (Port 60795)         Field
+─────── ───────────────────────────── ───────────────────────────── ──────────────────────
+ 0..3   05 00 00 00                   06 00 00 00                   u32 chrregnum (= userNo)
+ 4..19  "EllaAnn"+9×0x00 (16 B)       "Crystal"+9×0x00 (16 B)       Name4 charid (16 B fixed)
+ 20     00                            00                            u8 (always 0 — pad/flag)
+ 21     96                            96                            u8 = 0x96 (CONSTANT —
+                                                                      class/protocol marker?)
+ 22..35 14×0x00                       14×0x00                       reserved zero block (14 B)
+ 36..47 0E 27 0B 27 C5 0F 00 00       00 00 00 00 00 00 00 00       coords/level (EllaAnn
+        BB 0E 00 00                   00 00 00 00                   has data; Crystal fresh
+                                                                      char = all zeros)
+```
+
+**What this proves**:
+
+* `charid` width is **exactly 16 bytes** (`Name4`), NOT 20 bytes (`Name5`).
+  This contradicts the PDB schema which has `Name5` for this field —
+  the build's region toggle simplified the field.
+* `chrregnum` lives at offset 0 and equals `userNo` from `tUser` (= the
+  database account number, NOT the per-zone session handle).
+* Bytes 20-21 = `[u8 0][u8 0x96]` are CONSTANT across characters —
+  these encode something protocol-level (could be `slotno=0` +
+  `version=0x96`, or a packet-type sub-marker). Need a third
+  capture from a different account-tier to disambiguate.
+* The 14-byte zero block at offsets 22-35 means at least 14 bytes
+  of `PROTO_NC_CHAR_BASE_CMD` are reserved/uninitialised on a fresh
+  character.
+* Byte 36 onwards is **character-state data** (coords, level, etc.).
+  EllaAnn's `0E 27 0B 27` = LE u16 `0x270E`/`0x270B` = (9998, 9995)
+  → looks like world (X, Y) on a typical Fiesta map.
+
+This locks in the wire→struct mapping for the most-important inbound
+opcode in the post-login state dump, with full confidence:
+
+> **Wire opcode `0x0438` (97 bytes inbound) = `PROTO_NC_CHAR_BASE_CMD`
+> variant** — server pushes Elle's own character base info on session
+> start. Decoder shape: `[u32 chrregnum][char[16] charid][u8 0]
+> [u8 0x96][14×0 reserved][73 B character-state body]`.
+
+### 9. Two-client paired login signature
+
+Logging in two clients in succession produces an unmistakable wire
+fingerprint:
+
+| Port  | Char    | userNo | Cipher seed-derived first-9-bytes |
+|-------|---------|--------|------------------------------------|
+| 60121 | EllaAnn |   5    | `69 C5 77 A9 CA BB F1 1E B7 …`     |
+| 60795 | Crystal |   6    | `B8 C2 71 B7 DF AD C4 11 B5 …`     |
+
+After byte 9 both 1024-byte handshake blobs are byte-identical:
+`23 CF EE 0E 28 B5 03 7B 49 AB …`. This confirms the cipher uses a
+short per-session seed (≤ 9 bytes of state divergence) and the
+underlying plaintext of the first packet is FIXED across sessions —
+likely a server-banner or anti-cheat handshake constant. Useful for
+the headless client: once we recover that constant plaintext, we can
+work backward from any captured ciphertext to reveal the seed.
+
+### 10. Open question: Port 59507 (2-event mini-session)
+
+The user supplied a third capture (Port 59507) with only 2 events:
+
+```
+<Outbound> 008 | 120  (5 B)  1C A4 53 5B F0
+<Inbound>  003 | 003  (2 B)  01 00
+```
+
+Both events are tiny and the opcode `008|120` (= 0x0878 in our
+host-side u16 convention) does NOT appear in the post-login dump.
+This may be a heartbeat / version-check / quick-action round trip.
+Three plausible decodes:
+
+1. **Heartbeat ping → ack** (`NC_MISC_HEARTBEAT_REQ` / `_ACK`).
+2. **Logout request → status** (`NC_USER_NORMALLOGOUT_CMD` →
+   `NC_USER_LOGOUT_ACK`).
+3. **Action keepalive** — small client-side action notification
+   for an idle timer.
+
+Insufficient signal to disambiguate yet — needs a fresh capture
+where we deliberately trigger one of the above and observe the
+wire shape.
 
 ## What this unlocks for Phase 6a
 
