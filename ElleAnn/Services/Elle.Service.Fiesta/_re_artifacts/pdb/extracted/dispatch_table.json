@@ -5950,7 +5950,7 @@
     "wire_lengths": [
       97
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -5969,7 +5969,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -5988,7 +5988,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -6007,7 +6007,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -6041,7 +6041,7 @@
     "wire_lengths": [
       5758
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -6060,7 +6060,7 @@
     "wire_lengths": [
       90
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -6199,17 +6199,20 @@
     "wire_lengths": [
       3,
       12,
+      21,
       82,
       162,
       182,
-      262
+      227,
+      262,
+      800
     ],
-    "wire_count": 16,
+    "wire_count": 20,
     "directions": [
       "Inbound"
     ],
     "category": "char_option",
-    "drift": "wire 3,12,82,162,182,262 vs pdb 1",
+    "drift": "wire 3,12,21,82,162,182,227,262,800 vs pdb 1",
     "decoder": "head+tail"
   },
   {
@@ -6223,7 +6226,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -6242,7 +6245,7 @@
     "wire_lengths": [
       24
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -6259,14 +6262,15 @@
     "struct_name": "PROTO_NC_CHAR_OPTION_IMPROVE_INIT_ETC4_ACK",
     "pdb_sizeof": 1,
     "wire_lengths": [
-      2
+      2,
+      86
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
     "category": "char_option",
-    "drift": "wire 2 vs pdb 1 (delta +1)",
+    "drift": "wire 2,86 vs pdb 1",
     "decoder": "head+tail"
   },
   {
@@ -7885,7 +7889,7 @@
     "wire_lengths": [
       8
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -8024,7 +8028,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -8133,7 +8137,7 @@
     "wire_lengths": [
       16
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -8842,7 +8846,7 @@
     "wire_lengths": [
       238
     ],
-    "wire_count": 4,
+    "wire_count": 5,
     "directions": [
       "Inbound"
     ],
@@ -18761,7 +18765,7 @@
     "wire_lengths": [
       978
     ],
-    "wire_count": 2,
+    "wire_count": 3,
     "directions": [
       "Outbound"
     ],

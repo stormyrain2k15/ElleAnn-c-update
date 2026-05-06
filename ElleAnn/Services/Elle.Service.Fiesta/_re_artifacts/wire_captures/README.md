@@ -1,14 +1,17 @@
-# Wire Captures — 2026-02-05 Fiesta server login sequence
+# Wire Captures — 2026-02-05 Fiesta server login + post-login state dumps
 
-These four port logs are LIVE packet captures from the user's Fiesta server,
-captured at roughly the same login session walking through the server chain:
+These five port logs are LIVE packet captures of the user's Fiesta server,
+captured during three different login + walk-around sessions. The 2026-02-05
+session at port 60121 has BOTH a client-side and a (truncated) server-side
+capture which let us cross-validate the direction labels — see §6 below.
 
-| Port  | Time window         | Server role (inferred)         |
-|-------|---------------------|--------------------------------|
-| 55891 | 18:50:22 – 18:50:23 | LoginServer (initial auth)     |
-| 56538 | 18:55:29 – 18:55:30 | World/Bridge (re-auth)         |
-| 56543 | 18:55:46 – 18:55:53 | Zone/GameServer (in-game data) |
-| 56567 | 18:56:40 – 18:56:40 | Shop / instance / sub-server   |
+| Port  | Time window         | Server role (inferred)         | Source       |
+|-------|---------------------|--------------------------------|--------------|
+| 55891 | 18:50:22 – 18:50:23 | LoginServer (initial auth)     | client-side  |
+| 56538 | 18:55:29 – 18:55:30 | World/Bridge (re-auth)         | client-side  |
+| 56543 | 18:55:46 – 18:55:53 | Zone/GameServer (in-game data) | client-side  |
+| 56567 | 18:56:40 – 18:56:40 | Shop / instance / sub-server   | client-side  |
+| 60121 | 18:02:12 – 18:02:14 | Zone post-login state dump     | client-side  |
 
 (Times suggest the user logged in to LoginServer, then character-selected,
 then entered world. Port assignments aren't documented here yet — they need
@@ -136,6 +139,60 @@ Action item before any handler logic gets written:
 
 `build_dispatch_table.py` exposes a `--remap` hook for this
 calibration loop (TODO Phase 6a-step-2).
+
+### 6. Direction-label resolution (paired captures, 2026-02-05 18:02)
+
+The user later provided BOTH a server-side capture AND a client-side
+capture for **the same Port 60121 session at the same wall-clock**.
+Comparing event-by-event:
+
+* The 1024-byte first event (`<Outbound>` `016 | 010`) has identical
+  bytes in both captures.
+* Event #2 (`<Inbound>` `004 | 056`, 97 bytes) carries `05 00 00 00
+  45 6C 6C 65 41 6E 6E 00 …` (Elle's userNo + name) — also identical
+  bytes between the two captures.
+
+Conclusion (locked in): **direction labels are from the client's
+network perspective**, NOT the server's:
+
+> `<Inbound>`  = arriving at the **client** (server → client).
+> `<Outbound>` = leaving the **client** (client → server).
+
+This makes the encryption polarity make sense too:
+* `<Outbound>` (client → server) packets are encrypted; the very
+  first one (`016 | 010` 1024 B) is the cipher handshake the client
+  sends.
+* `<Inbound>`  (server → client) packets are PLAINTEXT in this build
+  — the cipher is one-way client→server only on this region toggle.
+
+So the opcode pool we've been categorising contains **server-pushed
+state-dump opcodes** (NC_*_CMD / NC_*_ACK), not client requests.
+The "EllaAnn identity packet" at `0x0438` is the server pushing
+Elle's own character base record back to her on session start.
+
+### 7. Shape-match calibration (Phase 6a step-2 tool)
+
+`_re_artifacts/pdb/shape_match_payloads.py` was added to ignore
+opcode IDs entirely and instead match each `(wire_opcode,
+payload_len)` tuple against the 2 723-entry PDB struct catalogue
+by sizeof.  Output sample (full file is `extracted/payload_shape_matches.json`):
+
+| Wire op  | Plen | Top struct candidates by sizeof (±8)                |
+|----------|-----:|-----------------------------------------------------|
+| 0x0438   |   97 | PROTO_NC_CHAR_BASE_CMD (105), PROTO_NC_USER_TW_PASSWORD_CHECK_REQ (102), … |
+| 0x043E   |   90 | PROTO_NC_USER_WORLDSELECT_ACK (83) — wrong direction; PROTO_NC_PRISON_OK_CMD (82) |
+| 0x0602   |  238 | PROTO_NC_BAT_LEVELUP_CMD (235), PROTO_NC_GUILD_WAR_TARGET_CMD (234) |
+
+The 0x0438 → `PROTO_NC_CHAR_BASE_CMD` match is the strongest signal:
+the wire payload starts with `[u32 chrregnum][char[16] charid]` — the
+exact head-shape the PDB documents for that struct, just with the
+charid rendered as `Name4` (16 B) instead of `Name5` (20 B) and a
+4-byte trailing field dropped (105 → 97).
+
+Human action item: review `payload_shape_matches.json` and pick the
+semantically right candidate for each opcode (most have 100+ size
+collisions but only one is contextually plausible). Once each
+opcode → struct is locked in, the dispatcher can proceed.
 
 ## What this unlocks for Phase 6a
 

@@ -2439,3 +2439,28 @@ analysis.
   `Services/Elle.Service.Fiesta/_re_artifacts/wire_captures/README.md`
   (+§5 build-mismatch finding).
 - DELIVERED: `/app/04-phase6a-protobase.patch` (1.3 MB, 38 378 lines).
+
+---
+
+## Session Feb-2026 (continued) — Phase 6a Step 2: Shape-Matcher + Direction Resolution
+
+(Full narrative: `/app/memory/CHANGELOG.md`.)
+
+### Status
+- **Phase 6a step 2 (DONE, packaged as `05-phase6a-step2-shapematcher.patch`)**:
+  Built `shape_match_payloads.py` to bypass the build-mismatch problem.
+  Cross-validated the Port-60121 paired client/server captures — direction
+  labels confirmed from the client's network PoV. Top hit: `0x0438` / 97B
+  matches `PROTO_NC_CHAR_BASE_CMD` (sizeof 105) with charid trimmed to
+  Name4 + 4-byte tail drop. Patch applies to clean baseline, all tests
+  green.
+
+### Phase 6a — Step 3 (next)
+Once user picks the right candidate per opcode from
+`payload_shape_matches.json`, hand-write the decoders for:
+  * `0x0438` → `PROTO_NC_CHAR_BASE_CMD` variant (97B trim)
+  * `0x0439`, `0x043A`, `0x043B` (4/6 byte status updates — TBD)
+  * `0x043D` (skill-list dump — custom struct)
+  * `0x044A`, `0x0602` (state-dump ACKs — TBD)
+  * `0x0701`/`0x0801`/etc. login-chain decoders (already correct in PDB
+     mapping; just not yet observed in captures).

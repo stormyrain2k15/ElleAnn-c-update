@@ -1179,3 +1179,76 @@ through `--remap` (TODO: build_dispatch_table.py step-2).
 - MODIFIED: `FiestaPacket.h` (refactor — removed duplicate types,
   +include FiestaProtoBase.h),
   `_re_artifacts/wire_captures/README.md` (+§5 finding).
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-05 — Phase 6a step 2: Shape-Matcher + Direction Resolution
+
+Delivered as `05-phase6a-step2-shapematcher.patch` (1.6 MB, on top
+of `04-phase6a-protobase.patch`).
+
+### What landed
+- `_re_artifacts/wire_captures/Port_60121.txt` (NEW) — fresh capture
+  the user supplied. Initially provided as a truncated server-side
+  log (7 events); replaced with the full client-side capture (17
+  events) once the user uploaded it. Same byte stream, full coverage.
+- `_re_artifacts/pdb/shape_match_payloads.py` (NEW) — Phase 6a
+  step-2 calibration tool. For each (wire_opcode, payload_len)
+  observed, lists candidate PROTO_NC_* structs whose sizeof matches
+  (exact + ±8 slack). Writes `extracted/payload_shape_matches.json`.
+- `_re_artifacts/pdb/extracted/payload_shape_matches.json` (NEW,
+  generated) — 26 (opcode, size) pairs with up to 200+ candidate
+  struct names per pair. Human-curated step.
+- `_re_artifacts/wire_captures/README.md` — added §6 (direction
+  label resolution: `<Inbound>` = arrives at client; `<Outbound>` =
+  leaves client) and §7 (shape-match calibration sample table).
+- `_re_artifacts/pdb/extracted/dispatch_table.json` — regenerated
+  to include the 5th capture's events.
+- `_re_artifacts/wire_captures/parsed_captures.json` — 90 events
+  total now (was 72).
+
+### Direction Polarity LOCKED IN (paired-capture cross-check)
+The user supplied BOTH a server-side AND a client-side capture for
+the same Port-60121 session at the same wall-clock. Event-by-event
+byte comparison showed:
+  * Bytes are identical between the two captures.
+  * Direction labels are stable (`<Inbound>` events identical in
+    both files).
+
+Therefore: **direction labels are from the client's network
+perspective** — `<Inbound>` = arriving at the client (server →
+client; PLAINTEXT in this build), `<Outbound>` = leaving the client
+(client → server; ENCRYPTED). The 1024-byte `<Outbound>` opening
+packet is the client's cipher handshake to the server.
+
+### Shape-Matcher Findings (top hits)
+* `0x0438` / 97 bytes (the "EllaAnn identity" packet): best
+  candidate is **`PROTO_NC_CHAR_BASE_CMD`** (PDB sz=105). The wire
+  payload starts with `[u32 chrregnum=5][char[16] charid="EllaAnn"]
+  …`, exactly the head-shape PDB documents for that struct, just
+  with charid trimmed to Name4 (16B) instead of Name5 (20B) and a
+  4-byte trailing field dropped. **Confirms** what the original
+  README §5 hypothesised.
+* `0x043D` / 5758 bytes: server's full skill list dump. No exact
+  PDB match — header bytes `4B 03 DF 01 05 00 00 00` followed by
+  ~480 12-byte records with shape `[u16 owner_id][u16 skill_id]
+  [8 bytes cooldown/state]`. Likely
+  `PROTO_NC_CHAR_USEINFO_SKILL_INFO_CMD` (custom region variant).
+* `0x0602` / 238 bytes: `PROTO_NC_BAT_LEVELUP_CMD` (sz=235) is the
+  closest match (within ±8); also a custom-region likely-rename.
+
+### Tests
+- Patch sequence (`04` then `05`) applied cleanly to a fresh
+  baseline (commit a88be2e^), `Debug/test_phase6a_protobase.cpp`
+  re-compiles + passes (10/10 login chain, table=2300 rows).
+- `shape_match_payloads.py` runs deterministically and produces
+  the candidate-shape JSON in <2s.
+
+### Files touched
+- NEW:
+  `_re_artifacts/pdb/shape_match_payloads.py`,
+  `_re_artifacts/pdb/extracted/payload_shape_matches.json`,
+  `_re_artifacts/wire_captures/Port_60121.txt`.
+- MODIFIED:
+  `_re_artifacts/wire_captures/README.md` (+§6 +§7),
+  `_re_artifacts/wire_captures/parsed_captures.json` (regenerated),
+  `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated).
