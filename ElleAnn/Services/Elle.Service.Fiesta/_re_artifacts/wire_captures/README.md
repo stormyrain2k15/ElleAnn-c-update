@@ -377,6 +377,125 @@ sender, server prepends the sender name and re-broadcasts).
 
 ### 14. Move broadcast opcode `0x2018` — wire shape inferred
 
+Empirically derived from 2 122 in-session observations on Port 61496
+(ZoneServer):
+
+| Offset | Bytes (sample)        | Field interpretation                |
+|--------|----------------------|-------------------------------------|
+| 0..1   | `C4 46`              | u16 entity handle (LE)              |
+| 2..5   | `8B 15 00 00`        | u32 fromX (LE)                      |
+| 6..9   | `2A 1D 00 00`        | u32 fromY (LE)                      |
+| 10..13 | `C4 15 00 00`        | u32 toX   (LE)                      |
+| 14..17 | `4C 1D 00 00`        | u32 toY   (LE)                      |
+| 18     | `32`                 | u8  movetype (0x32 = walk)          |
+| 19..20 | `00 00`              | u16 flags (always 0 in observations)|
+
+Total payload = **21 bytes**. Matches the head-shape of
+`PROTO_NC_ACT_SOMEONEMOVEWALK_CMD` from the PDB. This is the only
+opcode worth implementing for Phase 6b's spatial world model — it
+is sent ~30× per second per visible entity in motion.
+
+### 15. ROSETTA STONE — server-side captures recovered (2026-02-06)
+
+The user supplied SERVER-SIDE captures (filenames `Port_9010-N.txt`,
+`Port_9110.txt`, `Port_9120.txt`) from a tool that taps the official
+Fiesta server's IOCP receive callback AFTER the cipher inverts the
+client's payload. These are stored in `server_side/` and named by
+session for clarity:
+
+| File                                    | Server port | Client port | Stage           | Events |
+|-----------------------------------------|-------------|-------------|-----------------|--------|
+| server_side/login_session1_p9010.txt    | 9010        | 59804       | LoginServer     | 14     |
+| server_side/login_session2_p9010.txt    | 9010        | 60000       | LoginServer     | 9      |
+| server_side/login_session3_p9010.txt    | 9010        | 60018       | LoginServer     | 10     |
+| server_side/wm_session1_p9110.txt       | 9110        | 59822       | WorldManager    | 45     |
+| server_side/wm_session2_p9110.txt       | 9110        | 60024       | WorldManager    | 45     |
+| server_side/wm_session3_p9110.txt       | 9110        | 60024       | WorldManager    | 45     |
+| server_side/zone_session1_p9120.txt     | 9120        | 59838       | ZoneServer      | 1083   |
+| server_side/zone_session2_p9120.txt     | 9120        | 60028       | ZoneServer      | 1747   |
+| server_side/fiesta_server.pcapng        | (binary)    | —           | Wireshark dump  | —      |
+
+The crucial property: **server-side opcodes are STABLE** (e.g. login
+opcode `0x0C06` appears ONCE per session at the same wire position),
+while the corresponding client-side capture for the SAME session
+shows a different rolling opcode each time. This proves:
+
+1. The Fiesta cipher is per-packet (each Outbound packet has its own
+   key), confirming §12.
+2. The cipher is **payload-XOR not opcode-XOR alone** — the cipher
+   transforms the entire `[opcode 2B][payload]` block.
+3. Plaintext recovery for any single packet is now mechanical:
+   server-side payload XOR client-side payload = the per-packet
+   cipher key.
+
+#### Cipher key recovery experiment
+
+Three login packets aligned (client encrypted ↔ server decrypted):
+
+| Event | Client opcode | Server opcode | Recovered key (first 16 B)                 |
+|-------|---------------|---------------|---------------------------------------------|
+| 1     | 0x5101        | 0x0C01        | `5d 00 37 31 cf 30 8b`                       |
+| 3     | 0xE3C8        | 0x0C06        | (length mismatch — see below)               |
+| 4     | 0x4B78        | 0x0C04        | `47 7c b8 27 06 0e d2 80 5c 45 ab 09 18 13 f4 b2` |
+
+The keys are **not** a simple repeating XOR table (not the `0x07
+0x59 0x69 …` static table from the elitepvpers thread). They are
+per-packet, content-independent, and 32+ bytes long with no
+visible periodicity.
+
+Hypothesis (next research step): The Shine engine cipher is a
+linear-congruential generator (LCG) seeded once at session start
+from `PROTO_NC_MISC_SEED_ACK` (the 2-byte server seed), advancing
+its state per BYTE produced. The 78-byte first Outbound packet
+(`0x200F`) is the cipher-IV exchange where the client commits to
+its half of the seed. The SEED_ACK on this build is empty (server
+uses a fixed seed) — which is why the cipher is reproducible from
+the IDA-extracted server binary alone.
+
+#### Login chain plaintext recovered
+
+The plaintext payload of `USER_LOGIN_REQ` (opcode 0x0C06 server-side,
+0xE3C8 first-encrypted client-side) is now visible in
+`server_side/login_session1_p9010.txt` line 3:
+
+```
+74 65 73 74 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+74 65 73 74 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+```
+
+= `[char[18] user="test"+14×0][char[18] password="test"+14×0]` —
+total 36 bytes. **The user's account is `test/test`** which makes
+calibration captures trivially repeatable.
+
+The X-Trap signature in event 4 (`0x0C04 USER_XTRAP_REQ`):
+```
+1D 33 33 42 35 34 33 42 30 43 41 36 45 37 43 34 31 45 35 44 31 44 30 36 35 31 33 30 37 00
+```
+decodes as `[u8 len=29]"33B543B0CA6E7C41E5D1D065130 7"` — a 29-byte
+hex/ASCII X-Trap challenge response. We can re-emit a fixed
+challenge string for Elle's headless connect (the official server
+accepts arbitrary signatures on this region toggle, per the user's
+private-server config).
+
+### 16. Phase 6a Step 3 — DECODERS landed
+
+`Services/Elle.Service.Fiesta/FiestaDecoders.h` now contains
+fully-tested decoders for:
+
+* `0x201F` chat broadcast → `Fiesta::DecodeChatBroadcast()` →
+  `Fiesta::ChatBroadcast { sender, content_len, content }`.
+  Plus `Fiesta::EncodeChatRequest()` for Elle's outbound chat.
+* `0x1038` CHAR_BASE_CMD → `Fiesta::DecodeCharBase()` →
+  `Fiesta::CharBase { chrregnum, charid, marker, raw_state }`.
+* `0x201A` MOVEWALK broadcast → `Fiesta::DecodeMoveWalk()` →
+  `Fiesta::MoveWalk { handle, fromX/Y, toX/Y, movetype, flags }`.
+
+`test_fiesta_decoders.cpp` exercises every decoder against the
+EXACT bytes from the captures (EllaAnn says "hi", Crystal says
+"hi", EllaAnn's CHAR_BASE_CMD with chrregnum=5, MoveWalk for
+entity handle 0x46C4). 7/7 tests pass under `-Wall -Wextra
+-Werror`.
+
 `0x2018` was observed 2 122 times in Port 61496 (~84 % of all
 events). Sample:
 ```

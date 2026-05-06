@@ -3341,9 +3341,13 @@
     "opcode_name": "NC_MISC_MISCERROR_CMD",
     "struct_name": null,
     "pdb_sizeof": null,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
     "category": "misc_miscerror",
     "drift": null,
     "decoder": "unknown_struct"
@@ -6535,12 +6539,16 @@
     "opcode_name": "NC_CHAR_PROMOTE_ACK",
     "struct_name": "PROTO_NC_CHAR_PROMOTE_ACK",
     "pdb_sizeof": 1,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
     "category": "char_promote",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 17 vs pdb 1 (delta +16)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x045A",
@@ -8874,6 +8882,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x0546",
+    "opcode_dec": 1350,
+    "dept": 5,
+    "subid": 70,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x054D",
     "opcode_dec": 1357,
     "dept": 5,
@@ -8903,7 +8930,7 @@
     "wire_lengths": [
       17
     ],
-    "wire_count": 1,
+    "wire_count": 2,
     "directions": [
       "Outbound"
     ],
@@ -9591,6 +9618,44 @@
     "decoder": "fixed"
   },
   {
+    "opcode_hex": "0x0657",
+    "opcode_dec": 1623,
+    "dept": 6,
+    "subid": 87,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x067F",
+    "opcode_dec": 1663,
+    "dept": 6,
+    "subid": 127,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x0700",
     "opcode_dec": 1792,
     "dept": 7,
@@ -10051,7 +10116,7 @@
     "wire_lengths": [
       0
     ],
-    "wire_count": 9,
+    "wire_count": 27,
     "directions": [
       "Inbound"
     ],
@@ -10205,7 +10270,7 @@
     "wire_lengths": [
       3
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -10899,7 +10964,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -11098,7 +11163,7 @@
     "wire_lengths": [
       37
     ],
-    "wire_count": 5,
+    "wire_count": 17,
     "directions": [
       "Inbound"
     ],
@@ -11943,9 +12008,13 @@
     "opcode_name": "NC_BAT_TARGETTING_REQ",
     "struct_name": null,
     "pdb_sizeof": null,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      8
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
     "category": "bat_targetting",
     "drift": null,
     "decoder": "unknown_struct"
@@ -14142,12 +14211,16 @@
     "opcode_name": "NC_ITEM_CELLCHANGE_CMD",
     "struct_name": "PROTO_NC_ITEM_CELLCHANGE_CMD",
     "pdb_sizeof": 6,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      5
+    ],
+    "wire_count": 3,
+    "directions": [
+      "Outbound"
+    ],
     "category": "item_cellchange",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 5 vs pdb 6 (delta -1)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0C02",
@@ -14175,7 +14248,7 @@
     "wire_lengths": [
       2
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -14191,12 +14264,16 @@
     "opcode_name": "NC_ITEM_BUY_ACK",
     "struct_name": "PROTO_NC_ITEM_BUY_REQ",
     "pdb_sizeof": 6,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      30
+    ],
+    "wire_count": 3,
+    "directions": [
+      "Outbound"
+    ],
     "category": "item_buy",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 30 vs pdb 6 (delta +24)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0C05",
@@ -14209,7 +14286,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -14225,12 +14302,16 @@
     "opcode_name": "NC_ITEM_SELL_REQ",
     "struct_name": "PROTO_NC_ITEM_SELL_REQ",
     "pdb_sizeof": 5,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      34
+    ],
+    "wire_count": 3,
+    "directions": [
+      "Outbound"
+    ],
     "category": "item_sell",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 34 vs pdb 5 (delta +29)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0C07",
@@ -14288,7 +14369,7 @@
     "wire_lengths": [
       19
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -14304,12 +14385,16 @@
     "opcode_name": "NC_ITEM_RELOC_REQ",
     "struct_name": "PROTO_NC_ITEM_RELOC_REQ",
     "pdb_sizeof": 4,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      1
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
     "category": "item_reloc",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 1 vs pdb 4 (delta -3)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0C0C",
@@ -14322,7 +14407,7 @@
     "wire_lengths": [
       83
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -14446,7 +14531,7 @@
     "wire_lengths": [
       128
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -14507,12 +14592,16 @@
     "opcode_name": "NC_ITEM_UPGRADE_ACK",
     "struct_name": "PROTO_NC_ITEM_UPGRADE_ACK",
     "pdb_sizeof": 2,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      1
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
     "category": "item_upgrade",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 1 vs pdb 2 (delta -1)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0C19",
@@ -14552,12 +14641,16 @@
     "opcode_name": "NC_ITEM_PICKOTHER_ACK",
     "struct_name": "PROTO_NC_ITEM_PICKOTHER_ACK",
     "pdb_sizeof": 4,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 5,
+    "directions": [
+      "Outbound"
+    ],
     "category": "item_pickother",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 0 vs pdb 4 (delta -4)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0C1C",
@@ -14570,7 +14663,7 @@
     "wire_lengths": [
       19
     ],
-    "wire_count": 2,
+    "wire_count": 7,
     "directions": [
       "Inbound"
     ],
@@ -14931,12 +15024,16 @@
     "opcode_name": "NC_ITEM_MH_FURNITURE_ENDURE_KIT_USE_ACK",
     "struct_name": "PROTO_NC_ITEM_MH_FURNITURE_ENDURE_KIT_USE_ACK",
     "pdb_sizeof": 6,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      34
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Inbound"
+    ],
     "category": "item_mh",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 34 vs pdb 6 (delta +28)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0C35",
@@ -15144,7 +15241,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -15316,6 +15413,25 @@
     "category": "item_account",
     "drift": null,
     "decoder": "fixed"
+  },
+  {
+    "opcode_hex": "0x0C5D",
+    "opcode_dec": 3165,
+    "dept": 12,
+    "subid": 93,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
   },
   {
     "opcode_hex": "0x0D00",
@@ -17425,12 +17541,16 @@
     "opcode_name": "NC_ITEMDB_FURNITURE_ENDURE_ACK",
     "struct_name": "PROTO_NC_ITEMDB_FURNITURE_ENDURE_ACK",
     "pdb_sizeof": 18,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
     "category": "itemdb_furniture",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 17 vs pdb 18 (delta -1)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x0D8D",
@@ -18847,6 +18967,25 @@
     "decoder": "unknown_struct"
   },
   {
+    "opcode_hex": "0x0F46",
+    "opcode_dec": 3910,
+    "dept": 15,
+    "subid": 70,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      308
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x1000",
     "opcode_dec": 4096,
     "dept": 16,
@@ -18902,7 +19041,7 @@
     "wire_lengths": [
       18
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -19135,7 +19274,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -19605,7 +19744,7 @@
       51,
       126
     ],
-    "wire_count": 10,
+    "wire_count": 20,
     "directions": [
       "Inbound"
     ],
@@ -19654,7 +19793,7 @@
     "wire_lengths": [
       97
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19673,7 +19812,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19692,7 +19831,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19711,7 +19850,26 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 1,
+    "wire_count": 3,
+    "directions": [
+      "Inbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x103D",
+    "opcode_dec": 4157,
+    "dept": 16,
+    "subid": 61,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      5758
+    ],
+    "wire_count": 2,
     "directions": [
       "Inbound"
     ],
@@ -19728,9 +19886,10 @@
     "struct_name": null,
     "pdb_sizeof": null,
     "wire_lengths": [
-      2
+      2,
+      90
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19748,9 +19907,12 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       3,
-      12
+      12,
+      21,
+      227,
+      800
     ],
-    "wire_count": 2,
+    "wire_count": 10,
     "directions": [
       "Inbound"
     ],
@@ -19769,7 +19931,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19786,9 +19948,10 @@
     "struct_name": null,
     "pdb_sizeof": null,
     "wire_lengths": [
-      6
+      6,
+      24
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19805,9 +19968,10 @@
     "struct_name": null,
     "pdb_sizeof": null,
     "wire_lengths": [
-      2
+      2,
+      72
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19826,7 +19990,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19864,7 +20028,7 @@
     "wire_lengths": [
       39
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19883,7 +20047,7 @@
     "wire_lengths": [
       5
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -19911,6 +20075,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x10BD",
+    "opcode_dec": 4285,
+    "dept": 16,
+    "subid": 189,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      3
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Inbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x10C6",
     "opcode_dec": 4294,
     "dept": 16,
@@ -19921,7 +20104,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19938,9 +20121,10 @@
     "struct_name": null,
     "pdb_sizeof": null,
     "wire_lengths": [
-      6
+      6,
+      8
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19959,7 +20143,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19978,7 +20162,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -19997,7 +20181,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -20016,7 +20200,7 @@
     "wire_lengths": [
       16
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -21874,6 +22058,25 @@
     "decoder": "unknown_struct"
   },
   {
+    "opcode_hex": "0x14A0",
+    "opcode_dec": 5280,
+    "dept": 20,
+    "subid": 160,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x1500",
     "opcode_dec": 5376,
     "dept": 21,
@@ -23621,7 +23824,7 @@
     "wire_lengths": [
       978
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Outbound"
     ],
@@ -23640,7 +23843,7 @@
     "wire_lengths": [
       238
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -23794,7 +23997,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -24575,7 +24778,7 @@
     "wire_lengths": [
       124
     ],
-    "wire_count": 18,
+    "wire_count": 21,
     "directions": [
       "Inbound"
     ],
@@ -24594,7 +24797,7 @@
     "wire_lengths": [
       2853
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -24632,7 +24835,7 @@
     "wire_lengths": [
       19
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -24651,7 +24854,7 @@
     "wire_lengths": [
       14
     ],
-    "wire_count": 1,
+    "wire_count": 11,
     "directions": [
       "Inbound"
     ],
@@ -24673,6 +24876,25 @@
     "wire_count": 1,
     "directions": [
       "Inbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x1C64",
+    "opcode_dec": 7268,
+    "dept": 28,
+    "subid": 100,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
     ],
     "category": "unknown",
     "drift": null,
@@ -28990,7 +29212,7 @@
       19,
       82
     ],
-    "wire_count": 2,
+    "wire_count": 3,
     "directions": [
       "Inbound",
       "Outbound"
@@ -29010,7 +29232,7 @@
     "wire_lengths": [
       18
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -29067,7 +29289,7 @@
     "wire_lengths": [
       21
     ],
-    "wire_count": 2122,
+    "wire_count": 4737,
     "directions": [
       "Inbound"
     ],
@@ -29086,7 +29308,7 @@
     "wire_lengths": [
       21
     ],
-    "wire_count": 7,
+    "wire_count": 14,
     "directions": [
       "Inbound"
     ],
@@ -29167,6 +29389,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x2025",
+    "opcode_dec": 8229,
+    "dept": 32,
+    "subid": 37,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x203E",
     "opcode_dec": 8254,
     "dept": 32,
@@ -29177,9 +29418,28 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 1,
+    "wire_count": 5,
     "directions": [
       "Inbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x2126",
+    "opcode_dec": 8486,
+    "dept": 33,
+    "subid": 38,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      74
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
     ],
     "category": "unknown",
     "drift": null,
@@ -29196,7 +29456,7 @@
     "wire_lengths": [
       17
     ],
-    "wire_count": 1,
+    "wire_count": 2,
     "directions": [
       "Outbound"
     ],
@@ -29209,6 +29469,25 @@
     "opcode_dec": 8689,
     "dept": 33,
     "subid": 241,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x2215",
+    "opcode_dec": 8725,
+    "dept": 34,
+    "subid": 21,
     "opcode_name": null,
     "struct_name": null,
     "pdb_sizeof": null,
@@ -30704,7 +30983,7 @@
     "wire_lengths": [
       17
     ],
-    "wire_count": 1,
+    "wire_count": 2,
     "directions": [
       "Outbound"
     ],
@@ -30937,7 +31216,7 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -30956,7 +31235,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 1,
+    "wire_count": 33,
     "directions": [
       "Inbound"
     ],
@@ -31005,7 +31284,26 @@
     "wire_lengths": [
       6
     ],
-    "wire_count": 1,
+    "wire_count": 3,
+    "directions": [
+      "Inbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x2429",
+    "opcode_dec": 9257,
+    "dept": 36,
+    "subid": 41,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
+    ],
+    "wire_count": 8,
     "directions": [
       "Inbound"
     ],
@@ -31024,7 +31322,7 @@
     "wire_lengths": [
       8
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -31109,6 +31407,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x2462",
+    "opcode_dec": 9314,
+    "dept": 36,
+    "subid": 98,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      1
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x24C1",
     "opcode_dec": 9409,
     "dept": 36,
@@ -31118,6 +31435,44 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       32
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x2571",
+    "opcode_dec": 9585,
+    "dept": 37,
+    "subid": 113,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x25B5",
+    "opcode_dec": 9653,
+    "dept": 37,
+    "subid": 181,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
     ],
     "wire_count": 1,
     "directions": [
@@ -31248,6 +31603,63 @@
     "decoder": "unknown_struct"
   },
   {
+    "opcode_hex": "0x2913",
+    "opcode_dec": 10515,
+    "dept": 41,
+    "subid": 19,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x2929",
+    "opcode_dec": 10537,
+    "dept": 41,
+    "subid": 41,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x2943",
+    "opcode_dec": 10563,
+    "dept": 41,
+    "subid": 67,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x2ADF",
     "opcode_dec": 10975,
     "dept": 42,
@@ -31257,6 +31669,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       978
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x2AF4",
+    "opcode_dec": 10996,
+    "dept": 42,
+    "subid": 244,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
     ],
     "wire_count": 1,
     "directions": [
@@ -32300,6 +32731,44 @@
     "category": "raid_warning",
     "drift": null,
     "decoder": "fixed"
+  },
+  {
+    "opcode_hex": "0x2D01",
+    "opcode_dec": 11521,
+    "dept": 45,
+    "subid": 1,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      2
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x2D89",
+    "opcode_dec": 11657,
+    "dept": 45,
+    "subid": 137,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
   },
   {
     "opcode_hex": "0x2E00",
@@ -33395,6 +33864,25 @@
     "category": "unknown",
     "drift": null,
     "decoder": "unknown_struct"
+  },
+  {
+    "opcode_hex": "0x2F35",
+    "opcode_dec": 12085,
+    "dept": 47,
+    "subid": 53,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      1
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
   },
   {
     "opcode_hex": "0x2F64",
@@ -34901,6 +35389,44 @@
     "decoder": "unknown_struct"
   },
   {
+    "opcode_hex": "0x30CB",
+    "opcode_dec": 12491,
+    "dept": 48,
+    "subid": 203,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      308
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x3105",
+    "opcode_dec": 12549,
+    "dept": 49,
+    "subid": 5,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x311D",
     "opcode_dec": 12573,
     "dept": 49,
@@ -35288,6 +35814,25 @@
     "decoder": "unknown_struct"
   },
   {
+    "opcode_hex": "0x3273",
+    "opcode_dec": 12915,
+    "dept": 50,
+    "subid": 115,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x3300",
     "opcode_dec": 13056,
     "dept": 51,
@@ -35541,6 +36086,25 @@
     "category": "unknown",
     "drift": null,
     "decoder": "unknown_struct"
+  },
+  {
+    "opcode_hex": "0x336C",
+    "opcode_dec": 13164,
+    "dept": 51,
+    "subid": 108,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
   },
   {
     "opcode_hex": "0x3400",
@@ -36015,12 +36579,16 @@
     "opcode_name": "NC_PET_REMOVE_DB_ACK",
     "struct_name": "PROTO_NC_PET_REMOVE_DB_ACK",
     "pdb_sizeof": 4,
-    "wire_lengths": [],
-    "wire_count": 0,
-    "directions": [],
+    "wire_lengths": [
+      8
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
     "category": "pet_remove",
-    "drift": null,
-    "decoder": "fixed"
+    "drift": "wire 8 vs pdb 4 (delta +4)",
+    "decoder": "head+tail"
   },
   {
     "opcode_hex": "0x3511",
@@ -36092,6 +36660,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x3795",
+    "opcode_dec": 14229,
+    "dept": 55,
+    "subid": 149,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      32
     ],
     "wire_count": 1,
     "directions": [
@@ -36235,6 +36822,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x3989",
+    "opcode_dec": 14729,
+    "dept": 57,
+    "subid": 137,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x39AB",
     "opcode_dec": 14763,
     "dept": 57,
@@ -36311,6 +36917,63 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x3C17",
+    "opcode_dec": 15383,
+    "dept": 60,
+    "subid": 23,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x3D04",
+    "opcode_dec": 15620,
+    "dept": 61,
+    "subid": 4,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x3F1C",
+    "opcode_dec": 16156,
+    "dept": 63,
+    "subid": 28,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x401D",
     "opcode_dec": 16413,
     "dept": 64,
@@ -36349,6 +37012,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x4219",
+    "opcode_dec": 16921,
+    "dept": 66,
+    "subid": 25,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x4340",
     "opcode_dec": 17216,
     "dept": 67,
@@ -36358,6 +37040,44 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x4394",
+    "opcode_dec": 17300,
+    "dept": 67,
+    "subid": 148,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x44D4",
+    "opcode_dec": 17620,
+    "dept": 68,
+    "subid": 212,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
     ],
     "wire_count": 1,
     "directions": [
@@ -36378,6 +37098,44 @@
     "wire_lengths": [
       17
     ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x4679",
+    "opcode_dec": 18041,
+    "dept": 70,
+    "subid": 121,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x474D",
+    "opcode_dec": 18253,
+    "dept": 71,
+    "subid": 77,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      1
+    ],
     "wire_count": 1,
     "directions": [
       "Outbound"
@@ -36397,7 +37155,7 @@
     "wire_lengths": [
       2
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -36463,6 +37221,44 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x4B09",
+    "opcode_dec": 19209,
+    "dept": 75,
+    "subid": 9,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x4B6A",
+    "opcode_dec": 19306,
+    "dept": 75,
+    "subid": 106,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x4B78",
     "opcode_dec": 19320,
     "dept": 75,
@@ -36491,6 +37287,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x4DFD",
+    "opcode_dec": 19965,
+    "dept": 77,
+    "subid": 253,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
     ],
     "wire_count": 1,
     "directions": [
@@ -36577,6 +37392,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x56BE",
+    "opcode_dec": 22206,
+    "dept": 86,
+    "subid": 190,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x5701",
     "opcode_dec": 22273,
     "dept": 87,
@@ -36606,7 +37440,7 @@
     "wire_lengths": [
       40
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -36625,7 +37459,7 @@
     "wire_lengths": [
       2
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -36643,6 +37477,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x59D3",
+    "opcode_dec": 22995,
+    "dept": 89,
+    "subid": 211,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
     ],
     "wire_count": 1,
     "directions": [
@@ -36672,10 +37525,48 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x5AE9",
+    "opcode_dec": 23273,
+    "dept": 90,
+    "subid": 233,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x5BA7",
     "opcode_dec": 23463,
     "dept": 91,
     "subid": 167,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x5E0E",
+    "opcode_dec": 24078,
+    "dept": 94,
+    "subid": 14,
     "opcode_name": null,
     "struct_name": null,
     "pdb_sizeof": null,
@@ -36729,6 +37620,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x61BE",
+    "opcode_dec": 25022,
+    "dept": 97,
+    "subid": 190,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x6274",
     "opcode_dec": 25204,
     "dept": 98,
@@ -36752,6 +37662,25 @@
     "opcode_dec": 25601,
     "dept": 100,
     "subid": 1,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x6431",
+    "opcode_dec": 25649,
+    "dept": 100,
+    "subid": 49,
     "opcode_name": null,
     "struct_name": null,
     "pdb_sizeof": null,
@@ -36795,6 +37724,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x6B73",
+    "opcode_dec": 27507,
+    "dept": 107,
+    "subid": 115,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
     ],
     "wire_count": 1,
     "directions": [
@@ -36862,6 +37810,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x6EAA",
+    "opcode_dec": 28330,
+    "dept": 110,
+    "subid": 170,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x6F3B",
     "opcode_dec": 28475,
     "dept": 111,
@@ -36871,6 +37838,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x6F8D",
+    "opcode_dec": 28557,
+    "dept": 111,
+    "subid": 141,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      8
     ],
     "wire_count": 1,
     "directions": [
@@ -36891,7 +37877,7 @@
     "wire_lengths": [
       25
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -36910,7 +37896,7 @@
     "wire_lengths": [
       393
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -36927,9 +37913,10 @@
     "struct_name": null,
     "pdb_sizeof": null,
     "wire_lengths": [
-      2
+      2,
+      93
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -36948,7 +37935,7 @@
     "wire_lengths": [
       382
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -36967,9 +37954,47 @@
     "wire_lengths": [
       74
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x703C",
+    "opcode_dec": 28732,
+    "dept": 112,
+    "subid": 60,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      2
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Inbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x7173",
+    "opcode_dec": 29043,
+    "dept": 113,
+    "subid": 115,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
     ],
     "category": "unknown",
     "drift": null,
@@ -37024,7 +38049,7 @@
     "wire_lengths": [
       4
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -37037,6 +38062,25 @@
     "opcode_dec": 32616,
     "dept": 127,
     "subid": 104,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x805F",
+    "opcode_dec": 32863,
+    "dept": 128,
+    "subid": 95,
     "opcode_name": null,
     "struct_name": null,
     "pdb_sizeof": null,
@@ -37081,6 +38125,25 @@
     "wire_lengths": [
       17
     ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x8304",
+    "opcode_dec": 33540,
+    "dept": 131,
+    "subid": 4,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
     "wire_count": 1,
     "directions": [
       "Outbound"
@@ -37099,6 +38162,44 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x870F",
+    "opcode_dec": 34575,
+    "dept": 135,
+    "subid": 15,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      82
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x87D8",
+    "opcode_dec": 34776,
+    "dept": 135,
+    "subid": 216,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
     ],
     "wire_count": 1,
     "directions": [
@@ -37147,6 +38248,44 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x8AD5",
+    "opcode_dec": 35541,
+    "dept": 138,
+    "subid": 213,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x8C9D",
+    "opcode_dec": 35997,
+    "dept": 140,
+    "subid": 157,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x8DAE",
     "opcode_dec": 36270,
     "dept": 141,
@@ -37156,6 +38295,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x8E1D",
+    "opcode_dec": 36381,
+    "dept": 142,
+    "subid": 29,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      32
     ],
     "wire_count": 1,
     "directions": [
@@ -37185,6 +38343,44 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x8F46",
+    "opcode_dec": 36678,
+    "dept": 143,
+    "subid": 70,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x8F5E",
+    "opcode_dec": 36702,
+    "dept": 143,
+    "subid": 94,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      1
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x8FA0",
     "opcode_dec": 36768,
     "dept": 143,
@@ -37196,6 +38392,25 @@
       17
     ],
     "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x8FB3",
+    "opcode_dec": 36787,
+    "dept": 143,
+    "subid": 179,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
     "directions": [
       "Outbound"
     ],
@@ -37233,7 +38448,7 @@
     "wire_lengths": [
       1
     ],
-    "wire_count": 1,
+    "wire_count": 3,
     "directions": [
       "Inbound"
     ],
@@ -37309,7 +38524,7 @@
     "wire_lengths": [
       25
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
     ],
@@ -37356,6 +38571,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0x9A76",
+    "opcode_dec": 39542,
+    "dept": 154,
+    "subid": 118,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0x9B84",
     "opcode_dec": 39812,
     "dept": 155,
@@ -37367,6 +38601,82 @@
       8
     ],
     "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x9C60",
+    "opcode_dec": 40032,
+    "dept": 156,
+    "subid": 96,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x9DC3",
+    "opcode_dec": 40387,
+    "dept": 157,
+    "subid": 195,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      1
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0x9F07",
+    "opcode_dec": 40711,
+    "dept": 159,
+    "subid": 7,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      6
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xA19C",
+    "opcode_dec": 41372,
+    "dept": 161,
+    "subid": 156,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
     "directions": [
       "Outbound"
     ],
@@ -37537,7 +38847,7 @@
     "wire_lengths": [
       17
     ],
-    "wire_count": 1,
+    "wire_count": 2,
     "directions": [
       "Outbound"
     ],
@@ -37612,6 +38922,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xAB7B",
+    "opcode_dec": 43899,
+    "dept": 171,
+    "subid": 123,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
     ],
     "wire_count": 1,
     "directions": [
@@ -37698,6 +39027,44 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0xAF67",
+    "opcode_dec": 44903,
+    "dept": 175,
+    "subid": 103,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xB1AF",
+    "opcode_dec": 45487,
+    "dept": 177,
+    "subid": 175,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0xB495",
     "opcode_dec": 46229,
     "dept": 180,
@@ -37707,6 +39074,44 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xB4C2",
+    "opcode_dec": 46274,
+    "dept": 180,
+    "subid": 194,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xB4D6",
+    "opcode_dec": 46294,
+    "dept": 180,
+    "subid": 214,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
     ],
     "wire_count": 1,
     "directions": [
@@ -37746,7 +39151,7 @@
     "wire_lengths": [
       17
     ],
-    "wire_count": 1,
+    "wire_count": 2,
     "directions": [
       "Outbound"
     ],
@@ -37812,6 +39217,44 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0xBA7F",
+    "opcode_dec": 47743,
+    "dept": 186,
+    "subid": 127,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xBD8B",
+    "opcode_dec": 48523,
+    "dept": 189,
+    "subid": 139,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      24
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0xBD95",
     "opcode_dec": 48533,
     "dept": 189,
@@ -37821,6 +39264,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xBF30",
+    "opcode_dec": 48944,
+    "dept": 191,
+    "subid": 48,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
     ],
     "wire_count": 1,
     "directions": [
@@ -37841,9 +39303,85 @@
     "wire_lengths": [
       40
     ],
-    "wire_count": 1,
+    "wire_count": 4,
     "directions": [
       "Inbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xC10F",
+    "opcode_dec": 49423,
+    "dept": 193,
+    "subid": 15,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      392
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xC200",
+    "opcode_dec": 49664,
+    "dept": 194,
+    "subid": 0,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xC233",
+    "opcode_dec": 49715,
+    "dept": 194,
+    "subid": 51,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xC2BC",
+    "opcode_dec": 49852,
+    "dept": 194,
+    "subid": 188,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
     ],
     "category": "unknown",
     "drift": null,
@@ -37899,6 +39437,25 @@
       17
     ],
     "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xC655",
+    "opcode_dec": 50773,
+    "dept": 198,
+    "subid": 85,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      392
+    ],
+    "wire_count": 2,
     "directions": [
       "Outbound"
     ],
@@ -38135,6 +39692,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0xD39E",
+    "opcode_dec": 54174,
+    "dept": 211,
+    "subid": 158,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0xD41C",
     "opcode_dec": 54300,
     "dept": 212,
@@ -38192,6 +39768,44 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0xDCAE",
+    "opcode_dec": 56494,
+    "dept": 220,
+    "subid": 174,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      1
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xE00F",
+    "opcode_dec": 57359,
+    "dept": 224,
+    "subid": 15,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      24
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0xE15D",
     "opcode_dec": 57693,
     "dept": 225,
@@ -38230,6 +39844,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0xE233",
+    "opcode_dec": 57907,
+    "dept": 226,
+    "subid": 51,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      2
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0xE3C8",
     "opcode_dec": 58312,
     "dept": 227,
@@ -38258,6 +39891,63 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xE50B",
+    "opcode_dec": 58635,
+    "dept": 229,
+    "subid": 11,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xE719",
+    "opcode_dec": 59161,
+    "dept": 231,
+    "subid": 25,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xE738",
+    "opcode_dec": 59192,
+    "dept": 231,
+    "subid": 56,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
     ],
     "wire_count": 1,
     "directions": [
@@ -38344,6 +40034,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0xED57",
+    "opcode_dec": 60759,
+    "dept": 237,
+    "subid": 87,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0xEE6D",
     "opcode_dec": 61037,
     "dept": 238,
@@ -38373,6 +40082,63 @@
     "wire_lengths": [
       17
     ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xEE97",
+    "opcode_dec": 61079,
+    "dept": 238,
+    "subid": 151,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xEEDF",
+    "opcode_dec": 61151,
+    "dept": 238,
+    "subid": 223,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xEEEB",
+    "opcode_dec": 61163,
+    "dept": 238,
+    "subid": 235,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
     "wire_count": 1,
     "directions": [
       "Outbound"
@@ -38386,6 +40152,44 @@
     "opcode_dec": 61484,
     "dept": 240,
     "subid": 44,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xF108",
+    "opcode_dec": 61704,
+    "dept": 241,
+    "subid": 8,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xF39A",
+    "opcode_dec": 62362,
+    "dept": 243,
+    "subid": 154,
     "opcode_name": null,
     "struct_name": null,
     "pdb_sizeof": null,
@@ -38429,6 +40233,25 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xF49E",
+    "opcode_dec": 62622,
+    "dept": 244,
+    "subid": 158,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      2
     ],
     "wire_count": 1,
     "directions": [
@@ -38515,6 +40338,25 @@
     "decoder": "unknown_opcode"
   },
   {
+    "opcode_hex": "0xF743",
+    "opcode_dec": 63299,
+    "dept": 247,
+    "subid": 67,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      17
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
     "opcode_hex": "0xF914",
     "opcode_dec": 63764,
     "dept": 249,
@@ -38562,6 +40404,44 @@
     "pdb_sizeof": null,
     "wire_lengths": [
       17
+    ],
+    "wire_count": 2,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xFE1E",
+    "opcode_dec": 65054,
+    "dept": 254,
+    "subid": 30,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      0
+    ],
+    "wire_count": 1,
+    "directions": [
+      "Outbound"
+    ],
+    "category": "unknown",
+    "drift": null,
+    "decoder": "unknown_opcode"
+  },
+  {
+    "opcode_hex": "0xFEA3",
+    "opcode_dec": 65187,
+    "dept": 254,
+    "subid": 163,
+    "opcode_name": null,
+    "struct_name": null,
+    "pdb_sizeof": null,
+    "wire_lengths": [
+      74
     ],
     "wire_count": 1,
     "directions": [

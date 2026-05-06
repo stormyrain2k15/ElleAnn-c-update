@@ -1407,3 +1407,91 @@ Total = 21 B. Matches `PROTO_NC_ACT_SOMEONEMOVEWALK_CMD`.
   `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated),
   `_re_artifacts/pdb/extracted/payload_shape_matches.json`
   (regenerated).
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 — Phase 6a Step 3: DECODERS LANDED + Rosetta Stone
+
+Delivered as `08-phase6a-step3-decoders-and-rosetta.patch` (41 MB,
+applies on top of `04 → 05 → 06 → 07`). Skipped binary blobs
+(`fiesta_server.pcapng` + IDA databases) — held in
+`/app/elleann_blobs/` for reference only.
+
+### What landed
+
+#### Decoders (Phase 6a Step 3 deliverable)
+- `Services/Elle.Service.Fiesta/FiestaDecoders.h` (NEW) — three
+  fully-typed decoders + symmetric encoder, all with bit-exact
+  static asserts:
+  * `Fiesta::DecodeChatBroadcast()` (opcode 0x201F)
+  * `Fiesta::EncodeChatRequest()` — outbound chat for Phase 6c
+  * `Fiesta::DecodeCharBase()` (opcode 0x1038, build-specific)
+  * `Fiesta::DecodeMoveWalk()` (opcode 0x201A)
+- `Services/Elle.Service.Fiesta/test_fiesta_decoders.cpp` (NEW) —
+  7 regression tests against the EXACT bytes captured during the
+  user's 2026-02-05/06 sessions. All 7 PASS under `-Werror`:
+    PASS  Chat[EllaAnn]: sender="ElleAnn" content="hi"
+    PASS  Chat[Crystal]: sender="Crystal" content="hi"
+    PASS  Chat[truncated]: refused (returned false)
+    PASS  EncodeChatRequest('hello world')
+    PASS  EncodeChatRequest(0x100 chars): clamped to 0x7F
+    PASS  CharBase: chrregnum=5 charid="ElleAnn" marker=0x96
+    PASS  MoveWalk: handle=0x46C4 (5515,7466)→(5572,7500) type=0x32
+
+#### ROSETTA STONE — server-side captures
+The user supplied 8 server-side captures (Port 9010 / 9110 / 9120)
+that show post-decryption plaintext. Stored in
+`_re_artifacts/wire_captures/server_side/`:
+  * `login_session{1,2,3}_p9010.txt`  — LoginServer (33 events)
+  * `wm_session{1,2,3}_p9110.txt`     — WorldManager (135 events)
+  * `zone_session{1,2}_p9120.txt`     — ZoneServer  (2 830 events)
+
+Total parsed events: **5 552** across 18 files (10 client-side +
+8 server-side).
+
+#### CRITICAL FINDINGS
+
+**Account credentials = `test/test`**: confirmed plaintext at
+opcode `0x0C06 USER_LOGIN_REQ` payload offset 0..17 and 18..35 of
+the server-side login captures. This makes Elle's headless
+calibration trivially repeatable.
+
+**Cipher is NOT the public 13-byte XOR table**: web-search-claimed
+table `0x07 0x59 0x69 0x4A 0x94 0x11 0x94 …` does NOT appear in
+either server binary. Recovered per-packet keys (via XOR of
+client_enc XOR server_pt) are random-looking and 32+ bytes long
+with no visible periodicity. This is a **stateful per-packet
+cipher** seeded from `MISC_SEED_ACK` — likely an LCG advancing
+its state per output byte. Full reverse-engineering of the
+cipher will need IDA Pro on the user's `5ZoneServer2.idb` /
+`4WorldManagerServer2.idb` (held in `/app/elleann_blobs/idb/`).
+
+#### Updated tooling
+- `_re_artifacts/wire_captures/parse_capture.py` — auto-discovers
+  the new `server_side/` subdirectory and tags those events with
+  `source: 'server_side'` for cipher-recovery downstream tools.
+
+### Tests (all green)
+- All FIVE patches `04 → 05 → 06 → 07 → 08` apply cleanly in
+  sequence to a fresh baseline (commit a88be2e^).
+- `Debug/test_phase6a_protobase.cpp` still passes 10/10 login
+  chain.
+- `test_fiesta_decoders.cpp` passes 7/7 decoder assertions
+  against real captured wire bytes.
+
+### Files touched
+- NEW: `Services/Elle.Service.Fiesta/FiestaDecoders.h`,
+  `Services/Elle.Service.Fiesta/test_fiesta_decoders.cpp`,
+  `_re_artifacts/wire_captures/server_side/{8 capture files}`.
+- MODIFIED: `_re_artifacts/wire_captures/README.md` (+§14 §15 §16),
+  `_re_artifacts/wire_captures/parse_capture.py` (+server_side dir),
+  regenerated dispatch_table.json + payload_shape_matches.json +
+  parsed_captures.json.
+
+### Phase 6c cipher research delivery (web search)
+Searched X-Legend Shine engine `WSPSendDisorder`/`WSPRecvDisorder`
+cipher. Public results (elitepvpers fiesta-online thread) describe
+a 13-byte rotating XOR table that does NOT match this server's
+build. The user's two 5ZoneServer2.idb / 4WorldManagerServer2.idb
+files (held aside) likely contain the actual cipher implementation
+in their decompilation; opening those in IDA Pro and tracing the
+`recv` callback is the next concrete step for Phase 6c.

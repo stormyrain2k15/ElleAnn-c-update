@@ -165,6 +165,16 @@ def main():
         events = parse_file(f)
         print(f'{f.name}: {len(events)} events')
         all_events.extend(events)
+    # Also harvest the server-side captures (different filename
+    # convention, same Format-B parsing rules).
+    srv = HERE / 'server_side'
+    if srv.is_dir():
+        for f in sorted(srv.glob('*.txt')):
+            events = parse_file(f)
+            for ev in events:
+                ev['source'] = 'server_side'
+            print(f'server_side/{f.name}: {len(events)} events')
+            all_events.extend(events)
 
     out = HERE / 'parsed_captures.json'
     json.dump(all_events, out.open('w'), indent=2)
