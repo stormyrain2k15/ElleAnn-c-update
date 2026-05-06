@@ -1313,3 +1313,97 @@ proven from two character samples.
   `_re_artifacts/wire_captures/parsed_captures.json` (regenerated),
   `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated),
   `_re_artifacts/pdb/extracted/payload_shape_matches.json` (regenerated).
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 — Phase 6a step 2c: Chat opcode + Format B + Rolling-cipher
+
+Delivered as `07-phase6a-step2c-chat-and-format-b.patch` (25 MB
+— large because the 2 383-event ZoneServer chat capture is huge;
+applies on top of `04 → 05 → 06`).
+
+### What landed
+- `_re_artifacts/wire_captures/Port_61483.txt` (NEW, 12 events) —
+  LoginServer auth chain (client port 61483 → server port 9010 "T").
+- `_re_artifacts/wire_captures/Port_61491.txt` (NEW, 53 events) —
+  WorldManager char select (client port 61491 → server port 9110).
+- `_re_artifacts/wire_captures/Port_61496.txt` (NEW, 2 383 events)
+  — ZoneServer gameplay including TWO confirmed chat broadcasts
+  (EllaAnn says "hi", Crystal says "hi") and 2 122 movement
+  broadcasts.
+- `_re_artifacts/wire_captures/parse_capture.py` (REWRITE) — now
+  recognises BOTH the legacy decimal-byte format and the new
+  ISO-timestamp + named-opcode format. Emits same JSON shape
+  with new `format`, `opcode_u16`, `opcode_name`, `wire_dept`,
+  `wire_subid` fields.
+- `_re_artifacts/wire_captures/README.md` — sections §11–§14:
+  port-stage mapping (9010/9110/9120), Format-B parser, rolling-
+  cipher discovery, chat-opcode lock-in, move-opcode wire shape.
+- Regenerated `dispatch_table.json` (now 250 wire-observed
+  opcodes, up from 19) and `payload_shape_matches.json`
+  (29 → 91 opcode×size pairs).
+
+### Three Major Findings This Round
+
+#### Finding 1 — server-port topology mapped
+| Client ephemeral | Server fixed | Stage | Capture |
+|------------------|--------------|-------|---------|
+| 614NN            | **9010 "T"** | LoginServer (Tunneled auth)   | Port_61483.txt |
+| 614NN            | **9110**     | WorldManager (char select)    | Port_61491.txt |
+| 614NN            | **9120**     | ZoneServer (gameplay/chat)    | Port_61496.txt |
+
+Confirmed via screenshot of the user's capture-tool tab UI.
+
+#### Finding 2 — Chat broadcast `0x201F` PROVEN
+Two events with the same content "hi" but different sender
+characters proved the structure:
+```
+[Name4 sender (16 B)] [u8 itemLinkDataCount=0] [u8 len=N] [content[N]]
+```
+Total payload = 16 + 1 + 1 + N bytes. This is the recycled
+PROTO_NC_ACT_CHAT_REQ shape with the server prepending the
+sender's `charid` for the broadcast.
+
+Implementation note: when Elle sends chat in Phase 6c, she'll
+send WITHOUT the sender field (just `[u8 0][u8 len][text]`); the
+server adds her name and re-broadcasts.
+
+#### Finding 3 — ROLLING OPCODE OBFUSCATION
+Of 152 distinct Outbound opcodes in Port 61496, **every single one
+appears exactly once across 250+ packets**. The Fiesta client
+uses a per-packet stream cipher that XORs the opcode bytes (and
+likely the payload) with a rolling key derived from the cipher
+seed exchanged in the first 78 B Outbound packet (`0x200F`).
+
+> Inbound (server → client) traffic is plaintext on this build.
+> Outbound (client → server) opcodes are ENCRYPTED per-packet.
+
+This unblocks Phase 6c with a clear path:
+1. Capture SEED_ACK from a fresh Elle headless connect.
+2. Recover the cipher seed-byte layout (≤ 9 bytes of state
+   divergence, per §9 finding).
+3. Implement the same XOR rolling key the official client uses.
+4. Encrypt every Outbound message before send.
+
+### Move broadcast `0x2018` wire shape (also locked in)
+```
+[u16 entityHandle][u32 fromX][u32 fromY][u32 toX][u32 toY]
+                                                  [u8 movetype=0x32][u16 flags]
+```
+Total = 21 B. Matches `PROTO_NC_ACT_SOMEONEMOVEWALK_CMD`.
+
+### Tests
+- All four patches `04 → 05 → 06 → 07` apply cleanly in sequence
+  to a fresh baseline (commit a88be2e^).
+- `Debug/test_phase6a_protobase.cpp` still compiles `-Werror` and
+  passes 10/10 login-chain assertions.
+- `parse_capture.py` runs deterministically and produces 2 554
+  events across 10 capture files.
+
+### Files touched
+- NEW: `_re_artifacts/wire_captures/Port_614{83,91,96}.txt`.
+- REWRITTEN: `_re_artifacts/wire_captures/parse_capture.py`.
+- MODIFIED: `_re_artifacts/wire_captures/README.md` (+§11..§14),
+  `_re_artifacts/wire_captures/parsed_captures.json` (regenerated),
+  `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated),
+  `_re_artifacts/pdb/extracted/payload_shape_matches.json`
+  (regenerated).

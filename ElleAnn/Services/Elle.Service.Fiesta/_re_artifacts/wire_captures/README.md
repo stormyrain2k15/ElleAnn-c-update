@@ -273,9 +273,134 @@ Three plausible decodes:
 3. **Action keepalive** — small client-side action notification
    for an idle timer.
 
-Insufficient signal to disambiguate yet — needs a fresh capture
-where we deliberately trigger one of the above and observe the
-wire shape.
+### 11. Capture format B + named server ports (2026-02-06 chat session)
+
+The user supplied a NEW set of captures from an updated capture tool
+that produces a different on-disk format. The three captures
+(`Port_61483.txt`, `Port_61491.txt`, `Port_61496.txt`) cleanly cover
+the **complete three-stage Fiesta login chain**:
+
+| Client ephemeral port | Connects to fixed server port | Stage              | Notable opcodes captured     |
+|-----------------------|-------------------------------|--------------------|-------------------------------|
+| 61483                 | **9010**  (LoginServer, "T")  | Auth + version     | `0x0C0A USER_LOGIN_ACK`       |
+| 61491                 | **9110**  (WorldManager)      | Char select        | `0x0C14 USER_LOGINWORLD_ACK`, `0x1003 CHAR_LOGIN_ACK` (carrying zone IP `172.20.233.44` + port `0x23A0`=9120) |
+| 61496                 | **9120**  (ZoneServer)        | Gameplay (chat!)   | `0x201F` chat broadcast, `0x2018` move broadcast, `0x1038` char-base, etc. |
+
+The `(T)` on Port 9010 in the capture-tool's UI denotes the
+"Tunneled" auth path the user's server uses (proxied through a
+relay rather than direct).
+
+**Format B parser**: `parse_capture.py` was upgraded to recognise
+both formats and emit the same JSON record shape regardless of
+which capture tool was used. New JSON fields surfaced:
+  * `format`:      `"A"` (legacy decimal) or `"B"` (ISO-time + named opcodes)
+  * `opcode_u16`:  logical 16-bit opcode (host-side)
+  * `opcode_name`: optional opcode-name string from the tool (Format B)
+  * `wire_dept`/`wire_subid`: high/low byte split
+
+### 12. ROLLING OPCODE OBFUSCATION discovered (Format B captures)
+
+The biggest single finding from the chat captures:
+
+> Of 152 distinct Outbound (client→server) opcodes observed in
+> Port 61496, **every single one appears exactly once**. There is
+> no repetition across 250+ outbound packets — including dozens of
+> duplicate "send move-walk" actions that should logically share an
+> opcode.
+
+Sample of consecutive Outbound opcodes (no repeats):
+```
+[1CDF] [CFAB] [6D42] [DC0F] [200F] [4B78] [E3C8] [5101] [3AD7] [5FB6] …
+```
+
+Conclusion: **the official Fiesta client encrypts the opcode bytes
+on every outbound packet using a stream-cipher state that mutates
+per-message**. The 78–1024 byte first outbound packet is the
+cipher-seed exchange. Inbound (server→client) opcodes are **plaintext**
+on this build (we observed `0x2018` moving-broadcast 2122 times with
+the same opcode value).
+
+**Implication for Phase 6c (Elle sending chat)**: Elle's headless
+client cannot just write `[u16 opcode_chat][u8 0][u8 len][text]` to
+the socket — the server will reject the packet. Phase 6c must:
+
+1. Read the cipher-seed bytes from the server's `SEED_ACK`.
+2. Initialise the same stream-cipher state the official client uses
+   (XOR rolling key derived from the seed; algorithm is documented
+   in the `Shaiya/Fiesta` reverse-engineering wiki notes — needs one
+   web check or a quick disassembly of the official client's
+   `WSPSendDisorder` function).
+3. Encrypt the opcode bytes (and possibly payload) before send.
+4. Track the cipher state across every Outbound message.
+
+This unblocks all of Phase 6c. Deliberately deferring implementation
+until the user's calibration capture (SEED_ACK from a fresh Elle
+connect) gives us the exact seed-byte layout this build uses.
+
+### 13. Chat broadcast opcode `0x201F` — wire layout LOCKED IN
+
+Two observations of the same logical event ("hi" said by EllaAnn,
+then "hi" said by Crystal) produced identical structure with the
+sender field swapped:
+
+```
+EllaAnn says "hi":
+  [201F] 45 6C 6C 65 41 6E 6E 00 00 00 00 00 00 00 00 00 00 02 68 69
+         └─────── Name4 sender (16 B) ───────────────────────┘ │  │  └ "hi"
+                                                                │  └ u8 len = 2
+                                                                └ u8 itemLinkDataCount = 0
+
+Crystal says "hi":
+  [201F] 43 72 79 73 74 61 6C 00 00 00 00 00 00 00 00 00 00 02 68 69
+         └─────── Name4 sender (16 B) ───────────────────────┘ │  │  └ "hi"
+                                                                │  └ u8 len = 2
+                                                                └ u8 itemLinkDataCount = 0
+```
+
+Total wire payload size for "hi" = 16 + 1 + 1 + 2 = **20 B** (matches
+the observed payload length in both events).
+
+**Decoder** (mechanical to write — see Phase 6c roadmap):
+
+```cpp
+struct PROTO_NC_CHAT_BROADCAST {
+    Fiesta::Name4 sender;              // 16 B
+    uint8_t       itemLinkDataCount;   //  1 B  (0 for plain text)
+    uint8_t       len;                 //  1 B  (chat length, max 0x7F)
+    char          content[];           //  len B  (UTF-8 / Latin-1)
+};
+```
+
+This is `PROTO_NC_ACT_CHAT_REQ` recycled as a server-side broadcast
+(the X-Legend convention for chat: client sends the same shape sans
+sender, server prepends the sender name and re-broadcasts).
+
+### 14. Move broadcast opcode `0x2018` — wire shape inferred
+
+`0x2018` was observed 2 122 times in Port 61496 (~84 % of all
+events). Sample:
+```
+[2018] C4 46 8B 15 00 00 2A 1D 00 00 C4 15 00 00 4C 1D 00 00 32 00 00
+       └── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──┘
+```
+
+| Offset | Bytes (sample) | Interpretation                                   |
+|--------|---------------|--------------------------------------------------|
+|  0..1  | `C4 46`       | u16 entity handle = 0x46C4 (an entity in view)   |
+|  2..5  | `8B 15 00 00` | u32 fromX = 0x158B = 5515                        |
+|  6..9  | `2A 1D 00 00` | u32 fromY = 0x1D2A = 7466                        |
+| 10..13 | `C4 15 00 00` | u32 toX   = 0x15C4 = 5572                        |
+| 14..17 | `4C 1D 00 00` | u32 toY   = 0x1D4C = 7500                        |
+| 18     | `32`          | u8  movetype = 0x32 (walk)                       |
+| 19..20 | `00 00`       | u16 trailing flags (always 0 in observations)    |
+
+This matches `PROTO_NC_ACT_SOMEONEMOVEWALK_CMD` shape: `[handle]
+[fromXY][toXY][movetype][flags]`. Different entity handles seen
+include `0xB846` (Crystal in view from EllaAnn's PoV?) and `0xC446`
+(another player/NPC). The `0xB246 18` in the orphan
+`[1CDF] B2 46 18` outbound (3 B) is the matching client-side
+"facing change to direction 0x18" — confirms `0xB246` is the
+local player's own zone handle.
 
 ## What this unlocks for Phase 6a
 
