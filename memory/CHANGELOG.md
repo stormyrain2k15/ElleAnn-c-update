@@ -1495,3 +1495,65 @@ build. The user's two 5ZoneServer2.idb / 4WorldManagerServer2.idb
 files (held aside) likely contain the actual cipher implementation
 in their decompilation; opening those in IDA Pro and tracing the
 `recv` callback is the next concrete step for Phase 6c.
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 (later) — Phase 6c Step 0: Cipher Calibration
+
+Augments `08-phase6a-step3-decoders-and-rosetta.patch` (now 41 MB)
+with two new artifacts:
+
+### What landed
+- `Services/Elle.Service.Fiesta/test_fiesta_cipher_calibrate.cpp`
+  (NEW) — exhaustive 64K-seed scan of both in-tree cipher families
+  (LCG and XOR499) against the rosetta-stone (encrypted, plaintext)
+  pair. Compiles `-Werror -O2`, runs in <1 s.
+- `Services/Elle.Service.Fiesta/_re_artifacts/cipher/README.md`
+  (NEW) — practical IDA-Pro cipher-hunting guide with four
+  cross-reference paths (`connect()` xref, `send()` caller,
+  `WSARecv()` callback, XOR-loop pattern scan), plus a runtime
+  capture alternative using x64dbg breakpoints. Also documents the
+  cipher constraints already inferred from the rosetta-stone keys.
+
+### Calibration result
+Tested with the 7-byte keystream `5D 00 37 31 CF 30 8B`
+(recovered from Port 61483 event 1):
+
+```
+Scanning LCG seeds 0..0xFFFF...    (no match)
+Scanning XOR499 seeds 0..0xFFFF... (no match)
+
+Diagnostic: first 8 keystream bytes per cipher (seed=0):
+  LCG    : 26 27 F6 85 97 15 AD 1D
+  XOR499 : 07 59 69 4A 94 11 94 85
+```
+
+> **Definitive negative**: 0 cipher/seed combinations from the two
+> existing in-tree cipher implementations match the user's server
+> traffic. The cipher belongs to a third, build-specific family.
+
+### Where the cipher lives
+The user's `client.idb` (47 MB) and `client.idc` (812 K lines) are
+held in `/app/elleann_blobs/client_idb/`. The IDB has 16 107
+functions but **none renamed/analyzed** — running IDA's auto-
+analyzer for a few minutes plus following the four xref paths in
+`cipher/README.md` will surface the cipher in 15–30 minutes of
+human work.
+
+Constraints already known (narrows the IDA hunt):
+* Stream cipher, advances per-byte.
+* Per-packet keys differ → state resets or uses an IV per packet.
+* No visible periodicity in 32-byte recovered key spans.
+* Inbound (S→C) is plaintext on this build → only outbound needs
+  encryption.
+* MISC_SEED_ACK on this build is empty (server uses fixed seed).
+
+### Tests (all green)
+- All 5 patches `04 → 05 → 06 → 07 → 08` apply cleanly to fresh
+  baseline `a88be2e^`.
+- `test_fiesta_decoders.cpp` → 7/7 PASS.
+- `test_fiesta_cipher_calibrate.cpp` → exits with code 1 (correct,
+  signals "no match found, see cipher/README.md").
+
+### Files touched
+- NEW: `Services/Elle.Service.Fiesta/test_fiesta_cipher_calibrate.cpp`,
+  `Services/Elle.Service.Fiesta/_re_artifacts/cipher/README.md`.
