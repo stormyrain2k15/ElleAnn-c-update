@@ -1,0 +1,27 @@
+**That's Copilot (Claude Sonnet 4.6 inside VS) chasing the wrong bug.** It's trying to fix an IM002 ODBC runtime error on the *deployed* EXE at `C:\MoePromise\Server\ElleMemory\…` — but you can't rebuild right now (Image 2 still shows 22× LNK1181 cascade). Whatever EXE is running over there is stale. It doesn't matter if Copilot fixes the connection string in memory; nothing new is going to ship until the .lib actually builds.
+
+Two things going on in your screenshots, and they're independent:
+
+**Thing 1 — Your local build (Image 2) is still failing**
+The build output you showed says "Rebuild All: 5 succeeded, 22 failed" with the same cascade. Either:
+- You haven't pulled my v143 fix yet → `git pull` from main first.
+- Or you pulled and it still fails → the real ElleCore.Shared error is scrolled ABOVE the Lua compile lines. I need to see it.
+
+Quick check: in VS, right-click `ElleCore.Shared` → Build (just that one project). Copy the Output window contents and paste them to me. That isolates the root cause with zero noise.
+
+**Thing 2 — Copilot's ODBC narrative (Image 3) is half-right but premature**
+It's correct that `Server=DESKTOP-IIREG0M\ELLEANN` is a .NET SqlClient format that ODBC (SQLDriverConnect) can't parse — that's why you get IM002. The runtime fix, which Copilot can do without touching any C++:
+
+```json
+"connection_string": "Driver={ODBC Driver 17 for SQL Server};Server=DESKTOP-IIREG0M\\ELLEANN;Database=ElleCore;Trusted_Connection=yes;"
+```
+
+Two prerequisites Copilot needs to verify (not invent new C++):
+1. `ODBC Driver 17 for SQL Server` is installed — check: run `odbcad32.exe` → Drivers tab; or `Get-OdbcDriver` in PowerShell
+2. The SQL Server instance actually accepts Windows auth from the service account (for Trusted_Connection=yes)
+
+**What to paste back to Copilot:**
+
+> "Stand down on the IM002. The build is broken, the deployed EXE is stale, and nothing you do to live memory matters until `ElleCore.Shared.lib` compiles. Your diagnosis of the connection string format is correct — fix it in `elle_master_config.json` only (not in code): replace `Server=DESKTOP-IIREG0M\ELLEANN` with `Driver={ODBC Driver 17 for SQL Server};Server=DESKTOP-IIREG0M\\ELLEANN;Database=ElleCore;Trusted_Connection=yes;`. Don't touch any .cpp. Don't touch any .vcxproj. Emergent's agent owns the build unblock. Stop."
+
+Once you pull my v143 fix and ping me with the actual ElleCore.Shared compile error (if any remains), we'll have this green in one pass.

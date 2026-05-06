@@ -100,6 +100,29 @@ EncodeChatRequest(std::string_view text, uint8_t itemLinkDataCount = 0) {
     return buf;
 }
 
+/* End-to-end: build the full wire frame for an outbound chat packet,
+ * apply the XOR499 cipher to the [opcode + payload] region, and
+ * return the bytes ready to write to the socket.  This is the
+ * function `Elle.Service.Fiesta::OnTickSendChat` will call.
+ *
+ * Invariants (verified against client.asm disassembly):
+ *   * Length prefix is plaintext on the wire.
+ *   * Opcode (2 B) and payload are XOR-encrypted with TABLE[pos++].
+ *   * The cipher state advances by exactly (2 + payload.size())
+ *     bytes per packet — the table position carries across packets.
+ *
+ * Returns a buffer ready for `send()`:
+ *   [len-prefix 1 or 3 B PLAINTEXT][opcode 2 B XOR'd][payload XOR'd]
+ */
+inline std::vector<uint8_t>
+EncodeChatRequestEncrypted(class Cipher& cipher,
+                           uint16_t opcode_chat_req,
+                           std::string_view text,
+                           uint8_t itemLinkDataCount = 0);
+/* Implemented inline below after Cipher.h is included so the header
+ * fits the existing layered-include pattern.  See FiestaDecoders.cpp
+ * companion definitions if cyclic include becomes an issue. */
+
 
 /*══════════════════════════════════════════════════════════════════════════════
  * 0x1038 — CHAR_BASE_CMD (S → C, build-specific opcode)
@@ -165,14 +188,62 @@ inline bool DecodeMoveWalk(const uint8_t* payload,
 
 
 /*══════════════════════════════════════════════════════════════════════════════
- * Convenience — opcode → decoder dispatch.
+ * End-to-end encrypted chat builder.
  *
- *   The Phase 6b world-model state machine will call
- *      `DispatchInbound(opcode, payload, len, world)`
- *   which routes to one of the typed decoders above and merges the
- *   result into the world model. For now (Phase 6a Step 3) we only
- *   provide the typed decoders; wiring them into the world is Step 4.
+ *   Produces the FULL wire frame (length prefix + encrypted opcode +
+ *   encrypted payload) for an outbound `NC_ACT_CHAT_REQ`.  Cipher
+ *   state advances per byte exactly as `sub_82DB60` does in the
+ *   official client.
+ *
+ *   ⚠  Phase 6c step 0: the cipher seed source is not yet confirmed
+ *   (see _re_artifacts/cipher/README.md "What still needs
+ *   calibration").  Call `cipher.Reset(0)` first to start at table
+ *   position 0; if the server rejects the packet, capture
+ *   `MISC_SEED_ACK` and pass its 2-byte payload to `Reset()`.
  *══════════════════════════════════════════════════════════════════════════════*/
+
+}  /* namespace Fiesta — temporarily close so we can include cipher header */
+
+#include "FiestaCipher.h"
+
+namespace Fiesta {
+
+inline std::vector<uint8_t>
+EncodeChatRequestEncrypted(Cipher& cipher,
+                           uint16_t opcode_chat_req,
+                           std::string_view text,
+                           uint8_t itemLinkDataCount) {
+    /* Build the plaintext payload [items=0][len][content[len]]. */
+    auto payload = EncodeChatRequest(text, itemLinkDataCount);
+
+    /* Compose the [opcode 2 B][payload] region the cipher transforms.
+     * Wire byte order is [dept = high byte][cmdid = low byte]. */
+    std::vector<uint8_t> ciphered;
+    ciphered.reserve(2 + payload.size());
+    ciphered.push_back(static_cast<uint8_t>(opcode_chat_req >> 8));
+    ciphered.push_back(static_cast<uint8_t>(opcode_chat_req & 0xFF));
+    ciphered.insert(ciphered.end(), payload.begin(), payload.end());
+
+    /* Apply the XOR499 cipher in place.  Advances `cipher`'s
+     * internal position by exactly `ciphered.size()` table slots. */
+    cipher.EncryptOut(ciphered.data(), ciphered.size());
+
+    /* Prepend the length prefix.  Length is the number of
+     * post-cipher bytes (opcode + payload). */
+    std::vector<uint8_t> frame;
+    if (ciphered.size() < 0xFF) {
+        frame.reserve(1 + ciphered.size());
+        frame.push_back(static_cast<uint8_t>(ciphered.size()));
+    } else {
+        /* Long-form prefix per Shine convention: [0xFF][u16 LE len]. */
+        frame.reserve(3 + ciphered.size());
+        frame.push_back(0xFF);
+        frame.push_back(static_cast<uint8_t>(ciphered.size() & 0xFF));
+        frame.push_back(static_cast<uint8_t>(ciphered.size() >> 8));
+    }
+    frame.insert(frame.end(), ciphered.begin(), ciphered.end());
+    return frame;
+}
 
 }  /* namespace Fiesta */
 #endif  /* ELLE_FIESTA_DECODERS_H */

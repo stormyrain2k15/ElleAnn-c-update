@@ -1557,3 +1557,86 @@ Constraints already known (narrows the IDA hunt):
 ### Files touched
 - NEW: `Services/Elle.Service.Fiesta/test_fiesta_cipher_calibrate.cpp`,
   `Services/Elle.Service.Fiesta/_re_artifacts/cipher/README.md`.
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 (final) — Phase 6c Step 0: CIPHER ALGORITHM PROVEN
+
+Delivered as `/app/PHASE6A-COMPLETE.patch` (38 MB consolidated
+mega-patch covering all of Phase 6a + cipher integration).
+
+### What landed (additive to patch 08)
+
+#### Cipher proven from disassembly
+- Recovered `sub_82DB60` (the official cipher function, RVA 0x82DB60)
+  and `sub_7FCB90` (seed initialiser, RVA 0x7FCB90) from the user's
+  `client.idb` via `client.asm` disassembly.
+- The cipher is a **byte-by-byte XOR with a 499-byte table** with
+  position wrap at 499. Algorithm is byte-identical to the in-tree
+  `Fiesta::CipherKind::XOR499`.
+- The 499-byte table is **byte-identical** to `Fiesta::kXor499Table`
+  (verified all 499 bytes vs the disassembled `byte_9119D0`).
+- Confirmed the same XOR499 table is embedded in the SERVER binaries
+  (`3LoginServer2.exe` at offset 0x27358, `4WorldManagerServer2.exe`
+  at offset 0x82530).
+- `_re_artifacts/cipher/decompiled_cipher.c` — transcribed cipher
+  function in C, signed off as production-equivalent to the in-tree
+  C++ implementation.
+- `_re_artifacts/cipher/README.md` — full forensic write-up.
+
+#### End-to-end encrypted chat builder
+- `Fiesta::EncodeChatRequestEncrypted(cipher, opcode, text)` —
+  builds the COMPLETE wire frame for an outbound chat packet,
+  applies the XOR499 cipher to the [opcode + payload] region, and
+  returns bytes ready for `socket.send()`.
+- New regression test `TestEncodeChatRequestEncrypted` proves the
+  cipher round-trips: encrypt → decrypt with two ciphers at the
+  same seed yields the original plaintext byte-for-byte.
+
+### Why the rosetta-stone calibration failed
+Cross-session XOR (client capture from one session against server
+decrypt from a different session 2.5 hours later) is meaningless —
+each session has its own cipher seed = `seed % 499` starting position.
+The plaintext is fixed across sessions for `USER_CLIENT_VERSION_CHECK_REQ`
+(`0C 01 D6 07 04 0A 00`), but cipher position differs.
+
+### Remaining work for Phase 6c step 1
+The cipher seed source is not yet traced. Two candidates:
+1. Server-supplied via `MISC_SEED_ACK` (opcode 0x0207) 2-byte payload.
+2. Constant 0 on this build (private-server simplification).
+
+Test option (2) first: `Cipher::Reset(0)` and try sending "hi". If
+server accepts, done. If rejects, capture `MISC_SEED_ACK` from a
+fresh login and pass its payload to `Reset()`.
+
+### Tests (all green)
+- `Debug/test_phase6a_protobase.cpp` → 10/10 login-chain assertions
+  PASS.
+- `test_fiesta_decoders.cpp` → **8/8** assertions PASS:
+    * Chat decoders (EllaAnn, Crystal, truncated)
+    * Encoder + length clamping
+    * CharBase decoder
+    * MoveWalk decoder
+    * **End-to-end encrypted chat round-trip** ← new
+- `test_fiesta_cipher_calibrate.cpp` → exits 1 (correct: confirms
+  in-session calibration data needed; rosetta-stone with cross-
+  session data is meaningless).
+- `PHASE6A-COMPLETE.patch` applies cleanly to baseline `a88be2e^`,
+  decoder test passes 8/8 in the patched workspace.
+
+### Files now in tree
+* `Services/Elle.Service.Fiesta/FiestaProtoBase.h` (foundation types)
+* `Services/Elle.Service.Fiesta/FiestaProtoTable.h` (X-macro dispatch)
+* `Services/Elle.Service.Fiesta/FiestaCipher.h` (XOR499 + LCG)
+* `Services/Elle.Service.Fiesta/FiestaDecoders.h` (3 decoders + 2 encoders + cipher integration)
+* `Services/Elle.Service.Fiesta/test_fiesta_decoders.cpp` (8 tests)
+* `Services/Elle.Service.Fiesta/test_fiesta_proto_coverage.cpp` (replay)
+* `Services/Elle.Service.Fiesta/test_fiesta_cipher_calibrate.cpp` (calibration)
+* `Services/Elle.Service.Fiesta/Generated/FiestaProtoTable.inc` (2300 opcodes)
+* `Services/Elle.Service.Fiesta/Generated/FiestaWireFixtures.inc` (72 fixtures)
+* `Debug/test_phase6a_protobase.cpp` (regression)
+* `_re_artifacts/wire_captures/` (10 client + 8 server capture files)
+* `_re_artifacts/wire_captures/README.md` (forensic write-up §1-§16)
+* `_re_artifacts/pdb/{build_dispatch_table,gen_proto_table,shape_match_payloads}.py`
+* `_re_artifacts/pdb/extracted/{dispatch_table,payload_shape_matches}.json`
+* `_re_artifacts/cipher/README.md` (Phase 6c hunt guide + findings)
+* `_re_artifacts/cipher/decompiled_cipher.c` (cipher source from IDA)

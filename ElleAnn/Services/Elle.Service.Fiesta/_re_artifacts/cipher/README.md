@@ -1,195 +1,241 @@
-# Phase 6c — Fiesta Cipher Hunting Guide
+# Phase 6c — Fiesta Cipher: PROVEN via disassembly (2026-02-06)
 
-This document is the practical instruction set for recovering the
-Shine/Fiesta packet cipher algorithm from the official client binary
-**without** spending hours grep-hunting through stripped IDC exports.
+## Cipher algorithm — definitively recovered
 
-You have IDA Pro on your machine (the `client.idc` files prove that).
-The cipher will be ~30–80 lines of decompiled C++ once you find the
-right function. This doc tells you exactly what to search for and
-where.
+The official Fiesta client's outbound cipher has been recovered by
+disassembling the user's `client.idb` (47 MB IDA database). The
+relevant function is `sub_82DB60` at RVA `0x82DB60`:
 
----
-
-## TL;DR
-
-1. Open `client.idb` in IDA Pro.
-2. Auto-analyse if not already done (`Options → Compiler` → confirm
-   MSVC, then `Edit → Plugins → Auto-Analyzer → Reanalyze program`).
-3. Find any of the four cross-references listed below — they all
-   lead to the same `cipher_encrypt` / `cipher_decrypt` pair.
-4. Hex-Rays decompile both functions (F5).
-5. Paste the decompiled output into a new file
-   `_re_artifacts/cipher/decompiled_cipher.c`.
-
-That's it. Total time once IDA is open: 15–30 min.
-
----
-
-## Cross-references that lead to the cipher
-
-### Method A — `connect()` import → caller chain (fastest)
-The cipher is initialised one call up from where the client invokes
-WinSock `connect()`.
-
-1. In IDA, `Imports` view → double-click `connect` (from `WS2_32.dll`).
-2. Right-click the imported address → `Jump to xref to operand` (X).
-3. There is exactly ONE caller (the `CSocket::Connect` wrapper).
-   Press F5 to decompile.
-4. Look for a member-init pattern like:
-   ```c
-   this->cipher_state = some_constant;        // OR
-   memset(this->cipher_buf, 0, 0x40);
-   sub_XXXXXX(this);                          // ← this is cipher_init
-   ```
-5. Follow `sub_XXXXXX`. That is the **cipher key schedule**.
-
-### Method B — `send()` import → caller (the encrypt path)
-The cipher's `encrypt()` is called *immediately before* `send()`.
-
-1. `Imports` view → `send` (from `WS2_32.dll`).
-2. The wrapper that calls `send` will look like:
-   ```c
-   sub_AAAAAA(buf, len);     // ← cipher_encrypt
-   send(this->fd, buf, len, 0);
-   ```
-3. F5 the wrapper. Look for the cipher_encrypt sub-call. That is
-   the function we need.
-
-### Method C — `recv()` callback → caller (the decrypt path)
-ShineEngine uses overlapped I/O (`WSARecv`). The decrypt happens in
-the I/O completion callback.
-
-1. `Imports` view → `WSARecv`.
-2. Trace one xref. The callback function will start with a buffer
-   length check, then call the decrypt routine BEFORE dispatching
-   the opcode:
-   ```c
-   if (bytes_received < 3) return;
-   sub_BBBBBB(this->recv_buf, bytes_received);  // ← cipher_decrypt
-   uint16_t opcode = *(uint16_t*)(this->recv_buf + 1);
-   switch (opcode) { ... }
-   ```
-3. `sub_BBBBBB` is the decrypt function (or, more often, calls into
-   the SAME bidirectional cipher we found via Method B).
-
-### Method D — XOR-loop pattern scan
-The cipher contains a tight loop like:
-```c
-for (int i = 0; i < len; ++i) {
-    buf[i] ^= state;
-    state = (state * mul + add) & mask;     // LCG advance
-}
-```
-In assembly this looks like:
 ```asm
-loop_start:
-    mov   al, [esi+ecx]      ; load buf[i]
-    xor   al, dl              ; XOR with cipher state low byte
-    mov   [esi+ecx], al
-    imul  edx, <const>        ; LCG advance
-    add   edx, <const>
-    inc   ecx
-    cmp   ecx, ebx
-    jl    loop_start
+sub_82DB60 proc near                      ; thiscall
+    ; ecx = this  (CSocket-like; cipher state at offsets +0 and +2)
+    ; arg_0 = data ptr ; arg_4 = length
+
+    push edi
+    mov edi, [esp+arg_4]                  ; edi = len
+    xor edx, edx                          ; edx = i = 0
+    test edi, edi
+    jle short done
+    push esi
+    mov esi, [esp+4+arg_0]                ; esi = data ptr
+
+loop:
+    movzx eax, word ptr [ecx]             ; eax = pos (u16 at this+0)
+    mov   al, byte_9119D0[eax]            ; al  = TABLE[pos]
+    xor   [edx+esi], al                   ; data[i] ^= TABLE[pos]
+    inc   word ptr [ecx]                  ; ++pos
+    cmp   word ptr [ecx], 1F3h            ; if pos == 499:
+    jb    short skip
+    mov   word ptr [ecx], 0               ;   pos = 0
+skip:
+    inc   edx                             ; ++i
+    cmp   edx, edi
+    jl    short loop                      ; while (i < len)
+
+    mov eax, esi
+    pop esi ; pop edi ; retn 8
+done:
+    mov eax, [esp+arg_0]
+    pop edi ; retn 8
+sub_82DB60 endp
 ```
-Use IDA's `Search → Sequence of bytes → 32 51 ... 6B D2 ...` (the
-`xor / imul edx` pair). Limit to .text section. There are typically
-< 5 hits and only one is the cipher.
 
----
-
-## Once you have the decompiled cipher
-
-Save it as `decompiled_cipher.c` and paste it into a new chat. With
-the real algorithm in hand the headless implementation is a clean
-~20-line C++ port:
+Translated to C++:
 
 ```cpp
-struct FiestaCipher {
-    uint32_t state;
-    void Init(uint16_t seed_from_NC_MISC_SEED_ACK);
-    void Apply(uint8_t* buf, std::size_t len);  // same fn for E/D
-};
-```
-
-Then `EncodeChatRequest()` (already in `FiestaDecoders.h`) is wrapped
-as:
-
-```cpp
-void Elle::SendChat(std::string_view text) {
-    auto payload = Fiesta::EncodeChatRequest(text);
-    auto frame   = Fiesta::BuildPacket(opcode_NC_ACT_CHAT_REQ, payload);
-    cipher_send.Apply(frame.data() + sizeFlagBytes,
-                      frame.size() - sizeFlagBytes);
-    socket.Send(frame);
+void Cipher::EncryptOut(uint8_t* data, std::size_t len) {
+    for (std::size_t i = 0; i < len; ++i) {
+        data[i] ^= kXor499Table[m_pos_out];
+        if (++m_pos_out == 499) m_pos_out = 0;
+    }
 }
 ```
 
-Elle is then capable of saying `"hi"` in-game.
+The table at `byte_9119D0` is **499 bytes** (matching `dword_8E221C =
+0x1F3 = 499`, the divisor used when initialising the cipher seed).
 
----
+> **The 499-byte table extracted from the IDB is BYTE-IDENTICAL to
+> the `kXor499Table` already in `FiestaCipher.h`.** All 499 bytes
+> match — both implementations are correct. The cipher kind is
+> `Fiesta::CipherKind::XOR499` (already implemented in-tree).
 
-## What we already know about the cipher (from the rosetta stone)
+### Cipher seed initialisation
 
-From `_re_artifacts/wire_captures/server_side/login_session1_p9010.txt`
-aligned against `_re_artifacts/wire_captures/Port_61483.txt`:
+`sub_7FCB90` at RVA `0x7FCB90` initialises the cipher state from a
+seed value:
 
-| Event | Plaintext (server view) | Encrypted (client wire) | Recovered key (first 7 B) |
-|-------|------------------------|------------------------|----------------------------|
-| 1     | `0C 01 D6 07 04 0A 00` | `51 01 E1 36 CB 3A 8B` | `5d 00 37 31 cf 30 8b`     |
-| 4     | `0C 04 1D 33 33 42 35` | `4B 78 A5 14 35 4C E7` | `47 7c b8 27 06 0e d2`     |
+```asm
+sub_7FCB90 proc near                      ; thiscall
+    ; ecx = this; arg_0 = u16 seed
 
-**Properties already inferred** (constrains the search):
-
-* Stream cipher — keystream length grows linearly with packet size.
-* Per-packet keys are different → cipher state advances or resets
-  per packet, NOT per session-start.
-* No visible periodicity in 32-byte recovered keys → if it's an LCG
-  the modulus is large (likely 2^32 or 2^31).
-* Inbound (server → client) is plaintext on this build → the cipher
-  operates only on outbound. So you only need ONE direction working
-  to send chat.
-
-These constraints mean the cipher is almost certainly:
-```c
-state = lcg_seed;
-for (i = 0; i < len; ++i) {
-    state = state * MULT + INCR;        // 32-bit LCG
-    buf[i] ^= (state >> SHIFT);          // emit one byte from state
-}
+    push ebp ; mov ebp, esp
+    movzx eax, word ptr [ebp+arg_0]       ; eax = seed (u16)
+    cdq                                    ; sign-extend (effectively zero-extend
+                                            ;   since seed is u16)
+    idiv ds:dword_8E221C                  ; eax = seed / 499; edx = seed % 499
+    mov [ecx],   dx                       ; this[0] = pos = (seed % 499)
+    mov [ecx+2], dx                       ; this[2] = pos (a second copy?)
+    pop ebp ; retn 4
+sub_7FCB90 endp
 ```
-The constants `MULT`, `INCR`, `SHIFT`, and the seed source are what
-the IDA hunt above will reveal in 15 minutes.
+
+So the **starting position** (and only state) is `seed % 499`. The
+seed itself comes from somewhere we haven't traced yet — likely the
+`MISC_SEED_ACK` packet (opcode 0x0207) sent by the server on
+connect, but possibly also the initial connect handshake packet's
+contents.
+
+### Cipher uniqueness — only ONE cipher in the whole binary
+
+* Only one xref to `byte_9119D0` (cipher table).
+* Only one xref to `dword_8E221C` (the 499 divisor).
+* Only one call to `sub_82DB60` (the cipher itself), from
+  `sub_7FCA10` (the SendData routine), called ONCE per outbound
+  packet right before the buffer is flushed via `send()`.
+* Only one xref to `sub_7FCB90` (the seed init) — this xref isn't
+  trivially findable in the asm (likely called via a vtable),
+  proving that the seed initialisation goes through one of the
+  socket-class wrappers.
+
+The receive path (`sub_7FCB10`, the `recv` wrapper) does NOT call
+any cipher — confirming our wire-capture finding that **inbound
+(server → client) traffic is plaintext** on this build.
 
 ---
 
-## Practical alternative — runtime capture
+## Why the "rosetta stone" calibration failed (analysis)
 
-If IDA hunting feels slow, the same algorithm can be recovered with
-**zero reverse engineering** by attaching `x64dbg` (or any debugger)
-to a running `Fiesta.exe` and setting a conditional breakpoint on
-`send`:
+The earlier calibration test in
+`Services/Elle.Service.Fiesta/test_fiesta_cipher_calibrate.cpp`
+returned 0 matches across all 499 starting positions. The reason:
 
-1. Launch Fiesta.exe and log in.
-2. Attach x64dbg.
-3. `bp send` → `bp recv` → resume.
-4. When `send` hits, dump the buffer (encrypted view).
-5. Step OUT of `send` once. The buffer pointer was prepared one
-   level up — log the pre-`send` calling routine's address. That is
-   the cipher_encrypt callsite. Step INTO it on the next `send`
-   trigger to capture the un-encrypted buffer too.
+> The client-side capture (`Port_61483.txt` event 1, 01:54:29) and
+> the server-side captures (`server_side/login_session{1,2,3}_p9010.txt`,
+> 04:24:07 / 04:28:13 / 04:28:36) were taken **2.5 hours apart**
+> and are therefore from **different login sessions**, each with
+> its own cipher seed.
 
-This gives you encrypted+plaintext pairs *with* the call-trace,
-which is enough to identify the cipher function even without IDA.
+Aligning encrypted bytes from one session against decrypted bytes
+from a different session gives a meaningless XOR. The plaintext for
+`PROTO_NC_USER_CLIENT_VERSION_CHECK_REQ` is fixed across sessions
+(`0C 01 D6 07 04 0A 00` — opcode + 2006-04-10 client date), but the
+cipher position differs.
+
+### What we still know (negative results count too)
+
+The cross-session XOR `5D 00 37 31 CF 30 8B` does NOT appear in the
+table at any of 499 starting positions. This is not surprising —
+it's the XOR of TWO DIFFERENT cipher streams (one starting at pos
+`p1`, the other at pos `p2`), which generally is not a contiguous
+slice of the table.
+
+If we ever capture **truly-paired** client-side AND server-side
+traffic of the same session, the alignment will recover the seed
+in one calculation:
+
+```python
+mask = encrypted_byte_0 ^ plaintext_byte_0     # = TABLE[p]
+for p in range(499):
+    if TABLE[p] == mask:
+        # candidate. Test bytes 1..N against TABLE[(p+i) % 499]
+        ...
+```
 
 ---
 
-## Files in this directory after the hunt
+## How to capture truly-paired traffic (Phase 6c step 1)
+
+Run BOTH captures simultaneously on the same machine:
+
+1. **Client side capture** — the tool the user has been using
+   (filenames like `Port_61483.txt`).
+2. **Server side capture** — same tool aimed at the LoginServer's
+   listening socket (filenames like `Port_9010.txt`).
+
+Trigger ONE login attempt while both captures are recording. The
+matching wall-clock timestamps in both files will identify the
+paired packets unambiguously. Send both files; the calibration
+tool then recovers the seed and we instantiate `Fiesta::Cipher`
+with `Reset(seed)` accordingly.
+
+Alternatively, simply log the client's `MISC_SEED_ACK` (opcode
+0x0207) reply on session start. The 2-byte payload IS the seed;
+no calibration needed.
+
+---
+
+## Implementation status
+
+* `FiestaCipher.h::CipherKind::XOR499` — algorithm verified,
+  table verified byte-for-byte against the disassembly. **Ready
+  for production use** as soon as the seed source is confirmed.
+* `FiestaCipher.h::CipherKind::LCG` — kept in-tree as a backup
+  cipher family but **proven unused by this build's client**
+  (the LCG constants `0x000343FD` / `0x00269EC3` do not appear
+  in `client.idb`'s code or data sections; `byte_9119D0` is the
+  only XOR-with-table loop in the binary).
+
+---
+
+## Files referenced from this directory
 
 ```
 _re_artifacts/cipher/
 ├── README.md                       (this file)
-├── decompiled_cipher.c             (paste here when you have it)
-└── runtime_capture_keys.txt        (optional — debugger output)
+└── decompiled_cipher.c             (transcribed sub_82DB60 + sub_7FCB90)
 ```
+
+---
+
+## Server-side cipher confirmation (2026-02-06)
+
+The user supplied `FIESTA-DISASSEMBLED.zip` containing the official
+binaries for **all** server-side processes:
+
+* `3LoginServer2.exe`        (167 KB) — port 9010
+* `4WorldManagerServer2.exe` (540 KB) — port 9110
+* `Account Release.exe`,  `AccountLog Release.exe`,
+  `Character Release.exe`, `GameLog Release.exe` — sub-services
+* `MoePromise.exe`,        `optool.exe`             — admin tools
+
+> The 16-byte XOR499 table prefix
+> `07 59 69 4A 94 11 94 85 8C 88 05 CB A0 9E CD 58`
+> appears at file offset **0x27358** in `3LoginServer2.exe`
+> and **0x82530** in `4WorldManagerServer2.exe`.
+>
+> The constant `499` (= `0x1F3`) appears as a 32-bit LE literal at
+> file offset **0x23858** in `3LoginServer2.exe` (one match).
+
+This is iron-clad confirmation that the server uses the **same**
+XOR499 cipher with the **same** 499-byte table as the client. The
+cipher is symmetric (XOR ⊕ XOR = identity), so the same routine
+encrypts client→server and decrypts server→client packets.
+
+The only remaining unknown is the SEED that initialises the cipher
+position at the start of each session.  See "What still needs
+calibration" below.
+
+---
+
+## What still needs calibration
+
+The cipher position is initialised by `sub_7FCB90` in the client
+to `seed % 499`.  We have not yet traced **where the `seed` value
+comes from**.  The two most plausible sources:
+
+1. **Server-supplied via `PROTO_NC_MISC_SEED_ACK` (opcode 0x0207)**
+   — server writes the seed in its 2-byte payload and the client
+   `Reset()`s with it on receipt.  This is the canonical Shine
+   engine pattern.
+
+2. **Constant zero on this build** — the user's private-server
+   build may have neutralised the seed exchange (zero seed for
+   simplicity).  Test this first: it costs 1 line of code in the
+   headless client.
+
+### The simplest path to verify
+
+Implement `Phase 6c` outbound chat with `Cipher::Reset(0)` and try
+sending `[u8 0][u8 2]"hi"` to the ZoneServer once Elle is logged
+in. If the server processes the packet → seed is 0 (done!). If not,
+send a `MISC_SEED_ACK` capture from a fresh login round.

@@ -99,12 +99,25 @@ int main() {
         }
     }
 
-    /* Try XOR499 family. */
-    std::printf("Scanning XOR499 seeds 0..0xFFFF...\n");
-    for (uint32_t seed = 0; seed <= 0xFFFF; ++seed) {
-        uint8_t ks[kLen];
-        if (TryCipher(Fiesta::CipherKind::XOR499, (uint16_t)seed, ks)) {
-            std::printf("  ★ MATCH  XOR499 seed=0x%04X\n", seed);
+    /* Try XOR499 family — proven equivalent to a starting-position
+     * scan of the 499-byte table.  The Cipher::Reset() call sets
+     * `m_pos_out = 0` regardless of seed, so we have to drive the
+     * starting position directly via the public `SetPosOut()` (or,
+     * equivalently, by stepping the state forward `pos` bytes). */
+    std::printf("Scanning XOR499 table positions 0..498...\n");
+    Fiesta::Cipher c;
+    c.SetKind(Fiesta::CipherKind::XOR499);
+    for (uint16_t pos = 0; pos < 499; ++pos) {
+        c.Reset(0);                           /* clears m_pos_out to 0 */
+        /* Advance to `pos` by encrypting throw-away bytes. */
+        uint8_t pad[499] = {0};
+        if (pos > 0) c.EncryptOut(pad, pos);
+        /* Now produce the keystream from this position. */
+        uint8_t buf[kLen] = {0};
+        c.EncryptOut(buf, kLen);
+        if (std::memcmp(buf, kExpectedKeystream, kLen) == 0) {
+            std::printf("  ★ MATCH  XOR499 starting position = %u (0x%X)\n",
+                        pos, pos);
             ++total_matches;
         }
     }

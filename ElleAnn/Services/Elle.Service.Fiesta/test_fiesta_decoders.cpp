@@ -178,6 +178,44 @@ static void TestMoveWalkC446() {
                 mw.handle, mw.fromX, mw.fromY, mw.toX, mw.toY, mw.movetype);
 }
 
+/* End-to-end encrypted send — proves the cipher integration is
+ * deterministic and round-trips via the symmetric XOR499 algorithm. */
+static void TestEncodeChatRequestEncrypted() {
+    /* Two ciphers initialised to the same seed produce streams that
+     * cancel each other (XOR ⊕ XOR = identity). */
+    Fiesta::Cipher tx;
+    tx.SetKind(Fiesta::CipherKind::XOR499);
+    tx.Reset(0);
+
+    /* Build encrypted "hi" frame at table position 0 starting from
+     * opcode 0x0801 (NC_ACT_CHAT_REQ in the in-tree opcode map). */
+    auto frame = Fiesta::EncodeChatRequestEncrypted(
+        tx, /*opcode=*/0x0801, "hi", /*itemLinkDataCount=*/0);
+
+    /* Frame layout: [u8 len=4][opcode_hi][opcode_lo][items][text_len]"hi" */
+    EXPECT(frame.size() == 7, "frame must be 1 (len-prefix) + 6 (cipher region)");
+    EXPECT(frame[0] == 6,     "length prefix byte must equal cipher region size");
+
+    /* Now decrypt with a fresh cipher at the same position — bytes
+     * must round-trip to plaintext. */
+    Fiesta::Cipher rx;
+    rx.SetKind(Fiesta::CipherKind::XOR499);
+    rx.Reset(0);
+    /* Skip the 1-byte length prefix; cipher only covers opcode+payload. */
+    std::vector<uint8_t> body(frame.begin() + 1, frame.end());
+    rx.EncryptOut(body.data(), body.size());
+
+    EXPECT(body[0] == 0x08,   "decrypted opcode high must be 0x08");
+    EXPECT(body[1] == 0x01,   "decrypted opcode low  must be 0x01");
+    EXPECT(body[2] == 0x00,   "itemLinkDataCount must be 0");
+    EXPECT(body[3] == 0x02,   "len byte must be 2");
+    EXPECT(body[4] == 'h' && body[5] == 'i',
+           "decrypted content must be 'hi'");
+    std::printf("PASS  EncodeChatRequestEncrypted round-trip: "
+                "frame[%zu B] opcode=0x%02X%02X content='%c%c'\n",
+                frame.size(), body[0], body[1], body[4], body[5]);
+}
+
 int main() {
     std::printf("──── Phase 6a Step 3 decoder tests ────\n");
     TestChatEllaAnn();
@@ -187,6 +225,7 @@ int main() {
     TestEncodeChatLong();
     TestCharBaseEllaAnn();
     TestMoveWalkC446();
+    TestEncodeChatRequestEncrypted();
     std::printf("──── Result: %s (%d failure%s) ────\n",
                 failed == 0 ? "ALL PASS" : "FAILURE",
                 failed, failed == 1 ? "" : "s");
