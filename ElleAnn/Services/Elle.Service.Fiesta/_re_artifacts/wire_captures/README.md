@@ -86,6 +86,57 @@ opcodes against the .tsv will tell us which are documented vs which are NEW
 finds — every undocumented opcode in real traffic is a structural data
 point Phase 6a's parser fills in.
 
+### 5. ⚠ PHASE 6a FINDING: the user's server uses a different opcode build
+
+After running `_re_artifacts/pdb/build_dispatch_table.py` and
+`Debug/test_phase6a_protobase.cpp` against these captures, the
+authoritative dispatch table reveals an important reality:
+
+> **None** of the 17 distinct opcodes observed on the wire match
+> the sizeof of the PDB struct that `PDB_OPCODES.json` says owns
+> the opcode.  Every observed opcode is classified as `HEAD+TAIL`
+> or `UNKNOWN`.
+
+Concrete examples from `/tmp/fiesta_proto_coverage`:
+
+| Opcode  | PDB name                                   | PDB sizeof | Wire len(s)            |
+|---------|--------------------------------------------|------------|-------------------------|
+| 0x0438  | NC_CHAR_OPTION_IMPROVE_SET_SHORTCUTDATA_ACK | 2          | 97                     |
+| 0x0439  | NC_CHAR_OPTION_IMPROVE_SET_KEYMAP_REQ       | 2          | 4                      |
+| 0x0447  | NC_CHAR_OPTION_IMPROVE_INIT_ETC3_REQ        | 1          | 3,12,82,162,182,262    |
+| 0x0602  | NC_MAP_LOGIN_ACK                            | 1622       | 238                    |
+
+The 0x0438 case is the smoking gun: the wire packet payload starts
+with `[u32 userNo=5][char[16] "EllaAnn"]` — the unmistakable shape
+of `PROTO_NC_CHAR_BASE_CMD` (PDB sizeof 105 → 97 wire), which
+`PDB_OPCODES.json` puts at opcode **0x0407**.
+
+**Conclusion**: The user's running Fiesta server is built from a
+*different region toggle* than the four PDBs we extracted into
+`_re_artifacts/pdb/extracted/`.  Opcode IDs were renumbered between
+those two builds while the PROTO_NC_* struct shapes themselves
+were preserved.
+
+**Implication for Phase 6a**: opcode-name → opcode-id is unreliable
+on this wire.  Wire-byte-shape → struct-name IS reliable, because
+the PDB struct catalogue is correct even when the opcode mapping
+isn't.  The dispatcher should resolve handlers by **payload shape**
+first, then cross-reference opcode IDs from the user's specific
+build via fresh PCAPs.
+
+Action item before any handler logic gets written:
+1. User runs Elle's headless client against their LoginServer.
+2. Elle records the SEED_ACK handshake reply (always 2 bytes —
+   the unambiguous fingerprint).
+3. The dispatch table cross-correlates: "SEED_ACK arrived as
+   opcode N, therefore THIS build's NC_MISC = (N >> 8)".
+4. Apply that offset across the entire PROTOCOL_COMMAND enum to
+   re-derive the build-specific opcode → name mapping, and
+   regenerate `dispatch_table.json` under the new mapping.
+
+`build_dispatch_table.py` exposes a `--remap` hook for this
+calibration loop (TODO Phase 6a-step-2).
+
 ## What this unlocks for Phase 6a
 
 With these captures, the headless-client unit tests no longer need a live

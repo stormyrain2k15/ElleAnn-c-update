@@ -2380,3 +2380,62 @@ See cheat-sheet at end of `CHANGELOG.md` "Re-enabling auth" section.
 - **P2 — Column reorder via `displayToReal`**: cosmetic only.
 - **P3 — IP allow-list / per-IP rate limit**: needed before re-public
   exposure with auth on.
+
+---
+
+## Session Feb-2026 (continued) — Phase 6a: Fiesta Authoritative Packet Decoder
+
+(Full narrative: `/app/memory/CHANGELOG.md`.)
+
+### Status
+- **Phase 6a foundation (DONE, packaged as `04-phase6a-protobase.patch`)**:
+  Built the authoritative dispatch infrastructure. Three new headers
+  (FiestaProtoBase.h, FiestaProtoTable.h, two generated `.inc` files),
+  two Python codegen tools, two test programs (compile + replay).
+  10/10 login-chain opcodes resolve through the table; build verified
+  via Linux portable harness AND a fresh patch-apply test workspace.
+
+### Critical Phase 6a Finding
+The user's running Fiesta server uses a *different region toggle* than
+the 5 PDBs we extracted. Of 17 distinct opcodes observed in the live
+2026-02-05 captures, ZERO match their PDB struct's sizeof. Wire-shape
+→ struct mapping is authoritative; opcode-id → name is NOT for this
+build. See `_re_artifacts/wire_captures/README.md §5` for full
+analysis.
+
+### Phase 6a — Step 2 Plan (the actual decoder lighting up)
+1. **(P0) Calibration capture**: User runs Elle headless against
+   LoginServer. Elle records the 2-byte SEED_ACK reply. The high
+   byte = the build's NC_MISC value.
+2. **(P0) Remap tool**: Add `--remap +offset` to
+   `build_dispatch_table.py` (writes a calibrated dispatch_table.json).
+3. **(P0) Re-run coverage report**: With the right mapping, expect
+   ~12-15 of the 17 observed opcodes to flip from HEAD+TAIL/UNKNOWN
+   to FIXED. Gap analysis → pile of hand-coding work.
+4. **(P1) Hand-write decoders** for the calibrated opcodes (login
+   chain, BRIEFINFO ring updates, CHAT/SHOUT/WHISPER, MOVE).
+5. **(P1) Phase 6b: Headless state machine** — feed decoded packets
+   into a C++ world model that surfaces to Cognitive via shared mem.
+
+### Backlog (after Phase 6a step 2)
+- **P1 — Phase 6b**: Headless world-model state machine.
+- **P1 — Phase 6c**: Behavioural Lua bindings (`on_pm_received`,
+  `on_chat_received`, LLM → synthesized chat).
+- **P2 — Phase 6d**: Twin/coop mode (named-pipe packet mirror).
+- **P1 — Phase 5**: Imagination Engine (DMN + Control + Loop).
+
+### Files touched
+- NEW: `Services/Elle.Service.Fiesta/FiestaProtoBase.h`,
+  `Services/Elle.Service.Fiesta/FiestaProtoTable.h`,
+  `Services/Elle.Service.Fiesta/Generated/FiestaProtoTable.inc`,
+  `Services/Elle.Service.Fiesta/Generated/FiestaWireFixtures.inc`,
+  `Services/Elle.Service.Fiesta/_re_artifacts/pdb/build_dispatch_table.py`,
+  `Services/Elle.Service.Fiesta/_re_artifacts/pdb/gen_proto_table.py`,
+  `Services/Elle.Service.Fiesta/_re_artifacts/pdb/extracted/dispatch_table.json`,
+  `Services/Elle.Service.Fiesta/test_fiesta_proto_coverage.cpp`,
+  `Debug/test_phase6a_protobase.cpp`.
+- MODIFIED: `Services/Elle.Service.Fiesta/FiestaPacket.h` (refactor —
+  removed duplicated types now living in FiestaProtoBase.h),
+  `Services/Elle.Service.Fiesta/_re_artifacts/wire_captures/README.md`
+  (+§5 build-mismatch finding).
+- DELIVERED: `/app/04-phase6a-protobase.patch` (1.3 MB, 38 378 lines).

@@ -1081,3 +1081,101 @@ this session — it needs a multi-day port (TextData, ClassName,
 RaceNameInfo, MobInfo, ItemInfo, MapInfo loaders, FrameMgr, NetMgr).
 Keys preserved in `elle_master_config.json:fiesta.headless_client.*`
 so the eventual port has its config slots reserved.
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-05 — Phase 6a: Fiesta Authoritative Packet Decoder Foundation
+
+Delivered as `04-phase6a-protobase.patch` (1.3 MB, 38 378 lines).
+
+### What landed
+- `Services/Elle.Service.Fiesta/FiestaProtoBase.h` (NEW) — single
+  source of truth for foundational types: Name3/4/5/8/256Byte,
+  NETCOMMAND, SHINE_HANDLE_NUMBER, SHINE_XY_TYPE, SHINE_COORD_TYPE,
+  NETPACKETHEADER (+_NAMED variant), NETPACKETZONEHEADER,
+  MAKE_NETCMDID/OPCODE_DEPT/OPCODE_SUBID helpers, PROTOCOL_COMMAND
+  Dept namespace (34 groups), Direction enum, Decoder enum,
+  OpcodeMeta record. Every typedef has compile-time sizeof guard.
+- `Services/Elle.Service.Fiesta/FiestaProtoTable.h` (NEW) — consumes
+  the auto-gen X-macro list, exposes `OpcodeMetaTable()`,
+  `HotOpcodeMetaTable()`, `OpcodeName()` (O(log N) bisect),
+  `OpcodeMetaFor()`, `ClassifyDecoder()`. Compile-time sortedness
+  guard.
+- `Services/Elle.Service.Fiesta/Generated/FiestaProtoTable.inc` (NEW,
+  generated) — 2 300 named opcodes + 15 wire-observed "hot" subset.
+- `Services/Elle.Service.Fiesta/Generated/FiestaWireFixtures.inc`
+  (NEW, generated) — 72 wire events from the 4-port login walk.
+- `Services/Elle.Service.Fiesta/_re_artifacts/pdb/build_dispatch_table.py`
+  (NEW) — cross-references MERGED_protos.json + PDB_OPCODES.json +
+  parsed_captures.json into `extracted/dispatch_table.json` (2 302
+  rows). Surfaces drift, opcode holes, observed-without-struct list.
+- `Services/Elle.Service.Fiesta/_re_artifacts/pdb/gen_proto_table.py`
+  (NEW) — emits the two `.inc` headers from `dispatch_table.json`.
+- `Services/Elle.Service.Fiesta/test_fiesta_proto_coverage.cpp` (NEW)
+  — replays wire fixtures against the dispatch table; classifies
+  every observed opcode as FIXED / HEAD+TAIL / OPAQUE / UNKNOWN.
+- `Debug/test_phase6a_protobase.cpp` (NEW) — 5-block invariant
+  regression: typedef sizes, MAKE_NETCMDID round-trip, table sorted,
+  10/10 login-chain opcodes resolved, BuildPacket header byte order.
+  Compiles + passes under Linux portable harness.
+- `Services/Elle.Service.Fiesta/FiestaPacket.h` (REFACTOR) — now
+  includes FiestaProtoBase.h and removes its duplicates of
+  SHINE_XY_TYPE / SHINE_COORD_TYPE / NETPACKETZONEHEADER. All
+  existing call-sites that resolve through `Fiesta::SHINE_XY_TYPE`
+  etc. continue to work (re-exported via the include).
+- `Services/Elle.Service.Fiesta/_re_artifacts/wire_captures/README.md`
+  (UPDATED) — Phase 6a finding §5 documents the build-mismatch
+  discovery: the user's Fiesta server uses a *different* opcode
+  numbering than the PDBs we extracted from. Wire-shape→struct is
+  authoritative; opcode→name is not.
+
+### Phase 6a Critical Finding
+Running the coverage harness against the 72 captured events produced
+a startling, important result:
+
+> Of 17 distinct observed opcodes, ZERO match their PDB struct's
+> sizeof; 12 classify as HEAD+TAIL with major drift; 5 are UNKNOWN.
+
+Concrete: opcode 0x0438 in PDB_OPCODES.json names
+`NC_CHAR_OPTION_IMPROVE_SET_SHORTCUTDATA_ACK` (sizeof 2) but the wire
+payload is 97 bytes starting with `[u32 userNo=5][char[16] "EllaAnn"]`
+— the unmistakable shape of `PROTO_NC_CHAR_BASE_CMD` (PDB sizeof 105)
+which our extracted PDB places at opcode 0x0407.
+
+Conclusion: the user's running server is built from a different
+*region toggle* than the 5 PDBs we extracted. Opcode IDs were
+renumbered; struct shapes were preserved. The READ.md §5 documents
+the calibration loop needed: capture SEED_ACK on Elle's first
+connect → derive build-specific NC_MISC offset → remap all opcodes
+through `--remap` (TODO: build_dispatch_table.py step-2).
+
+### Tests
+- `g++ -std=c++17 -Wall -Wextra -O0 ... test_phase6a_protobase.cpp`
+  → 10/10 login-chain opcodes resolved, all invariants PASS.
+- `g++ -std=c++17 ... test_fiesta_proto_coverage.cpp` → emits
+  honest coverage report with FIXED=0 / HEAD+TAIL=12 / UNKNOWN=5
+  (drives Phase 6a step 2 backlog).
+- `g++ -std=c++17 ... test_proto_base_compat.cpp` → confirms
+  FiestaProtoBase.h coexists with FiestaPacket.h (no name
+  collisions after refactor).
+- Patch applied cleanly to a fresh git checkout, build verified.
+
+### What Phase 6a step 2 looks like
+1. User runs Elle headless client → captures fresh SEED_ACK (always
+   2-byte payload, unambiguous fingerprint).
+2. Calibration: derive (build_NC_MISC = observed_opcode_high_byte).
+3. `build_dispatch_table.py --remap +offset` regenerates the
+   dispatch table for the user's build.
+4. Re-run coverage report → expect FIXED count to jump from 0 to
+   the correct ~12-15.
+5. Hand-write decoders for the now-aligned opcodes.
+
+### Files touched
+- NEW: `FiestaProtoBase.h`, `FiestaProtoTable.h`,
+  `Generated/FiestaProtoTable.inc`, `Generated/FiestaWireFixtures.inc`,
+  `_re_artifacts/pdb/build_dispatch_table.py`,
+  `_re_artifacts/pdb/gen_proto_table.py`,
+  `_re_artifacts/pdb/extracted/dispatch_table.json`,
+  `test_fiesta_proto_coverage.cpp`, `Debug/test_phase6a_protobase.cpp`.
+- MODIFIED: `FiestaPacket.h` (refactor — removed duplicate types,
+  +include FiestaProtoBase.h),
+  `_re_artifacts/wire_captures/README.md` (+§5 finding).
