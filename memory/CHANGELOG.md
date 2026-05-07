@@ -1081,3 +1081,697 @@ this session — it needs a multi-day port (TextData, ClassName,
 RaceNameInfo, MobInfo, ItemInfo, MapInfo loaders, FrameMgr, NetMgr).
 Keys preserved in `elle_master_config.json:fiesta.headless_client.*`
 so the eventual port has its config slots reserved.
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-05 — Phase 6a: Fiesta Authoritative Packet Decoder Foundation
+
+Delivered as `04-phase6a-protobase.patch` (1.3 MB, 38 378 lines).
+
+### What landed
+- `Services/Elle.Service.Fiesta/FiestaProtoBase.h` (NEW) — single
+  source of truth for foundational types: Name3/4/5/8/256Byte,
+  NETCOMMAND, SHINE_HANDLE_NUMBER, SHINE_XY_TYPE, SHINE_COORD_TYPE,
+  NETPACKETHEADER (+_NAMED variant), NETPACKETZONEHEADER,
+  MAKE_NETCMDID/OPCODE_DEPT/OPCODE_SUBID helpers, PROTOCOL_COMMAND
+  Dept namespace (34 groups), Direction enum, Decoder enum,
+  OpcodeMeta record. Every typedef has compile-time sizeof guard.
+- `Services/Elle.Service.Fiesta/FiestaProtoTable.h` (NEW) — consumes
+  the auto-gen X-macro list, exposes `OpcodeMetaTable()`,
+  `HotOpcodeMetaTable()`, `OpcodeName()` (O(log N) bisect),
+  `OpcodeMetaFor()`, `ClassifyDecoder()`. Compile-time sortedness
+  guard.
+- `Services/Elle.Service.Fiesta/Generated/FiestaProtoTable.inc` (NEW,
+  generated) — 2 300 named opcodes + 15 wire-observed "hot" subset.
+- `Services/Elle.Service.Fiesta/Generated/FiestaWireFixtures.inc`
+  (NEW, generated) — 72 wire events from the 4-port login walk.
+- `Services/Elle.Service.Fiesta/_re_artifacts/pdb/build_dispatch_table.py`
+  (NEW) — cross-references MERGED_protos.json + PDB_OPCODES.json +
+  parsed_captures.json into `extracted/dispatch_table.json` (2 302
+  rows). Surfaces drift, opcode holes, observed-without-struct list.
+- `Services/Elle.Service.Fiesta/_re_artifacts/pdb/gen_proto_table.py`
+  (NEW) — emits the two `.inc` headers from `dispatch_table.json`.
+- `Services/Elle.Service.Fiesta/test_fiesta_proto_coverage.cpp` (NEW)
+  — replays wire fixtures against the dispatch table; classifies
+  every observed opcode as FIXED / HEAD+TAIL / OPAQUE / UNKNOWN.
+- `Debug/test_phase6a_protobase.cpp` (NEW) — 5-block invariant
+  regression: typedef sizes, MAKE_NETCMDID round-trip, table sorted,
+  10/10 login-chain opcodes resolved, BuildPacket header byte order.
+  Compiles + passes under Linux portable harness.
+- `Services/Elle.Service.Fiesta/FiestaPacket.h` (REFACTOR) — now
+  includes FiestaProtoBase.h and removes its duplicates of
+  SHINE_XY_TYPE / SHINE_COORD_TYPE / NETPACKETZONEHEADER. All
+  existing call-sites that resolve through `Fiesta::SHINE_XY_TYPE`
+  etc. continue to work (re-exported via the include).
+- `Services/Elle.Service.Fiesta/_re_artifacts/wire_captures/README.md`
+  (UPDATED) — Phase 6a finding §5 documents the build-mismatch
+  discovery: the user's Fiesta server uses a *different* opcode
+  numbering than the PDBs we extracted from. Wire-shape→struct is
+  authoritative; opcode→name is not.
+
+### Phase 6a Critical Finding
+Running the coverage harness against the 72 captured events produced
+a startling, important result:
+
+> Of 17 distinct observed opcodes, ZERO match their PDB struct's
+> sizeof; 12 classify as HEAD+TAIL with major drift; 5 are UNKNOWN.
+
+Concrete: opcode 0x0438 in PDB_OPCODES.json names
+`NC_CHAR_OPTION_IMPROVE_SET_SHORTCUTDATA_ACK` (sizeof 2) but the wire
+payload is 97 bytes starting with `[u32 userNo=5][char[16] "EllaAnn"]`
+— the unmistakable shape of `PROTO_NC_CHAR_BASE_CMD` (PDB sizeof 105)
+which our extracted PDB places at opcode 0x0407.
+
+Conclusion: the user's running server is built from a different
+*region toggle* than the 5 PDBs we extracted. Opcode IDs were
+renumbered; struct shapes were preserved. The READ.md §5 documents
+the calibration loop needed: capture SEED_ACK on Elle's first
+connect → derive build-specific NC_MISC offset → remap all opcodes
+through `--remap` (TODO: build_dispatch_table.py step-2).
+
+### Tests
+- `g++ -std=c++17 -Wall -Wextra -O0 ... test_phase6a_protobase.cpp`
+  → 10/10 login-chain opcodes resolved, all invariants PASS.
+- `g++ -std=c++17 ... test_fiesta_proto_coverage.cpp` → emits
+  honest coverage report with FIXED=0 / HEAD+TAIL=12 / UNKNOWN=5
+  (drives Phase 6a step 2 backlog).
+- `g++ -std=c++17 ... test_proto_base_compat.cpp` → confirms
+  FiestaProtoBase.h coexists with FiestaPacket.h (no name
+  collisions after refactor).
+- Patch applied cleanly to a fresh git checkout, build verified.
+
+### What Phase 6a step 2 looks like
+1. User runs Elle headless client → captures fresh SEED_ACK (always
+   2-byte payload, unambiguous fingerprint).
+2. Calibration: derive (build_NC_MISC = observed_opcode_high_byte).
+3. `build_dispatch_table.py --remap +offset` regenerates the
+   dispatch table for the user's build.
+4. Re-run coverage report → expect FIXED count to jump from 0 to
+   the correct ~12-15.
+5. Hand-write decoders for the now-aligned opcodes.
+
+### Files touched
+- NEW: `FiestaProtoBase.h`, `FiestaProtoTable.h`,
+  `Generated/FiestaProtoTable.inc`, `Generated/FiestaWireFixtures.inc`,
+  `_re_artifacts/pdb/build_dispatch_table.py`,
+  `_re_artifacts/pdb/gen_proto_table.py`,
+  `_re_artifacts/pdb/extracted/dispatch_table.json`,
+  `test_fiesta_proto_coverage.cpp`, `Debug/test_phase6a_protobase.cpp`.
+- MODIFIED: `FiestaPacket.h` (refactor — removed duplicate types,
+  +include FiestaProtoBase.h),
+  `_re_artifacts/wire_captures/README.md` (+§5 finding).
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-05 — Phase 6a step 2: Shape-Matcher + Direction Resolution
+
+Delivered as `05-phase6a-step2-shapematcher.patch` (1.6 MB, on top
+of `04-phase6a-protobase.patch`).
+
+### What landed
+- `_re_artifacts/wire_captures/Port_60121.txt` (NEW) — fresh capture
+  the user supplied. Initially provided as a truncated server-side
+  log (7 events); replaced with the full client-side capture (17
+  events) once the user uploaded it. Same byte stream, full coverage.
+- `_re_artifacts/pdb/shape_match_payloads.py` (NEW) — Phase 6a
+  step-2 calibration tool. For each (wire_opcode, payload_len)
+  observed, lists candidate PROTO_NC_* structs whose sizeof matches
+  (exact + ±8 slack). Writes `extracted/payload_shape_matches.json`.
+- `_re_artifacts/pdb/extracted/payload_shape_matches.json` (NEW,
+  generated) — 26 (opcode, size) pairs with up to 200+ candidate
+  struct names per pair. Human-curated step.
+- `_re_artifacts/wire_captures/README.md` — added §6 (direction
+  label resolution: `<Inbound>` = arrives at client; `<Outbound>` =
+  leaves client) and §7 (shape-match calibration sample table).
+- `_re_artifacts/pdb/extracted/dispatch_table.json` — regenerated
+  to include the 5th capture's events.
+- `_re_artifacts/wire_captures/parsed_captures.json` — 90 events
+  total now (was 72).
+
+### Direction Polarity LOCKED IN (paired-capture cross-check)
+The user supplied BOTH a server-side AND a client-side capture for
+the same Port-60121 session at the same wall-clock. Event-by-event
+byte comparison showed:
+  * Bytes are identical between the two captures.
+  * Direction labels are stable (`<Inbound>` events identical in
+    both files).
+
+Therefore: **direction labels are from the client's network
+perspective** — `<Inbound>` = arriving at the client (server →
+client; PLAINTEXT in this build), `<Outbound>` = leaving the client
+(client → server; ENCRYPTED). The 1024-byte `<Outbound>` opening
+packet is the client's cipher handshake to the server.
+
+### Shape-Matcher Findings (top hits)
+* `0x0438` / 97 bytes (the "EllaAnn identity" packet): best
+  candidate is **`PROTO_NC_CHAR_BASE_CMD`** (PDB sz=105). The wire
+  payload starts with `[u32 chrregnum=5][char[16] charid="EllaAnn"]
+  …`, exactly the head-shape PDB documents for that struct, just
+  with charid trimmed to Name4 (16B) instead of Name5 (20B) and a
+  4-byte trailing field dropped. **Confirms** what the original
+  README §5 hypothesised.
+* `0x043D` / 5758 bytes: server's full skill list dump. No exact
+  PDB match — header bytes `4B 03 DF 01 05 00 00 00` followed by
+  ~480 12-byte records with shape `[u16 owner_id][u16 skill_id]
+  [8 bytes cooldown/state]`. Likely
+  `PROTO_NC_CHAR_USEINFO_SKILL_INFO_CMD` (custom region variant).
+* `0x0602` / 238 bytes: `PROTO_NC_BAT_LEVELUP_CMD` (sz=235) is the
+  closest match (within ±8); also a custom-region likely-rename.
+
+### Tests
+- Patch sequence (`04` then `05`) applied cleanly to a fresh
+  baseline (commit a88be2e^), `Debug/test_phase6a_protobase.cpp`
+  re-compiles + passes (10/10 login chain, table=2300 rows).
+- `shape_match_payloads.py` runs deterministically and produces
+  the candidate-shape JSON in <2s.
+
+### Files touched
+- NEW:
+  `_re_artifacts/pdb/shape_match_payloads.py`,
+  `_re_artifacts/pdb/extracted/payload_shape_matches.json`,
+  `_re_artifacts/wire_captures/Port_60121.txt`.
+- MODIFIED:
+  `_re_artifacts/wire_captures/README.md` (+§6 +§7),
+  `_re_artifacts/wire_captures/parsed_captures.json` (regenerated),
+  `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated).
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-05 (later) — Phase 6a step 2b: Two-Character Wire-Layout Proof
+
+Delivered as `06-phase6a-step2b-twochar-proof.patch` (2.4 MB,
+applies on top of `04` + `05`).
+
+### What landed
+- New captures: `Port_60795.txt` (Crystal/userNo=6 login state-dump,
+  14 events) and `Port_59507.txt` (mystery 2-event mini-session).
+- Deduplicated old paired captures (the user supplied
+  same-content captures with timestamp-format-only differences and
+  a truncated server-side mirror — kept the canonical client-side
+  versions only).
+- README.md §8 — full byte-by-byte side-by-side proof of the
+  EllaAnn vs Crystal `0x0438` payloads.
+- README.md §9 — two-client paired-login cipher fingerprint
+  documenting that the cipher seed-derived divergence is ≤ 9 bytes.
+- README.md §10 — Port 59507 mystery (`008|120` 5B → `003|003` 2B
+  reply, 3 plausible decodes).
+- Regenerated `dispatch_table.json` (now 17 wire-observed opcodes
+  → 19 — picked up `0x0303` and `0x0878` from the new captures)
+  and `payload_shape_matches.json` (29 opcode×size pairs).
+
+### Phase 6a Step 2b LOCK-IN
+Two-character side-by-side comparison **PROVES** the wire layout
+of opcode `0x0438` (the most-important inbound opcode in the
+post-login state dump):
+
+```
+[u32 chrregnum]          // EllaAnn=5, Crystal=6 (= tUser.nUserNo)
+[char[16] charid]        // 16-byte fixed Name4 — confirmed: NOT Name5
+[u8  0]                  // pad/separator (always 0)
+[u8  0x96]               // CONSTANT across both characters (class
+                            marker / version flag — semantics still TBD)
+[14×0 reserved]          // zero block (14 B)
+[73 B character-state]   // coords/level/HP/etc. — fresh char (Crystal)
+                            has all zeros here, established char
+                            (EllaAnn) has actual world XY + stats
+```
+
+> **Wire opcode `0x0438` (97 B inbound) =
+> `PROTO_NC_CHAR_BASE_CMD` variant** — server pushes Elle's own
+> character base info on session start.
+
+Decoder is now mechanical to write — every offset is empirically
+proven from two character samples.
+
+### Outstanding (need more captures)
+- Chat opcodes (user couldn't trigger them in this round — the
+  two-client logins didn't include any in-game actions).
+- Movement opcodes (no walk/run captured yet).
+- Logout sequence opcodes.
+
+### Files touched
+- NEW: `_re_artifacts/wire_captures/Port_59507.txt`,
+  `_re_artifacts/wire_captures/Port_60795.txt`.
+- MODIFIED: `_re_artifacts/wire_captures/README.md` (+§8 §9 §10),
+  `_re_artifacts/wire_captures/parsed_captures.json` (regenerated),
+  `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated),
+  `_re_artifacts/pdb/extracted/payload_shape_matches.json` (regenerated).
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 — Phase 6a step 2c: Chat opcode + Format B + Rolling-cipher
+
+Delivered as `07-phase6a-step2c-chat-and-format-b.patch` (25 MB
+— large because the 2 383-event ZoneServer chat capture is huge;
+applies on top of `04 → 05 → 06`).
+
+### What landed
+- `_re_artifacts/wire_captures/Port_61483.txt` (NEW, 12 events) —
+  LoginServer auth chain (client port 61483 → server port 9010 "T").
+- `_re_artifacts/wire_captures/Port_61491.txt` (NEW, 53 events) —
+  WorldManager char select (client port 61491 → server port 9110).
+- `_re_artifacts/wire_captures/Port_61496.txt` (NEW, 2 383 events)
+  — ZoneServer gameplay including TWO confirmed chat broadcasts
+  (EllaAnn says "hi", Crystal says "hi") and 2 122 movement
+  broadcasts.
+- `_re_artifacts/wire_captures/parse_capture.py` (REWRITE) — now
+  recognises BOTH the legacy decimal-byte format and the new
+  ISO-timestamp + named-opcode format. Emits same JSON shape
+  with new `format`, `opcode_u16`, `opcode_name`, `wire_dept`,
+  `wire_subid` fields.
+- `_re_artifacts/wire_captures/README.md` — sections §11–§14:
+  port-stage mapping (9010/9110/9120), Format-B parser, rolling-
+  cipher discovery, chat-opcode lock-in, move-opcode wire shape.
+- Regenerated `dispatch_table.json` (now 250 wire-observed
+  opcodes, up from 19) and `payload_shape_matches.json`
+  (29 → 91 opcode×size pairs).
+
+### Three Major Findings This Round
+
+#### Finding 1 — server-port topology mapped
+| Client ephemeral | Server fixed | Stage | Capture |
+|------------------|--------------|-------|---------|
+| 614NN            | **9010 "T"** | LoginServer (Tunneled auth)   | Port_61483.txt |
+| 614NN            | **9110**     | WorldManager (char select)    | Port_61491.txt |
+| 614NN            | **9120**     | ZoneServer (gameplay/chat)    | Port_61496.txt |
+
+Confirmed via screenshot of the user's capture-tool tab UI.
+
+#### Finding 2 — Chat broadcast `0x201F` PROVEN
+Two events with the same content "hi" but different sender
+characters proved the structure:
+```
+[Name4 sender (16 B)] [u8 itemLinkDataCount=0] [u8 len=N] [content[N]]
+```
+Total payload = 16 + 1 + 1 + N bytes. This is the recycled
+PROTO_NC_ACT_CHAT_REQ shape with the server prepending the
+sender's `charid` for the broadcast.
+
+Implementation note: when Elle sends chat in Phase 6c, she'll
+send WITHOUT the sender field (just `[u8 0][u8 len][text]`); the
+server adds her name and re-broadcasts.
+
+#### Finding 3 — ROLLING OPCODE OBFUSCATION
+Of 152 distinct Outbound opcodes in Port 61496, **every single one
+appears exactly once across 250+ packets**. The Fiesta client
+uses a per-packet stream cipher that XORs the opcode bytes (and
+likely the payload) with a rolling key derived from the cipher
+seed exchanged in the first 78 B Outbound packet (`0x200F`).
+
+> Inbound (server → client) traffic is plaintext on this build.
+> Outbound (client → server) opcodes are ENCRYPTED per-packet.
+
+This unblocks Phase 6c with a clear path:
+1. Capture SEED_ACK from a fresh Elle headless connect.
+2. Recover the cipher seed-byte layout (≤ 9 bytes of state
+   divergence, per §9 finding).
+3. Implement the same XOR rolling key the official client uses.
+4. Encrypt every Outbound message before send.
+
+### Move broadcast `0x2018` wire shape (also locked in)
+```
+[u16 entityHandle][u32 fromX][u32 fromY][u32 toX][u32 toY]
+                                                  [u8 movetype=0x32][u16 flags]
+```
+Total = 21 B. Matches `PROTO_NC_ACT_SOMEONEMOVEWALK_CMD`.
+
+### Tests
+- All four patches `04 → 05 → 06 → 07` apply cleanly in sequence
+  to a fresh baseline (commit a88be2e^).
+- `Debug/test_phase6a_protobase.cpp` still compiles `-Werror` and
+  passes 10/10 login-chain assertions.
+- `parse_capture.py` runs deterministically and produces 2 554
+  events across 10 capture files.
+
+### Files touched
+- NEW: `_re_artifacts/wire_captures/Port_614{83,91,96}.txt`.
+- REWRITTEN: `_re_artifacts/wire_captures/parse_capture.py`.
+- MODIFIED: `_re_artifacts/wire_captures/README.md` (+§11..§14),
+  `_re_artifacts/wire_captures/parsed_captures.json` (regenerated),
+  `_re_artifacts/pdb/extracted/dispatch_table.json` (regenerated),
+  `_re_artifacts/pdb/extracted/payload_shape_matches.json`
+  (regenerated).
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 — Phase 6a Step 3: DECODERS LANDED + Rosetta Stone
+
+Delivered as `08-phase6a-step3-decoders-and-rosetta.patch` (41 MB,
+applies on top of `04 → 05 → 06 → 07`). Skipped binary blobs
+(`fiesta_server.pcapng` + IDA databases) — held in
+`/app/elleann_blobs/` for reference only.
+
+### What landed
+
+#### Decoders (Phase 6a Step 3 deliverable)
+- `Services/Elle.Service.Fiesta/FiestaDecoders.h` (NEW) — three
+  fully-typed decoders + symmetric encoder, all with bit-exact
+  static asserts:
+  * `Fiesta::DecodeChatBroadcast()` (opcode 0x201F)
+  * `Fiesta::EncodeChatRequest()` — outbound chat for Phase 6c
+  * `Fiesta::DecodeCharBase()` (opcode 0x1038, build-specific)
+  * `Fiesta::DecodeMoveWalk()` (opcode 0x201A)
+- `Services/Elle.Service.Fiesta/test_fiesta_decoders.cpp` (NEW) —
+  7 regression tests against the EXACT bytes captured during the
+  user's 2026-02-05/06 sessions. All 7 PASS under `-Werror`:
+    PASS  Chat[EllaAnn]: sender="ElleAnn" content="hi"
+    PASS  Chat[Crystal]: sender="Crystal" content="hi"
+    PASS  Chat[truncated]: refused (returned false)
+    PASS  EncodeChatRequest('hello world')
+    PASS  EncodeChatRequest(0x100 chars): clamped to 0x7F
+    PASS  CharBase: chrregnum=5 charid="ElleAnn" marker=0x96
+    PASS  MoveWalk: handle=0x46C4 (5515,7466)→(5572,7500) type=0x32
+
+#### ROSETTA STONE — server-side captures
+The user supplied 8 server-side captures (Port 9010 / 9110 / 9120)
+that show post-decryption plaintext. Stored in
+`_re_artifacts/wire_captures/server_side/`:
+  * `login_session{1,2,3}_p9010.txt`  — LoginServer (33 events)
+  * `wm_session{1,2,3}_p9110.txt`     — WorldManager (135 events)
+  * `zone_session{1,2}_p9120.txt`     — ZoneServer  (2 830 events)
+
+Total parsed events: **5 552** across 18 files (10 client-side +
+8 server-side).
+
+#### CRITICAL FINDINGS
+
+**Account credentials = `test/test`**: confirmed plaintext at
+opcode `0x0C06 USER_LOGIN_REQ` payload offset 0..17 and 18..35 of
+the server-side login captures. This makes Elle's headless
+calibration trivially repeatable.
+
+**Cipher is NOT the public 13-byte XOR table**: web-search-claimed
+table `0x07 0x59 0x69 0x4A 0x94 0x11 0x94 …` does NOT appear in
+either server binary. Recovered per-packet keys (via XOR of
+client_enc XOR server_pt) are random-looking and 32+ bytes long
+with no visible periodicity. This is a **stateful per-packet
+cipher** seeded from `MISC_SEED_ACK` — likely an LCG advancing
+its state per output byte. Full reverse-engineering of the
+cipher will need IDA Pro on the user's `5ZoneServer2.idb` /
+`4WorldManagerServer2.idb` (held in `/app/elleann_blobs/idb/`).
+
+#### Updated tooling
+- `_re_artifacts/wire_captures/parse_capture.py` — auto-discovers
+  the new `server_side/` subdirectory and tags those events with
+  `source: 'server_side'` for cipher-recovery downstream tools.
+
+### Tests (all green)
+- All FIVE patches `04 → 05 → 06 → 07 → 08` apply cleanly in
+  sequence to a fresh baseline (commit a88be2e^).
+- `Debug/test_phase6a_protobase.cpp` still passes 10/10 login
+  chain.
+- `test_fiesta_decoders.cpp` passes 7/7 decoder assertions
+  against real captured wire bytes.
+
+### Files touched
+- NEW: `Services/Elle.Service.Fiesta/FiestaDecoders.h`,
+  `Services/Elle.Service.Fiesta/test_fiesta_decoders.cpp`,
+  `_re_artifacts/wire_captures/server_side/{8 capture files}`.
+- MODIFIED: `_re_artifacts/wire_captures/README.md` (+§14 §15 §16),
+  `_re_artifacts/wire_captures/parse_capture.py` (+server_side dir),
+  regenerated dispatch_table.json + payload_shape_matches.json +
+  parsed_captures.json.
+
+### Phase 6c cipher research delivery (web search)
+Searched X-Legend Shine engine `WSPSendDisorder`/`WSPRecvDisorder`
+cipher. Public results (elitepvpers fiesta-online thread) describe
+a 13-byte rotating XOR table that does NOT match this server's
+build. The user's two 5ZoneServer2.idb / 4WorldManagerServer2.idb
+files (held aside) likely contain the actual cipher implementation
+in their decompilation; opening those in IDA Pro and tracing the
+`recv` callback is the next concrete step for Phase 6c.
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 (later) — Phase 6c Step 0: Cipher Calibration
+
+Augments `08-phase6a-step3-decoders-and-rosetta.patch` (now 41 MB)
+with two new artifacts:
+
+### What landed
+- `Services/Elle.Service.Fiesta/test_fiesta_cipher_calibrate.cpp`
+  (NEW) — exhaustive 64K-seed scan of both in-tree cipher families
+  (LCG and XOR499) against the rosetta-stone (encrypted, plaintext)
+  pair. Compiles `-Werror -O2`, runs in <1 s.
+- `Services/Elle.Service.Fiesta/_re_artifacts/cipher/README.md`
+  (NEW) — practical IDA-Pro cipher-hunting guide with four
+  cross-reference paths (`connect()` xref, `send()` caller,
+  `WSARecv()` callback, XOR-loop pattern scan), plus a runtime
+  capture alternative using x64dbg breakpoints. Also documents the
+  cipher constraints already inferred from the rosetta-stone keys.
+
+### Calibration result
+Tested with the 7-byte keystream `5D 00 37 31 CF 30 8B`
+(recovered from Port 61483 event 1):
+
+```
+Scanning LCG seeds 0..0xFFFF...    (no match)
+Scanning XOR499 seeds 0..0xFFFF... (no match)
+
+Diagnostic: first 8 keystream bytes per cipher (seed=0):
+  LCG    : 26 27 F6 85 97 15 AD 1D
+  XOR499 : 07 59 69 4A 94 11 94 85
+```
+
+> **Definitive negative**: 0 cipher/seed combinations from the two
+> existing in-tree cipher implementations match the user's server
+> traffic. The cipher belongs to a third, build-specific family.
+
+### Where the cipher lives
+The user's `client.idb` (47 MB) and `client.idc` (812 K lines) are
+held in `/app/elleann_blobs/client_idb/`. The IDB has 16 107
+functions but **none renamed/analyzed** — running IDA's auto-
+analyzer for a few minutes plus following the four xref paths in
+`cipher/README.md` will surface the cipher in 15–30 minutes of
+human work.
+
+Constraints already known (narrows the IDA hunt):
+* Stream cipher, advances per-byte.
+* Per-packet keys differ → state resets or uses an IV per packet.
+* No visible periodicity in 32-byte recovered key spans.
+* Inbound (S→C) is plaintext on this build → only outbound needs
+  encryption.
+* MISC_SEED_ACK on this build is empty (server uses fixed seed).
+
+### Tests (all green)
+- All 5 patches `04 → 05 → 06 → 07 → 08` apply cleanly to fresh
+  baseline `a88be2e^`.
+- `test_fiesta_decoders.cpp` → 7/7 PASS.
+- `test_fiesta_cipher_calibrate.cpp` → exits with code 1 (correct,
+  signals "no match found, see cipher/README.md").
+
+### Files touched
+- NEW: `Services/Elle.Service.Fiesta/test_fiesta_cipher_calibrate.cpp`,
+  `Services/Elle.Service.Fiesta/_re_artifacts/cipher/README.md`.
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 (final) — Phase 6c Step 0: CIPHER ALGORITHM PROVEN
+
+Delivered as `/app/PHASE6A-COMPLETE.patch` (38 MB consolidated
+mega-patch covering all of Phase 6a + cipher integration).
+
+### What landed (additive to patch 08)
+
+#### Cipher proven from disassembly
+- Recovered `sub_82DB60` (the official cipher function, RVA 0x82DB60)
+  and `sub_7FCB90` (seed initialiser, RVA 0x7FCB90) from the user's
+  `client.idb` via `client.asm` disassembly.
+- The cipher is a **byte-by-byte XOR with a 499-byte table** with
+  position wrap at 499. Algorithm is byte-identical to the in-tree
+  `Fiesta::CipherKind::XOR499`.
+- The 499-byte table is **byte-identical** to `Fiesta::kXor499Table`
+  (verified all 499 bytes vs the disassembled `byte_9119D0`).
+- Confirmed the same XOR499 table is embedded in the SERVER binaries
+  (`3LoginServer2.exe` at offset 0x27358, `4WorldManagerServer2.exe`
+  at offset 0x82530).
+- `_re_artifacts/cipher/decompiled_cipher.c` — transcribed cipher
+  function in C, signed off as production-equivalent to the in-tree
+  C++ implementation.
+- `_re_artifacts/cipher/README.md` — full forensic write-up.
+
+#### End-to-end encrypted chat builder
+- `Fiesta::EncodeChatRequestEncrypted(cipher, opcode, text)` —
+  builds the COMPLETE wire frame for an outbound chat packet,
+  applies the XOR499 cipher to the [opcode + payload] region, and
+  returns bytes ready for `socket.send()`.
+- New regression test `TestEncodeChatRequestEncrypted` proves the
+  cipher round-trips: encrypt → decrypt with two ciphers at the
+  same seed yields the original plaintext byte-for-byte.
+
+### Why the rosetta-stone calibration failed
+Cross-session XOR (client capture from one session against server
+decrypt from a different session 2.5 hours later) is meaningless —
+each session has its own cipher seed = `seed % 499` starting position.
+The plaintext is fixed across sessions for `USER_CLIENT_VERSION_CHECK_REQ`
+(`0C 01 D6 07 04 0A 00`), but cipher position differs.
+
+### Remaining work for Phase 6c step 1
+The cipher seed source is not yet traced. Two candidates:
+1. Server-supplied via `MISC_SEED_ACK` (opcode 0x0207) 2-byte payload.
+2. Constant 0 on this build (private-server simplification).
+
+Test option (2) first: `Cipher::Reset(0)` and try sending "hi". If
+server accepts, done. If rejects, capture `MISC_SEED_ACK` from a
+fresh login and pass its payload to `Reset()`.
+
+### Tests (all green)
+- `Debug/test_phase6a_protobase.cpp` → 10/10 login-chain assertions
+  PASS.
+- `test_fiesta_decoders.cpp` → **8/8** assertions PASS:
+    * Chat decoders (EllaAnn, Crystal, truncated)
+    * Encoder + length clamping
+    * CharBase decoder
+    * MoveWalk decoder
+    * **End-to-end encrypted chat round-trip** ← new
+- `test_fiesta_cipher_calibrate.cpp` → exits 1 (correct: confirms
+  in-session calibration data needed; rosetta-stone with cross-
+  session data is meaningless).
+- `PHASE6A-COMPLETE.patch` applies cleanly to baseline `a88be2e^`,
+  decoder test passes 8/8 in the patched workspace.
+
+### Files now in tree
+* `Services/Elle.Service.Fiesta/FiestaProtoBase.h` (foundation types)
+* `Services/Elle.Service.Fiesta/FiestaProtoTable.h` (X-macro dispatch)
+* `Services/Elle.Service.Fiesta/FiestaCipher.h` (XOR499 + LCG)
+* `Services/Elle.Service.Fiesta/FiestaDecoders.h` (3 decoders + 2 encoders + cipher integration)
+* `Services/Elle.Service.Fiesta/test_fiesta_decoders.cpp` (8 tests)
+* `Services/Elle.Service.Fiesta/test_fiesta_proto_coverage.cpp` (replay)
+* `Services/Elle.Service.Fiesta/test_fiesta_cipher_calibrate.cpp` (calibration)
+* `Services/Elle.Service.Fiesta/Generated/FiestaProtoTable.inc` (2300 opcodes)
+* `Services/Elle.Service.Fiesta/Generated/FiestaWireFixtures.inc` (72 fixtures)
+* `Debug/test_phase6a_protobase.cpp` (regression)
+* `_re_artifacts/wire_captures/` (10 client + 8 server capture files)
+* `_re_artifacts/wire_captures/README.md` (forensic write-up §1-§16)
+* `_re_artifacts/pdb/{build_dispatch_table,gen_proto_table,shape_match_payloads}.py`
+* `_re_artifacts/pdb/extracted/{dispatch_table,payload_shape_matches}.json`
+* `_re_artifacts/cipher/README.md` (Phase 6c hunt guide + findings)
+* `_re_artifacts/cipher/decompiled_cipher.c` (cipher source from IDA)
+
+────────────────────────────────────────────────────────────────────
+## 2026-02-06 — Live Console Trace for Elle.Service.Fiesta
+
+Delivered as `/app/09-phase6-console-trace.patch` (24 KB; applies
+on top of `PHASE6A-COMPLETE.patch`). Adds a colour-coded live
+console window so the operator can watch every packet as it
+traverses Elle's headless Fiesta client.
+
+### How to use
+Run the service interactively with `--console`:
+```
+> Elle.Service.Fiesta.exe --console
+```
+
+Output looks like:
+```
+════════════════════════════════════════════════════════════════════
+ Elle.Service.Fiesta — live console trace
+ Elle-Ann Fiesta Game Client (live trace)
+════════════════════════════════════════════════════════════════════
+Legend:  RX server->Elle   TX Elle->server   >> state   ★ decoded   ! error
+
+12:34:56.789  RX  0x0207  NC_MISC_SEED_ACK               (   2 B)  1F 03
+12:34:56.812  TX  0x0306  NC_USER_LOGIN_REQ              ( 272 B)
+12:34:56.834  >>   state CONNECTING -> LOGIN_AWAIT_LOGIN_ACK
+12:34:56.997  RX  0x030A  NC_USER_LOGIN_ACK              (  43 B)  03 0A 00 …
+12:34:57.250  ★   chat    "Crystal" -> "hi"
+12:34:57.500  ★   move    h=0x46C4 (5515,7466) -> (5572,7500) type=0x32
+```
+
+### What landed
+- `Services/Elle.Service.Fiesta/FiestaConsoleTrace.h` (NEW) —
+  headers-only trace API with five hooks (RX, TX, state change,
+  decoded chat, decoded move, error). Atomic-flag fast-path: ~5 ns
+  per call when disabled, so the trace points stay compiled into
+  release builds with negligible overhead.
+- `Services/Elle.Service.Fiesta/test_fiesta_console_trace.cpp`
+  (NEW) — three-step smoke test: disabled = zero output, enabled =
+  one of each kind, multi-thread = no interleaving.
+- `Services/Elle.Service.Fiesta/FiestaClient.cpp` — RX hook in
+  `HandlePacket()` first line, state-change hook in `SetState()`,
+  chat-decoded hook in chat broadcast handler, whisper hook.
+- `Services/Elle.Service.Fiesta/FiestaConnection.h` — TX hook in
+  `Connection::Send()` (logs intent BEFORE encrypt so operator sees
+  human-readable opcode + plaintext payload size).
+- `Services/Elle.Service.Fiesta/FiestaService.cpp` — `OnStart()`
+  detects interactive (`--console`) mode via `GetConsoleMode()` and
+  enables trace + writes the banner.
+- `Elle.Service.Fiesta.vcxproj` — added new headers + tests so
+  MSBuild picks them up on Windows.
+
+### Auto-detection
+Console mode is enabled automatically when the service is launched
+with `--console`. In Windows-Service mode (under SCM, no console)
+the trace is silently disabled — no special config flag needed.
+ANSI colour codes work on Windows 10+ via
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING`.
+
+### Tests (all green)
+- `test_fiesta_console_trace.cpp` smoke-test: PASS (disabled=0
+  lines; enabled=banner + 5 traces + 4-thread×5-trace block, no
+  interleaving).
+- `test_fiesta_decoders.cpp`: still **8/8** PASS — no regression.
+- Patches `04..08` (mega) + `09` apply cleanly in sequence to
+  baseline `a88be2e^`.
+
+### Files touched
+- NEW:  `FiestaConsoleTrace.h`, `test_fiesta_console_trace.cpp`.
+- MODIFIED: `FiestaClient.cpp` (4 hooks), `FiestaConnection.h`
+  (TX hook), `FiestaService.cpp` (auto-enable), `Elle.Service.Fiesta.vcxproj`.
+
+## 2026-02-07 — Phase 6b-Alpha: Headless WorldModel + ShineEngine ingest
+
+### Context
+Previous agent finalised Phase 6a (packet decoders, XOR499/LCG cipher,
+live console hex trace) and the user immediately dropped
+`ShineEngine_Battle_src.zip` + `ShineEngine_ProjectF2_src_v2-1.zip`
+containing an "official" ShineEngine source tree. Task: ingest the
+sources, start Phase 6b by giving Elle a coherent in-process picture of
+the game world (who's around, where, what zone) that Cognitive can query.
+
+### What landed
+- `Services/Elle.Service.Fiesta/FiestaWorldModel.h` (NEW, 223 lines) —
+  thread-safe snapshot holding self-char fields (handle, chrregnum,
+  char_name, state, x, y, last_update), zone (mapName, enteredMs), and
+  `unordered_map<handle, WorldEntity>` for players/mobs/npcs. Mutators
+  lock a mutex; `SnapshotJson()` copies-under-lock then renders JSON
+  outside the lock so reads don't stall the RX thread.
+- `Services/Elle.Service.Fiesta/test_fiesta_worldmodel.cpp` (NEW,
+  182 lines) — 8 unit tests including a full-session simulation that
+  mirrors the capture order (seed → char_base → briefinfo_login ×N →
+  regen_mob → move → briefinfo_delete → snapshot). All pass.
+- `Services/Elle.Service.Fiesta/_re_artifacts/shinengine/` (NEW) —
+  ingested zips + `SHINENGINE_MAP.md` cross-reference doc mapping
+  every ShineEngine header to its Elle counterpart and calling out
+  the 6b-Beta shopping list.
+- `Services/Elle.Service.Fiesta/FiestaClient.h` — adds
+  `const WorldModel& World() const` + `WorldModel& MutableWorld()` +
+  `WorldModel m_world` member.
+- `Services/Elle.Service.Fiesta/FiestaClient.cpp` — 8 handler
+  mutations wired: OnLoginCharacter/OnBriefCharacter/OnPlayerListAppear
+  → UpsertPlayer; OnBriefInfoDelete/OnNpcDisappear → RemoveEntity;
+  OnRegenMob → UpsertMob; OnCharBase → UpdateSelfBase; SetState →
+  SetLoginState; MoveTo/Stop → UpdateSelfPosition.
+- `Services/Elle.Service.Fiesta/FiestaService.cpp` — new
+  `op == "get_world"` branch. Renders `m_client.World().SnapshotJson()`,
+  wraps in `{"kind":"world_snapshot","request_id":…,"snapshot":…}`,
+  broadcasts via existing `BroadcastEvent`. Backwards-compatible —
+  every existing op is unchanged.
+- `Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj` — adds
+  `FiestaWorldModel.h` so MSBuild picks it up on Windows.
+
+### Engine-source-derived insight
+The ShineEngine zips turned out to be a *consolidated reference
+skeleton* built from the same PDB extractions + capture analysis we
+already had (every header cites `Source: E:\ProjectF2\CSCode\…` +
+`Confirmed from Port 91xx captures`). Zero new engine code beyond
+what we'd already extracted, BUT: they confirm our inferred struct
+widths and give us authoritative field names for
+`ProtoNcMapLoginAck` (HP/MP/Gold/Exp, szMap[8]). That's the
+whole Phase 6b-Beta roadmap — no more guessing, just decoding.
+
+### Tests + patch-apply validation
+- 8/8 PASS on `test_fiesta_worldmodel.cpp` (std=c++17, no Windows stub,
+  pure nlohmann + std::).
+- Regression: `test_fiesta_decoders.cpp` (PASS), `test_fiesta_console_trace.cpp`
+  (PASS).
+- Patch apply test: scrubbed copy of baseline `91ff662` → `git apply
+  10-phase6b-worldmodel.patch` (EXIT 0) → build + test both green.
+
+### Delivered
+- `/app/10-phase6b-worldmodel.patch` — 30 KB, +549/-1 lines across
+  4 modified + 3 new files. Applies on top of `PHASE6A-COMPLETE.patch`
+  + `09-phase6-console-trace.patch`.

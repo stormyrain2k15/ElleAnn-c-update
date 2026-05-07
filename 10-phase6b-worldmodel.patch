@@ -1,0 +1,689 @@
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj b/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj
+index 16753b9..826fe06 100644
+--- a/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj
++++ b/ElleAnn/Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj
+@@ -51,6 +51,7 @@
+     <ClInclude Include="FiestaConnection.h" />
+     <ClInclude Include="FiestaClient.h" />
+     <ClInclude Include="FiestaBriefInfoRing.h" />
++    <ClInclude Include="FiestaWorldModel.h" />
+   </ItemGroup>
+   <ItemGroup>
+     <ProjectReference Include="..\..\Shared\ElleCore.Shared.vcxproj">
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp b/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp
+index 0b7888b..f5db6bc 100644
+--- a/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp
++++ b/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.cpp
+@@ -76,6 +76,7 @@ void Client::OnLoginCharacter(const InPacket& pkt) {
+     std::string name(nameBuf);
+     while (!name.empty() && name.back() == 0) name.pop_back();
+     m_briefRing.Insert(head.handle, name);
++    m_world.UpsertPlayer(head.handle, name);
+ 
+     std::ostringstream o;
+     o << "{\"kind\":\"player_appear\",\"handle\":" << head.handle
+@@ -89,6 +90,7 @@ void Client::OnBriefInfoDelete(const InPacket& pkt) {
+     PROTO_NC_BRIEFINFO_BRIEFINFODELETE_CMD del{};
+     std::memcpy(&del, pkt.payload.data(), sizeof(del));
+     m_briefRing.Remove(del.hnd);
++    m_world.RemoveEntity(del.hnd);
+ 
+     std::ostringstream o;
+     o << "{\"kind\":\"entity_disappear\",\"handle\":" << del.hnd << "}";
+@@ -104,6 +106,7 @@ void Client::OnRegenMob(const InPacket& pkt) {
+     /* Mobs don't carry a display name in REGENMOB — we keep them out
+      * of the player ring (they're handle-only) and surface as an
+      * event for Cognitive's spatial model. */
++    m_world.UpsertMob(head.handle, head.mob_id);
+     std::ostringstream o;
+     o << "{\"kind\":\"mob_appear\",\"handle\":" << head.handle
+       << ",\"mob_id\":" << head.mob_id << "}";
+@@ -115,6 +118,7 @@ void Client::OnNpcDisappear(const InPacket& pkt) {
+     PROTO_NC_BRIEFINFO_NPC_DISAPPEAR_CMD del{};
+     std::memcpy(&del, pkt.payload.data(), sizeof(del));
+     m_briefRing.Remove(del.handle);
++    m_world.RemoveEntity(del.handle);
+     std::ostringstream o;
+     o << "{\"kind\":\"npc_disappear\",\"handle\":" << del.handle << "}";
+     EmitEvent(o.str());
+@@ -132,6 +136,7 @@ void Client::OnBriefCharacter(const InPacket& pkt) {
+     std::string name(nameBuf);
+     while (!name.empty() && name.back() == 0) name.pop_back();
+     m_briefRing.Insert(head.handle, name);
++    m_world.UpsertPlayer(head.handle, name);
+ 
+     std::ostringstream o;
+     o << "{\"kind\":\"player_update\",\"handle\":" << head.handle
+@@ -155,7 +160,10 @@ void Client::OnPlayerListAppear(const InPacket& pkt) {
+         if (!r.Bytes(charid, sizeof(charid))) break;
+         std::string name(charid, sizeof(charid));
+         while (!name.empty() && name.back() == 0) name.pop_back();
+-        if (!name.empty()) m_briefRing.Insert(handle, name);
++        if (!name.empty()) {
++            m_briefRing.Insert(handle, name);
++            m_world.UpsertPlayer(handle, name);
++        }
+         parsed++;
+     }
+     std::ostringstream o;
+@@ -176,6 +184,8 @@ void Client::OnCharBase(const InPacket& pkt) {
+     std::string name(nameBuf);
+     while (!name.empty() && name.back() == 0) name.pop_back();
+ 
++    m_world.UpdateSelfBase(head.chrregnum, name);
++
+     std::ostringstream o;
+     o << "{\"kind\":\"self_base\",\"chrregnum\":" << head.chrregnum
+       << ",\"charid\":\"" << JsonEsc(name) << "\"}";
+@@ -357,6 +367,7 @@ void Client::SetState(State s) {
+     }
+     if (previous != s) {
+         Fiesta::Trace::OnStateChange(StateName(previous), StateName(s));
++        m_world.SetLoginState(StateName(s));
+         std::ostringstream o;
+         o << "{\"kind\":\"login_state\",\"state\":\"" << StateName(s) << "\"}";
+         EmitEvent(o.str());
+@@ -656,6 +667,7 @@ bool Client::MoveTo(uint32_t toX, uint32_t toY, bool run) {
+     req.to.x = toX;
+     req.to.y = toY;
+     m_lastPos = req.to;
++    m_world.UpdateSelfPosition(toX, toY);
+     return m_conn.Send(run ? Op::NC_ACT_RUN_REQ : Op::NC_ACT_WALK_REQ,
+                        ToBytes(req));
+ }
+@@ -668,6 +680,7 @@ bool Client::Stop(uint32_t atX, uint32_t atY) {
+      * "teleporting" stop-points. */
+     SHINE_XY_TYPE xy{ atX, atY };
+     m_lastPos = xy;
++    m_world.UpdateSelfPosition(atX, atY);
+     return m_conn.Send(Op::NC_ACT_STOP_REQ, ToBytes(xy));
+ }
+ 
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.h b/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.h
+index 4b30bfa..a63a339 100644
+--- a/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.h
++++ b/ElleAnn/Services/Elle.Service.Fiesta/FiestaClient.h
+@@ -44,6 +44,7 @@
+ #include "FiestaBriefInfoRing.h"
+ #include "FiestaConnection.h"
+ #include "FiestaPacket.h"
++#include "FiestaWorldModel.h"
+ 
+ #include <atomic>
+ #include <chrono>
+@@ -232,6 +233,12 @@ public:
+      *  or for IPC consumers that want to dump the full table).    */
+     const BriefInfoRing& Ring() const { return m_briefRing; }
+ 
++    /** Phase 6b-Alpha: read-only access to the in-process world model.
++     *  Snapshot rendering is thread-safe; pointer-stability guaranteed
++     *  for the lifetime of the Client. */
++    const WorldModel& World() const { return m_world; }
++    WorldModel&       MutableWorld()      { return m_world; }
++
+ private:
+     void HandlePacket(const InPacket& pkt);
+     void EmitEvent(const std::string& kindJson);
+@@ -300,6 +307,11 @@ private:
+     /* Player handle⇆displayName cache (BriefInfoRing). */
+     BriefInfoRing          m_briefRing;
+ 
++    /* Phase 6b-Alpha: in-process world model.  Mutated by the OnXxx
++     * handlers on the RX thread, read lock-free via SnapshotJson()
++     * from any thread (IPC / diag / tests). */
++    WorldModel             m_world;
++
+     /* Region-toggle config. */
+     std::string            m_versionKey = "SDO_FIESTA_NEW_VER_KEY";
+     std::string            m_spawnApps;
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp b/ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp
+index 6c020b6..ec8ae8c 100644
+--- a/ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp
++++ b/ElleAnn/Services/Elle.Service.Fiesta/FiestaService.cpp
+@@ -361,6 +361,19 @@ protected:
+             m_client.SendRaw(opcode, bytes);
+         } else if (op == "disconnect") {
+             m_client.Disconnect(j.value("reason", std::string("ipc disconnect")));
++        } else if (op == "get_world") {
++            /* Phase 6b-Alpha: snapshot the in-process WorldModel and
++             * echo it back as an IPC_FIESTA_EVENT so every subscriber
++             * gets the same view. Cognitive can pin request_id into
++             * the reply envelope so caller can correlate. */
++            nlohmann::json snap = m_client.World().SnapshotJson();
++            const std::string reqId = j.value("request_id", std::string(""));
++            nlohmann::json out = {
++                {"kind",     "world_snapshot"},
++                {"snapshot", std::move(snap)},
++            };
++            if (!reqId.empty()) out["request_id"] = reqId;
++            BroadcastEvent(out.dump());
+         } else {
+             ELLE_WARN("Fiesta: unknown IPC op '%s'", op.c_str());
+         }
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/FiestaWorldModel.h b/ElleAnn/Services/Elle.Service.Fiesta/FiestaWorldModel.h
+new file mode 100644
+index 0000000..b376882
+--- /dev/null
++++ b/ElleAnn/Services/Elle.Service.Fiesta/FiestaWorldModel.h
+@@ -0,0 +1,223 @@
++/*══════════════════════════════════════════════════════════════════════════════
++ * FiestaWorldModel.h — Phase 6b-Alpha headless world state.
++ *
++ *   Thread-safe in-process snapshot of everything the Fiesta decoders have
++ *   observed on the wire. Every handler in FiestaClient.cpp pushes deltas
++ *   into this struct; Cognitive can pull the full picture over IPC with
++ *   `{"op":"get_world"}`.
++ *
++ *   Scope (Phase 6b-Alpha):
++ *     • self     — registration number, char name, map, last known (x,y),
++ *                  login-state, selfHandle (once known).
++ *     • entities — handle → { kind, name|mobId, last-seen ms }.
++ *                  Players gain a name via BRIEFINFO, mobs carry mob_id,
++ *                  NPCs are identified by disappear-only (kept as 'npc').
++ *     • zone     — mapName string recovered from MAP_LOGINCOMPLETE.
++ *
++ *   Not in this phase (deferred to 6b-Beta): HP/MP, gold, exp, skills,
++ *   inventory. Those require decoding NC_MAP_LOGIN_ACK (0x1038) and
++ *   its flood packets which are shape-matched but not yet hand-decoded.
++ *
++ *   Serialisation is JSON via nlohmann — same envelope every other service
++ *   in Elle uses, so Cognitive / Lua / HTTPServer can consume it without
++ *   custom parsers.
++ *══════════════════════════════════════════════════════════════════════════════*/
++#pragma once
++#ifndef ELLE_FIESTA_WORLDMODEL_H
++#define ELLE_FIESTA_WORLDMODEL_H
++
++#include <chrono>
++#include <cstdint>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++#include "../../Shared/json.hpp"
++
++namespace Fiesta {
++
++enum class EntityKind : uint8_t {
++    UNKNOWN = 0,
++    PLAYER  = 1,
++    MOB     = 2,
++    NPC     = 3,
++};
++
++inline const char* EntityKindName(EntityKind k) {
++    switch (k) {
++        case EntityKind::PLAYER: return "player";
++        case EntityKind::MOB:    return "mob";
++        case EntityKind::NPC:    return "npc";
++        default:                 return "unknown";
++    }
++}
++
++struct WorldEntity {
++    uint16_t    handle     = 0;
++    EntityKind  kind       = EntityKind::UNKNOWN;
++    std::string name;          /* player displayName or empty for mob/npc */
++    uint16_t    mobId      = 0;/* non-zero for mobs only                  */
++    uint64_t    firstSeen  = 0;/* ms since epoch — monotonic clock OK     */
++    uint64_t    lastSeen   = 0;
++};
++
++class WorldModel {
++public:
++    WorldModel() = default;
++
++    /* ── Self-character mutators ─────────────────────────────────── */
++    void UpdateSelfBase(uint32_t chrRegNum, const std::string& charName) {
++        std::lock_guard<std::mutex> lk(m_mx);
++        m_self.chrRegNum = chrRegNum;
++        m_self.charName  = charName;
++        m_self.lastUpdate = NowMs();
++    }
++
++    void UpdateSelfHandle(uint16_t handle) {
++        std::lock_guard<std::mutex> lk(m_mx);
++        m_self.handle = handle;
++        m_self.lastUpdate = NowMs();
++    }
++
++    void UpdateSelfPosition(uint32_t x, uint32_t y) {
++        std::lock_guard<std::mutex> lk(m_mx);
++        m_self.posX = x;
++        m_self.posY = y;
++        m_self.lastUpdate = NowMs();
++    }
++
++    void SetLoginState(const std::string& stateName) {
++        std::lock_guard<std::mutex> lk(m_mx);
++        m_self.stateName  = stateName;
++        m_self.lastUpdate = NowMs();
++    }
++
++    /* ── Zone mutators ───────────────────────────────────────────── */
++    void SetZone(const std::string& mapName) {
++        std::lock_guard<std::mutex> lk(m_mx);
++        m_zone.mapName    = mapName;
++        m_zone.enteredMs  = NowMs();
++    }
++
++    void ClearZone() {
++        std::lock_guard<std::mutex> lk(m_mx);
++        m_zone.mapName.clear();
++        m_zone.enteredMs = 0;
++        m_entities.clear();
++    }
++
++    /* ── Entity mutators ─────────────────────────────────────────── */
++    void UpsertPlayer(uint16_t handle, const std::string& name) {
++        std::lock_guard<std::mutex> lk(m_mx);
++        auto& e = m_entities[handle];
++        if (e.firstSeen == 0) e.firstSeen = NowMs();
++        e.handle   = handle;
++        e.kind     = EntityKind::PLAYER;
++        if (!name.empty()) e.name = name;
++        e.lastSeen = NowMs();
++    }
++
++    void UpsertMob(uint16_t handle, uint16_t mobId) {
++        std::lock_guard<std::mutex> lk(m_mx);
++        auto& e = m_entities[handle];
++        if (e.firstSeen == 0) e.firstSeen = NowMs();
++        e.handle   = handle;
++        e.kind     = EntityKind::MOB;
++        e.mobId    = mobId;
++        e.lastSeen = NowMs();
++    }
++
++    void RemoveEntity(uint16_t handle) {
++        std::lock_guard<std::mutex> lk(m_mx);
++        m_entities.erase(handle);
++    }
++
++    /* ── Inspectors ──────────────────────────────────────────────── */
++    size_t EntityCount() const {
++        std::lock_guard<std::mutex> lk(m_mx);
++        return m_entities.size();
++    }
++
++    /* Full snapshot. Thread-safe, copies under lock then renders JSON
++     * without holding the lock. */
++    nlohmann::json SnapshotJson() const {
++        SelfChar selfCopy;
++        Zone     zoneCopy;
++        std::vector<WorldEntity> entitiesCopy;
++        {
++            std::lock_guard<std::mutex> lk(m_mx);
++            selfCopy = m_self;
++            zoneCopy = m_zone;
++            entitiesCopy.reserve(m_entities.size());
++            for (const auto& kv : m_entities) entitiesCopy.push_back(kv.second);
++        }
++
++        nlohmann::json ents = nlohmann::json::array();
++        for (const auto& e : entitiesCopy) {
++            nlohmann::json je = {
++                {"handle",     e.handle},
++                {"kind",       EntityKindName(e.kind)},
++                {"first_seen", e.firstSeen},
++                {"last_seen",  e.lastSeen},
++            };
++            if (!e.name.empty()) je["name"]   = e.name;
++            if (e.mobId != 0)    je["mob_id"] = e.mobId;
++            ents.push_back(std::move(je));
++        }
++
++        nlohmann::json self_j = {
++            {"handle",      selfCopy.handle},
++            {"chrregnum",   selfCopy.chrRegNum},
++            {"char_name",   selfCopy.charName},
++            {"state",       selfCopy.stateName},
++            {"x",           selfCopy.posX},
++            {"y",           selfCopy.posY},
++            {"last_update", selfCopy.lastUpdate},
++        };
++        nlohmann::json zone_j = {
++            {"map",        zoneCopy.mapName},
++            {"entered_ms", zoneCopy.enteredMs},
++        };
++
++        return nlohmann::json{
++            {"self",     std::move(self_j)},
++            {"zone",     std::move(zone_j)},
++            {"entities", std::move(ents)},
++        };
++    }
++
++    std::string SnapshotString() const {
++        return SnapshotJson().dump();
++    }
++
++private:
++    struct SelfChar {
++        uint16_t    handle     = 0;
++        uint32_t    chrRegNum  = 0;
++        std::string charName;
++        std::string stateName  = "disconnected";
++        uint32_t    posX       = 0;
++        uint32_t    posY       = 0;
++        uint64_t    lastUpdate = 0;
++    };
++
++    struct Zone {
++        std::string mapName;
++        uint64_t    enteredMs  = 0;
++    };
++
++    static uint64_t NowMs() {
++        using namespace std::chrono;
++        return (uint64_t)duration_cast<milliseconds>(
++                   steady_clock::now().time_since_epoch()).count();
++    }
++
++    mutable std::mutex                              m_mx;
++    SelfChar                                         m_self;
++    Zone                                             m_zone;
++    std::unordered_map<uint16_t, WorldEntity>        m_entities;
++};
++
++}  /* namespace Fiesta */
++#endif  /* ELLE_FIESTA_WORLDMODEL_H */
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/_re_artifacts/shinengine/SHINENGINE_MAP.md b/ElleAnn/Services/Elle.Service.Fiesta/_re_artifacts/shinengine/SHINENGINE_MAP.md
+new file mode 100644
+index 0000000..2672e8b
+--- /dev/null
++++ b/ElleAnn/Services/Elle.Service.Fiesta/_re_artifacts/shinengine/SHINENGINE_MAP.md
+@@ -0,0 +1,104 @@
++# ShineEngine → Elle WorldModel Map
++_Phase 6b cross-reference — written 2026-02 during ShineEngine source ingest._
++
++## 1. What's in `_re_artifacts/shinengine/`
++
++Two zips shipped by the user in the final 6a session and extracted into
++this folder verbatim:
++
++```
++Battle_src/        — server-side damage pipeline (9 files, ~30 KB)
++ProjectF2_src/     — client + server protocol skeleton (36 files, ~185 KB)
++shinengine_srctree.html  — full file-index from the original repo
++```
++
++Inspection revealed the zips are a **consolidated reference skeleton**,
++assembled from the same PDB symbols and packet captures we extracted
++during Phase 6a (every header calls them out in its provenance comment:
++_"Source: E:\ProjectF2\CSCode\…"_, _"Confirmed from Port 9110 captures"_,
++etc.). In other words: same schema as our tree, cleaner headers, many
++`TODO — packet capture pending` placeholders.
++
++## 2. Header → Elle type map
++
++| ShineEngine header (ProjectF2_src) | Elle counterpart (Services/Elle.Service.Fiesta/) | Notes |
++|---|---|---|
++| `FiestaCipher.h` (LCG 0x4E6D/0x5249) | `FiestaCipher.h` + `FiestaNetCrypto.h` | Ours is superset: supports LCG **and** XOR499 via `SetKind()`. LAN-bypass heuristic identical. |
++| `PacketEncrypt.h` (class `CPacketEncrypt`) | Same cipher core as above | Duplicate skeleton — ours exposes the same `Init/Cipher/CipherOpCode` surface but as a C++17 class inside namespace Fiesta. |
++| `NCProtocol.h` (opcode `#define`s) | `FiestaPacket.h` + `Generated/FiestaProtoTable.inc` | Ours is 2 687-entry table auto-generated from `PDB_OPCODES.json`; ShineEngine skeleton only lists the 25 we confirmed from captures. |
++| `GPacket.h` (`PROTO_NC_HEADER` + `GPACKET`) | `FiestaPacket.h` `struct InPacket` / `OutPacket` | Same wire header shape: `[u16 wLen][u16 wOpCode][…]`. Ours adds cleartext-prefix variant (sizeFlag byte). |
++| `protocommon.h` (`NAME_LENGTH=16`, etc.) | Same constants baked into `FiestaProtoBase.h` | Field widths identical. |
++| `protouser.h` (login-chain structs) | `PROTO_NC_USER_*` in `FiestaPacket.h` | Both describe the same 0C01/0C03/0C06/0C0A/0C0B/0C0C packets. |
++| `protochar.h` (WM handshake + option CMDs) | `PROTO_NC_USER_WILLLOGIN_ACK`, `PROTO_NC_CHAR_OPTION_*` | ShineEngine header confirms our inferred 200F = `NC_WM_HANDSHAKE_REQ` and 7032/33/34 option command structure. |
++| `protomap.h` (`ProtoNcMapLoginAck` w/ HP/MP/Gold/Exp) | `FiestaDecoders.h` — **fields missing** | Phase 6b-Beta target: decode HP/MP/Gold/Exp from 0x1038 (`NC_MAP_LOGIN_ACK`) per the ShineEngine layout. |
++| `protomisc.h` (`ProtoNcMiscGameTimeAck` HH:MM:SS) | Not yet in `FiestaDecoders.h` | Add as trivial 3-byte decoder in Phase 6b-Beta. |
++| `pf_client.cpp` (Zone dispatch skeleton) | `Client::HandlePacket` in `FiestaClient.cpp` | Same switch-on-opcode pattern. ShineEngine skeleton is all `TODO /* packet capture pending */`; ours is 7 live handlers + 1 WIP. |
++| `pf_worldmanager.cpp` (WM-Zone dispatch) | Routed through `Client::OnWillLoginAck` + `On*OptionCmd` | We don't run a WM peer — we **are** the client. But the field names in the skeleton confirm our struct layouts. |
++| `Socket_IOCP.h`, `IOCP.cpp` | `FiestaConnection.h` | Ours is non-IOCP (simple recv thread) because we're a single-socket client, not a server accepting many. |
++| `proto_stubs.h` (quest/party/friend/guild placeholders) | Not yet in our tree | Every subsystem is tagged TODO on the skeleton side too — no intel lost. |
++
++## 3. ShineEngine → Elle WorldModel field map _(Phase 6b-Alpha scope)_
++
++| WorldModel field | Source packet | Decoder hook (current) | Status |
++|---|---|---|---|
++| `self.chrregnum`, `self.char_name` | `NC_CHAR_BASE_CMD` (CHAR_BASE_CMD_HEAD) | `Client::OnCharBase` → `UpdateSelfBase` | ✅ LIVE |
++| `self.state` | n/a — internal state-machine | `Client::SetState` → `SetLoginState` | ✅ LIVE |
++| `self.handle` | Not yet decoded (zone assigns late) | `MutableWorld().UpdateSelfHandle()` reserved | 🟡 pending 0x1038 decode |
++| `self.x`, `self.y` | Out-going `NC_ACT_WALK_REQ`/`STOP_REQ` | `MoveTo`/`Stop` → `UpdateSelfPosition` | ✅ LIVE (self-authoritative) |
++| `zone.map` | `NC_MAP_LOGINCOMPLETE_CMD` + `ProtoNcUserLoginWorldAck.szMap` | `OnMapLoginComplete` (Phase 6b-Beta plugs mapName) | 🟡 pending — need szMap[8] parse |
++| `entities[h].name` (player) | `NC_BRIEFINFO_LOGINCHARACTER_CMD` + `NC_BRIEFINFO_CHARACTER_CMD` + `NC_BRIEFINFO_PLAYER_LIST_INFO_APPEAR_CMD` | `OnLoginCharacter`, `OnBriefCharacter`, `OnPlayerListAppear` → `UpsertPlayer` | ✅ LIVE |
++| `entities[h].mob_id` | `NC_BRIEFINFO_REGENMOB_CMD` | `OnRegenMob` → `UpsertMob` | ✅ LIVE |
++| removal | `NC_BRIEFINFO_BRIEFINFODELETE_CMD` + `NC_BRIEFINFO_NPC_DISAPPEAR_CMD` | `OnBriefInfoDelete`, `OnNpcDisappear` → `RemoveEntity` | ✅ LIVE |
++
++_Explicitly out-of-scope for 6b-Alpha (moved to 6b-Beta):_ HP/MP/Gold/Exp,
++equipment, inventory, skill/buff list, quest state. All of these appear
++in the ShineEngine `protomap.h` `ProtoNcMapLoginAck` as an "extended
++stat block follows — size TBD from captures" — meaning the engine source
++confirms they're in 0x1038's payload but we still need capture-driven
++offset math before we can safely cast bytes.
++
++## 4. IPC surface (unchanged since 6a)
++
++```
++Cognitive → SVC_FIESTA  IPC_FIESTA_COMMAND  {"op":"get_world"}
++SVC_FIESTA → subscribers IPC_FIESTA_EVENT   {"kind":"world_snapshot",
++                                             "request_id": "...",
++                                             "snapshot": { … }}
++```
++
++Snapshot envelope (see `test_fiesta_worldmodel.cpp::test_full_session_simulation`):
++
++```json
++{
++  "self":     {"handle":5,"chrregnum":5,"char_name":"ElleAnn",
++               "state":"in_game","x":100,"y":200,"last_update":1234567890},
++  "zone":     {"map":"RouN","entered_ms":1234560000},
++  "entities": [
++    {"handle":4098,"kind":"player","name":"Bob",
++     "first_seen":…,"last_seen":…},
++    {"handle":20481,"kind":"mob","mob_id":3010,
++     "first_seen":…,"last_seen":…}
++  ]
++}
++```
++
++## 5. Next-patch shopping list (6b-Beta)
++
++Now that we have the reference skeleton, 6b-Beta can decode the whole
++`NC_MAP_LOGIN_ACK` flood without more guesswork:
++
++1. `FiestaDecoders.h`: add `DecodeMapLoginAck` per `ProtoNcMapLoginAck`
++   — payload prefix is `{u32 charid, char[16] name, u8 level, char[8] map,
++   u32 hpCur, u32 hpMax, u32 mpCur, u32 mpMax, u32 gold, u32 exp}`.
++2. `FiestaClient::OnMapLoginAck` new hook, feed HP/MP/Gold/Exp into
++   `WorldModel::UpdateSelfStats` (to be added).
++3. `FiestaDecoders.h`: add `DecodeMiscGameTimeAck` (trivial 3B HH/MM/SS)
++   per `ProtoNcMiscGameTimeAck`, surface as `{"kind":"server_time"}`.
++4. Shape-match the `0x0438` 97B char-base variant (see
++   `_re_artifacts/wire_captures/README.md §5`) against
++   `ProtoNcMapCharInfoCmd` — skeleton says it's `dwCharID + extended
++   stat block` which is exactly the trimmed shape we observed.
++
++Phase 6b-Beta then unblocks Phase 6c (behavioural Lua bindings) because
++`on_hp_changed`, `on_zone_changed`, `on_gold_changed` all have real
++numeric fields to fire on.
+diff --git a/ElleAnn/Services/Elle.Service.Fiesta/test_fiesta_worldmodel.cpp b/ElleAnn/Services/Elle.Service.Fiesta/test_fiesta_worldmodel.cpp
+new file mode 100644
+index 0000000..5a23eec
+--- /dev/null
++++ b/ElleAnn/Services/Elle.Service.Fiesta/test_fiesta_worldmodel.cpp
+@@ -0,0 +1,182 @@
++/*══════════════════════════════════════════════════════════════════════════════
++ * test_fiesta_worldmodel.cpp — Phase 6b-Alpha regression test.
++ *
++ *   Drives the headless WorldModel through the lifecycle a real Fiesta
++ *   session produces, and asserts the JSON snapshot reports what
++ *   Cognitive will see on `{"op":"get_world"}`.
++ *
++ *   Scope: WorldModel ONLY — independent of Client / Connection /
++ *   cipher, so this test compiles and runs on Linux with no Windows
++ *   shim needed (uses only <mutex>, <chrono>, nlohmann/json).
++ *
++ *   Compile (Linux portable):
++ *     g++ -std=c++17 -I . -I ../../Shared \
++ *         Services/Elle.Service.Fiesta/test_fiesta_worldmodel.cpp \
++ *         -o /tmp/test_fiesta_worldmodel
++ *══════════════════════════════════════════════════════════════════════════════*/
++
++#include "FiestaWorldModel.h"
++
++#include <cassert>
++#include <cstdio>
++#include <string>
++
++using Fiesta::WorldModel;
++using Fiesta::EntityKind;
++
++static void test_self_base_populates_snapshot() {
++    WorldModel w;
++    w.UpdateSelfBase(42, "ElleAnn");
++    auto j = w.SnapshotJson();
++    assert(j["self"]["chrregnum"] == 42);
++    assert(j["self"]["char_name"] == "ElleAnn");
++    assert(j["entities"].size() == 0);
++    std::fprintf(stderr, "[PASS] self_base populates snapshot\n");
++}
++
++static void test_player_upsert_then_remove() {
++    WorldModel w;
++    w.UpsertPlayer(0x1001, "Crystal");
++    w.UpsertPlayer(0x1002, "Bob");
++    assert(w.EntityCount() == 2);
++
++    auto j = w.SnapshotJson();
++    assert(j["entities"].size() == 2);
++
++    /* Names survive the round-trip and the kind is "player". */
++    bool sawCrystal = false, sawBob = false;
++    for (const auto& e : j["entities"]) {
++        assert(e["kind"] == "player");
++        if (e["name"] == "Crystal") sawCrystal = true;
++        if (e["name"] == "Bob")     sawBob     = true;
++    }
++    assert(sawCrystal && sawBob);
++
++    w.RemoveEntity(0x1001);
++    assert(w.EntityCount() == 1);
++    std::fprintf(stderr, "[PASS] player upsert + remove\n");
++}
++
++static void test_mob_carries_mob_id() {
++    WorldModel w;
++    w.UpsertMob(0x2000, 5012);
++    auto j = w.SnapshotJson();
++    assert(j["entities"].size() == 1);
++    auto& e = j["entities"][0];
++    assert(e["kind"]   == "mob");
++    assert(e["mob_id"] == 5012);
++    /* Mobs don't carry a name — snapshot should omit the field cleanly. */
++    assert(!e.contains("name"));
++    std::fprintf(stderr, "[PASS] mob carries mob_id (no name)\n");
++}
++
++static void test_mob_then_player_same_handle() {
++    /* Server reuses handles after REGEN — a mob handle can later be a
++     * player (or the opposite) when the slot cycles. Upsert must replace
++     * kind + fields, not merge stale ones. */
++    WorldModel w;
++    w.UpsertMob(0x3000, 4242);
++    w.UpsertPlayer(0x3000, "Reused");
++    auto j = w.SnapshotJson();
++    assert(j["entities"].size() == 1);
++    auto& e = j["entities"][0];
++    assert(e["kind"] == "player");
++    assert(e["name"] == "Reused");
++    std::fprintf(stderr, "[PASS] handle reuse replaces kind\n");
++}
++
++static void test_zone_and_position_round_trip() {
++    WorldModel w;
++    w.SetZone("RouN");
++    w.UpdateSelfPosition(12345, 67890);
++    w.SetLoginState("in_game");
++
++    auto j = w.SnapshotJson();
++    assert(j["zone"]["map"] == "RouN");
++    assert(j["self"]["x"] == 12345);
++    assert(j["self"]["y"] == 67890);
++    assert(j["self"]["state"] == "in_game");
++    std::fprintf(stderr, "[PASS] zone + position + state round-trip\n");
++}
++
++static void test_clear_zone_wipes_entities() {
++    WorldModel w;
++    w.SetZone("RouN");
++    w.UpsertPlayer(1, "A");
++    w.UpsertMob(2, 7);
++    assert(w.EntityCount() == 2);
++    w.ClearZone();
++    assert(w.EntityCount() == 0);
++    auto j = w.SnapshotJson();
++    assert(j["zone"]["map"] == "");
++    assert(j["entities"].size() == 0);
++    std::fprintf(stderr, "[PASS] clear_zone wipes entities\n");
++}
++
++static void test_self_handle_update() {
++    WorldModel w;
++    w.UpdateSelfHandle(0xABCD);
++    auto j = w.SnapshotJson();
++    assert(j["self"]["handle"] == 0xABCD);
++    std::fprintf(stderr, "[PASS] self handle update\n");
++}
++
++static void test_full_session_simulation() {
++    /* Walk through a realistic capture order:
++     *   1. SEED_ACK → SetLoginState("login_connecting")
++     *   2. CHAR_BASE_CMD (self) → UpdateSelfBase
++     *   3. MAP_LOGINCOMPLETE_CMD → SetLoginState("in_game")
++     *   4. BRIEFINFO login_character (Crystal)
++     *   5. BRIEFINFO login_character (Bob)
++     *   6. REGEN_MOB goblin
++     *   7. MoveTo(100,200) — self position
++     *   8. BRIEFINFO briefinfo_delete Crystal leaves
++     *   9. get_world snapshot → Bob + goblin + us at (100,200) on RouN
++     */
++    WorldModel w;
++    w.SetLoginState("login_connecting");
++    w.UpdateSelfBase(5, "ElleAnn");
++    w.SetZone("RouN");
++    w.SetLoginState("in_game");
++    w.UpsertPlayer(0x1001, "Crystal");
++    w.UpsertPlayer(0x1002, "Bob");
++    w.UpsertMob   (0x5001, 3010);
++    w.UpdateSelfPosition(100, 200);
++    w.UpdateSelfHandle(0x0005);
++    w.RemoveEntity(0x1001);
++
++    auto j = w.SnapshotJson();
++    assert(j["self"]["char_name"] == "ElleAnn");
++    assert(j["self"]["chrregnum"] == 5);
++    assert(j["self"]["handle"]    == 0x0005);
++    assert(j["self"]["state"]     == "in_game");
++    assert(j["self"]["x"]         == 100);
++    assert(j["self"]["y"]         == 200);
++    assert(j["zone"]["map"]       == "RouN");
++    assert(j["entities"].size()   == 2);
++
++    /* Verify Crystal is gone, Bob + goblin remain. */
++    bool sawBob = false, sawGoblin = false;
++    for (const auto& e : j["entities"]) {
++        const std::string name = e.value("name", std::string(""));
++        if (e["kind"] == "player" && name == "Bob") sawBob = true;
++        if (e["kind"] == "mob"    && e.value("mob_id", 0) == 3010) sawGoblin = true;
++        assert(name != "Crystal");
++    }
++    assert(sawBob);
++    assert(sawGoblin);
++    std::fprintf(stderr, "[PASS] full session simulation\n");
++}
++
++int main() {
++    test_self_base_populates_snapshot();
++    test_player_upsert_then_remove();
++    test_mob_carries_mob_id();
++    test_mob_then_player_same_handle();
++    test_zone_and_position_round_trip();
++    test_clear_zone_wipes_entities();
++    test_self_handle_update();
++    test_full_session_simulation();
++    std::fprintf(stderr, "\nALL 8 WORLDMODEL TESTS PASSED\n");
++    return 0;
++}

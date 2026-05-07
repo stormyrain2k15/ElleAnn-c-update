@@ -74,6 +74,13 @@
 #include <string>
 #include <vector>
 
+/* Foundational types (Name4/5/8/256Byte, NETCOMMAND, SHINE_XY_TYPE,
+ * SHINE_COORD_TYPE, NETPACKETZONEHEADER, MAKE_NETCMDID, …) live in
+ * FiestaProtoBase.h since Phase 6a — pulled in here so existing
+ * call-sites that depend on `Fiesta::SHINE_XY_TYPE` etc. through
+ * this header keep compiling. */
+#include "FiestaProtoBase.h"
+
 namespace Fiesta {
 
 /*──────────────────────────────────────────────────────────────────────────────
@@ -259,19 +266,9 @@ namespace Op {
  *──────────────────────────────────────────────────────────────────────────────*/
 #pragma pack(push, 1)
 
-/** SHINE_XY_TYPE — world XY pair, 32-bit fixed-point integer.
- *  Source: Zone PDB type 0x1163 (sizeof=8). */
-struct SHINE_XY_TYPE {
-    uint32_t x;
-    uint32_t y;
-};
-
-/** SHINE_COORD_TYPE — XY plus 8-bit facing direction.
- *  Source: Zone PDB type id 0x3005 (sizeof=9). */
-struct SHINE_COORD_TYPE {
-    SHINE_XY_TYPE xy;
-    uint8_t       dir;
-};
+/* SHINE_XY_TYPE, SHINE_COORD_TYPE — moved to FiestaProtoBase.h
+ * (included above).  Kept their static_asserts in this file's
+ * "guard" block at the bottom for one extra layer of drift checks. */
 
 /** PROTO_NC_MISC_SEED_ACK — server pushes once after TCP accept.
  *  Source: Login PDB type 0x28D0 (sizeof=2). */
@@ -482,13 +479,9 @@ struct PROTO_NC_CHAR_BASE_CMD_HEAD {
 static_assert(sizeof(PROTO_NC_CHAR_BASE_CMD_HEAD) == 20,
               "CHAR_BASE head wire-size mismatch");
 
-/** NETPACKETZONEHEADER — Zone-side per-client frame header used in
- *  some server→client broadcasts (entity handle + char registration #).
- *  Source: Zone PDB (sizeof=6). */
-struct NETPACKETZONEHEADER {
-    uint16_t clienthandle;
-    uint32_t charregistnumber;
-};
+/** NETPACKETZONEHEADER — moved to FiestaProtoBase.h
+ *  (included at the top). Definition kept there so the X-macro
+ *  generated tables and this header agree on the exact bit layout. */
 
 #pragma pack(pop)
 

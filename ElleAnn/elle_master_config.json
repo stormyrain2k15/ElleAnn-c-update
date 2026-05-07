@@ -297,7 +297,8 @@
             "timeout_ms": 5000
         },
         "sql_pipes": {
-            "connection_string": "Server=DESKTOP-IIREG0M\\ELLEANN;Database=ElleCore;Trusted_Connection=yes;",
+            "_comment_driver18": "ODBC Driver 18 enables encryption by default and rejects self-signed certificates. TrustServerCertificate=yes is REQUIRED for local SQL Server Express instances using auto-generated certs. Encrypt=optional lets the driver fall back to plaintext if the server doesn't offer TLS. Both flags are no-ops if your SQL Server has a real cert chain.",
+            "connection_string": "Driver={ODBC Driver 18 for SQL Server};Server=DESKTOP-IIREG0M\\ELLEANN;Database=ElleCore;Trusted_Connection=yes;TrustServerCertificate=yes;Encrypt=optional;",
             "pool_size": 8,
             "command_timeout_seconds": 30,
             "retry_count": 3,

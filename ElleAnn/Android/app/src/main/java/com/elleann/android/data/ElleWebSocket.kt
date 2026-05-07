@@ -77,6 +77,14 @@ sealed class WsEvent {
     /** Connection dropped or error */
     data class Disconnected(val reason: String) : WsEvent()
 
+    /** Soft transport-level failure that doesn't necessarily mean the
+     *  socket dropped — e.g. "no host paired yet, refusing to open."
+     *  Named `Failure` (NOT `Error`) because the latter collides with
+     *  `kotlin.Error` and `java.lang.Error` in nested-class name
+     *  resolution for sealed hierarchies, producing an Unresolved
+     *  reference at every usage site. */
+    data class Failure(val reason: String) : WsEvent()
+
     /** Unknown event type — raw JSON preserved for debugging */
     data class Unknown(val type: String, val raw: String) : WsEvent()
 }
@@ -171,7 +179,7 @@ class ElleWebSocket(
             isConnecting = false
             shouldReconnect = false
             scope.launch {
-                _events.emit(WsEvent.Error(
+                _events.emit(WsEvent.Failure(
                     "WebSocket not opened: no host paired yet. " +
                     "Visit Pair screen first."))
             }

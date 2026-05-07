@@ -2380,3 +2380,142 @@ See cheat-sheet at end of `CHANGELOG.md` "Re-enabling auth" section.
 - **P2 — Column reorder via `displayToReal`**: cosmetic only.
 - **P3 — IP allow-list / per-IP rate limit**: needed before re-public
   exposure with auth on.
+
+---
+
+## Session Feb-2026 (continued) — Phase 6a: Fiesta Authoritative Packet Decoder
+
+(Full narrative: `/app/memory/CHANGELOG.md`.)
+
+### Status
+- **Phase 6a foundation (DONE, packaged as `04-phase6a-protobase.patch`)**:
+  Built the authoritative dispatch infrastructure. Three new headers
+  (FiestaProtoBase.h, FiestaProtoTable.h, two generated `.inc` files),
+  two Python codegen tools, two test programs (compile + replay).
+  10/10 login-chain opcodes resolve through the table; build verified
+  via Linux portable harness AND a fresh patch-apply test workspace.
+
+### Critical Phase 6a Finding
+The user's running Fiesta server uses a *different region toggle* than
+the 5 PDBs we extracted. Of 17 distinct opcodes observed in the live
+2026-02-05 captures, ZERO match their PDB struct's sizeof. Wire-shape
+→ struct mapping is authoritative; opcode-id → name is NOT for this
+build. See `_re_artifacts/wire_captures/README.md §5` for full
+analysis.
+
+### Phase 6a — Step 2 Plan (the actual decoder lighting up)
+1. **(P0) Calibration capture**: User runs Elle headless against
+   LoginServer. Elle records the 2-byte SEED_ACK reply. The high
+   byte = the build's NC_MISC value.
+2. **(P0) Remap tool**: Add `--remap +offset` to
+   `build_dispatch_table.py` (writes a calibrated dispatch_table.json).
+3. **(P0) Re-run coverage report**: With the right mapping, expect
+   ~12-15 of the 17 observed opcodes to flip from HEAD+TAIL/UNKNOWN
+   to FIXED. Gap analysis → pile of hand-coding work.
+4. **(P1) Hand-write decoders** for the calibrated opcodes (login
+   chain, BRIEFINFO ring updates, CHAT/SHOUT/WHISPER, MOVE).
+5. **(P1) Phase 6b: Headless state machine** — feed decoded packets
+   into a C++ world model that surfaces to Cognitive via shared mem.
+
+### Backlog (after Phase 6a step 2)
+- **P1 — Phase 6b**: Headless world-model state machine.
+- **P1 — Phase 6c**: Behavioural Lua bindings (`on_pm_received`,
+  `on_chat_received`, LLM → synthesized chat).
+- **P2 — Phase 6d**: Twin/coop mode (named-pipe packet mirror).
+- **P1 — Phase 5**: Imagination Engine (DMN + Control + Loop).
+
+### Files touched
+- NEW: `Services/Elle.Service.Fiesta/FiestaProtoBase.h`,
+  `Services/Elle.Service.Fiesta/FiestaProtoTable.h`,
+  `Services/Elle.Service.Fiesta/Generated/FiestaProtoTable.inc`,
+  `Services/Elle.Service.Fiesta/Generated/FiestaWireFixtures.inc`,
+  `Services/Elle.Service.Fiesta/_re_artifacts/pdb/build_dispatch_table.py`,
+  `Services/Elle.Service.Fiesta/_re_artifacts/pdb/gen_proto_table.py`,
+  `Services/Elle.Service.Fiesta/_re_artifacts/pdb/extracted/dispatch_table.json`,
+  `Services/Elle.Service.Fiesta/test_fiesta_proto_coverage.cpp`,
+  `Debug/test_phase6a_protobase.cpp`.
+- MODIFIED: `Services/Elle.Service.Fiesta/FiestaPacket.h` (refactor —
+  removed duplicated types now living in FiestaProtoBase.h),
+  `Services/Elle.Service.Fiesta/_re_artifacts/wire_captures/README.md`
+  (+§5 build-mismatch finding).
+- DELIVERED: `/app/04-phase6a-protobase.patch` (1.3 MB, 38 378 lines).
+
+---
+
+## Session Feb-2026 (continued) — Phase 6a Step 2: Shape-Matcher + Direction Resolution
+
+(Full narrative: `/app/memory/CHANGELOG.md`.)
+
+### Status
+- **Phase 6a step 2 (DONE, packaged as `05-phase6a-step2-shapematcher.patch`)**:
+  Built `shape_match_payloads.py` to bypass the build-mismatch problem.
+  Cross-validated the Port-60121 paired client/server captures — direction
+  labels confirmed from the client's network PoV. Top hit: `0x0438` / 97B
+  matches `PROTO_NC_CHAR_BASE_CMD` (sizeof 105) with charid trimmed to
+  Name4 + 4-byte tail drop. Patch applies to clean baseline, all tests
+  green.
+
+### Phase 6a — Step 3 (next)
+Once user picks the right candidate per opcode from
+`payload_shape_matches.json`, hand-write the decoders for:
+  * `0x0438` → `PROTO_NC_CHAR_BASE_CMD` variant (97B trim)
+  * `0x0439`, `0x043A`, `0x043B` (4/6 byte status updates — TBD)
+  * `0x043D` (skill-list dump — custom struct)
+  * `0x044A`, `0x0602` (state-dump ACKs — TBD)
+  * `0x0701`/`0x0801`/etc. login-chain decoders (already correct in PDB
+     mapping; just not yet observed in captures).
+
+## Session Feb-2026 (continued) — Phase 6b-Alpha: Headless WorldModel
+
+(Full narrative: `/app/memory/CHANGELOG.md`.)
+
+### Status
+- **Phase 6b-Alpha (DONE, packaged as `10-phase6b-worldmodel.patch`, 30 KB,
+  +549 lines)**: Headless world-model now live inside Elle.Service.Fiesta.
+  Every decoder that touches identity/position/entities mutates
+  `Fiesta::WorldModel`, which Cognitive can snapshot via a new
+  `IPC_FIESTA_COMMAND {"op":"get_world"}` op. Reply envelope is
+  `{"kind":"world_snapshot","request_id":"…","snapshot":{self,zone,entities[]}}`.
+- **ShineEngine source ingest (DONE)**: `ShineEngine_Battle_src.zip` and
+  `ShineEngine_ProjectF2_src_v2-1.zip` extracted into
+  `Services/Elle.Service.Fiesta/_re_artifacts/shinengine/`. Analysis
+  confirmed the zips are a consolidated reference skeleton re-using our
+  own Phase 6a PDB extractions + capture findings (same struct widths,
+  same opcode values, many `TODO — packet capture pending` placeholders).
+  Still useful as an authoritative field-name reference for 6b-Beta.
+- **SHINENGINE_MAP.md (NEW)**: Written in the same folder; maps every
+  ShineEngine header to its Elle counterpart and lists the exact 6b-Beta
+  shopping list (HP/MP/Gold/Exp from `ProtoNcMapLoginAck`).
+
+### Tests (all green)
+- `test_fiesta_worldmodel.cpp`: 8/8 PASS — covers self-base populate,
+  player upsert+remove, mob carries mob_id, handle-reuse replaces kind,
+  zone+position+state round-trip, clear_zone wipes entities, self-handle
+  update, full-session simulation.
+- `test_fiesta_decoders.cpp`: still PASS (no regression).
+- `test_fiesta_console_trace.cpp`: still PASS (no regression).
+- Patch apply check: clean application to a scrubbed copy of baseline
+  `91ff662`; post-apply build + test both green.
+
+### Files touched
+- NEW: `FiestaWorldModel.h` (223 lines), `test_fiesta_worldmodel.cpp`
+  (182 lines), `_re_artifacts/shinengine/SHINENGINE_MAP.md` (104 lines),
+  plus extracted sources under `_re_artifacts/shinengine/Battle_src/`
+  and `…/ProjectF2_src/`.
+- MODIFIED: `FiestaClient.h` (add WorldModel member + accessors),
+  `FiestaClient.cpp` (wire UpdateSelfBase/UpsertPlayer/UpsertMob/
+  RemoveEntity/UpdateSelfPosition/SetLoginState into 8 handlers),
+  `FiestaService.cpp` (add `op=="get_world"` branch broadcasting
+  `world_snapshot` event), `Elle.Service.Fiesta.vcxproj` (register
+  new header).
+- DELIVERED: `/app/10-phase6b-worldmodel.patch` (30 KB, +549/-1 lines).
+
+### Next
+- **P0 — Phase 6b-Beta**: Decode `NC_MAP_LOGIN_ACK` (0x1038) per
+  `ProtoNcMapLoginAck` — add HP/MP/Gold/Exp to WorldModel + zone map
+  name from `szMap[8]`; add `DecodeMiscGameTimeAck` (3-byte HH:MM:SS).
+- **P1 — Phase 6c**: Lua behavioural bindings now unblocked.
+  `on_world_tick`, `on_chat_received`, `on_pm_received` hooks exposing
+  `WorldModel::SnapshotJson()` to `elle_settings.lua`.
+- **P1 — user verification** of patches 04..10 still pending (applying
+  to live private-server box + running `--console`).

@@ -60,6 +60,7 @@
 #include "../../Shared/json.hpp"
 
 #include "FiestaClient.h"
+#include "FiestaConsoleTrace.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -104,6 +105,25 @@ public:
 
 protected:
     bool OnStart() override {
+        /* Live console trace — enabled automatically when this service
+         * was launched with `--console` (i.e. interactive mode rather
+         * than under the SCM).  We detect that by checking whether
+         * stdout has been bound to a real console handle.
+         * See FiestaConsoleTrace.h for the per-event hooks. */
+        bool interactive = false;
+#ifdef _WIN32
+        DWORD mode_unused = 0;
+        interactive = (GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE),
+                                      &mode_unused) != 0);
+#else
+        interactive = (isatty(fileno(stdout)) != 0);
+#endif
+        if (interactive) {
+            Fiesta::Trace::SetEnabled(true);
+            Fiesta::Trace::EnsureWindowsConsole();  /* binds C streams + ANSI */
+            Fiesta::Trace::Banner("Elle-Ann Fiesta Game Client (live trace)");
+        }
+
         /* Pull connection settings from the master config. The actual
          * `fiesta.*` keys are populated by Deploy/Configs/fiesta.json
          * — see ElleConfig::Load. Defaults are deliberately empty so a
@@ -341,6 +361,19 @@ protected:
             m_client.SendRaw(opcode, bytes);
         } else if (op == "disconnect") {
             m_client.Disconnect(j.value("reason", std::string("ipc disconnect")));
+        } else if (op == "get_world") {
+            /* Phase 6b-Alpha: snapshot the in-process WorldModel and
+             * echo it back as an IPC_FIESTA_EVENT so every subscriber
+             * gets the same view. Cognitive can pin request_id into
+             * the reply envelope so caller can correlate. */
+            nlohmann::json snap = m_client.World().SnapshotJson();
+            const std::string reqId = j.value("request_id", std::string(""));
+            nlohmann::json out = {
+                {"kind",     "world_snapshot"},
+                {"snapshot", std::move(snap)},
+            };
+            if (!reqId.empty()) out["request_id"] = reqId;
+            BroadcastEvent(out.dump());
         } else {
             ELLE_WARN("Fiesta: unknown IPC op '%s'", op.c_str());
         }

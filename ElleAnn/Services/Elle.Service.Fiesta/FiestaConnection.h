@@ -20,6 +20,7 @@
 #define ELLE_FIESTA_CONNECTION_H
 
 #include "FiestaCipher.h"
+#include "FiestaConsoleTrace.h"
 #include "FiestaPacket.h"
 
 #include <atomic>
@@ -111,6 +112,11 @@ public:
     bool Send(uint16_t opcode, const std::vector<uint8_t>& payload) {
         std::lock_guard<std::mutex> lk(m_sendMx);
         if (m_sock == INVALID_SOCKET) return false;
+
+        /* Live console trace BEFORE we encrypt — shows the logical
+         * intent to send (operator sees the human-readable opcode
+         * and plaintext payload size).  See FiestaConsoleTrace.h. */
+        Fiesta::Trace::OnTx(opcode, payload);
 
         std::vector<uint8_t> wire = BuildPacket(opcode, payload);
         /* Encrypt opcode + payload (everything AFTER the size prefix). */
