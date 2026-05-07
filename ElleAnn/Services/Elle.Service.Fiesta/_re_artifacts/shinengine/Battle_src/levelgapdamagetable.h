@@ -1,62 +1,70 @@
 // levelgapdamagetable.h
-// CLevelGapDamageTable -- loads and queries the three level gap
-// damage modifier SHN tables.
-// Source: E:\ProjectF2\Server\5ZoneServer2\levelgapdamagetable.h
+// CLevelGapDamageTable -- level gap damage modifier lookup.
 //
-// Three tables from CSCode\tableheaders\:
-//   damagelvgappve.h  -- player attacks mob  (PvE)
-//   damagelvgappvp.h  -- player attacks player (PvP)
-//   damagelvgapevp.h  -- mob attacks player  (EvP)
+// SOURCE AUDIT vs NA2016 SHNs (2024-05-06)
+// ---------------------------------------------------------------
+// BLOCKER (old): Assumed 200-entry dense arrays for all 3 table types. WRONG.
 //
-// Each table maps level difference (attacker - target)
-// to a damage multiplier (stored as integer, divide by 1000
-// to get float -- e.g. 1000 = 1.0x, 850 = 0.85x).
+// CONFIRMED from DamageLvGapPVE.shn / DamageLvGapEVP.shn:
+//   Sparse tables -- 24 entries each. LvGap stored as UINT16 (int16 when
+//   interpreted signed: 0xFFxx = negative gaps). DamageRate x/1000.
 //
-// Level gap clamped to table bounds on both ends.
+//   PVE entries (attacker=player, target=mob):
+//     LvGap <= -10  -> 1500 (player far below mob -> 150% damage)
+//     LvGap  -9..0  -> 1100 down to 1000
+//     LvGap   0..150-> 1000 (flat -- no penalty for over-levelling vs mobs)
+//
+//   EVP entries (attacker=mob, target=player):
+//     ALL entries -> 1000 (mobs deal flat damage regardless of level gap)
+//
+// CONFIRMED from DamageLvGapPVP.shn:
+//   151 x 151 matrix. [MyLv][TargetLv] -> DamageRate x/1000.
+//   In NA2016 data all sampled entries = 1000 (flat PvP).
+//   Stored as full row per MyLv (0-150), cols TargetLv1-150.
+//
+// PASS: x/1000 fixed-point multiply confirmed consistent with all other tables.
 
 #pragma once
 #include "typedef.h"
 
-#define LVGAP_TABLE_SIZE	200		// confirmed: enough for -100..+100
-#define LVGAP_OFFSET		100		// index = gap + LVGAP_OFFSET
+#define LVGAP_PVP_MAX   151     // confirmed: 0..150
 
-//------------------------------------------------------------------
 enum eLvGapType
 {
-	LVGAP_PVE = 0,	// player -> mob
-	LVGAP_PVP = 1,	// player -> player
-	LVGAP_EVP = 2,	// mob -> player
-	LVGAP_MAX = 3,
+    LVGAP_PVE = 0,  // player -> mob   (sparse lookup)
+    LVGAP_EVP = 1,  // mob -> player   (sparse lookup, all 1000)
+    LVGAP_PVP = 2,  // player -> player (full 151x151 matrix)
+    LVGAP_MAX = 3,
 };
 
-//------------------------------------------------------------------
-struct LVGAP_ENTRY
+// One entry in the sparse PVE/EVP table
+struct LVGAP_SPARSE_ENTRY
 {
-	int		nLevelDiff;		// attacker level - target level
-	int		nMultiplier;	// x1000 (1000 = 1.0x)
-	/* TODO: confirm exact column names from damagelvgappve.shn
-	   open in SHN editor and cross-reference field names */
+    short   nLevelDiff;     // signed: attacker_level - target_level (UINT16 in SHN, cast to int16)
+    int     nMultiplier;    // x1000 (1000 = 1.0x)
 };
 
-//------------------------------------------------------------------
 class CLevelGapDamageTable
 {
 public:
-	CLevelGapDamageTable();
+    CLevelGapDamageTable();
+    bool    Load( const char* pszDataPath );
 
-	bool	Load( const char* pszDataPath );
-
-	// Get damage multiplier for a given level gap and combat type.
-	// Returns value x1000 (divide by 1000 for float multiplier).
-	int		GetMultiplier( int nAttackerLevel, int nTargetLevel,
-	                       eLvGapType eType ) const;
+    // Returns multiplier x1000 for the given gap + combat type.
+    int     GetMultiplier( int nAtkLevel, int nDefLevel, eLvGapType eType ) const;
 
 private:
-	bool	LoadTable( const char* pszPath, int* pTable );
+    bool    LoadSparse( const char* pszPath, LVGAP_SPARSE_ENTRY* pEntries, int& nCount );
+    bool    LoadPvPMatrix( const char* pszPath );
 
-	// Raw multiplier arrays indexed by (gap + LVGAP_OFFSET)
-	int		m_nPvE[ LVGAP_TABLE_SIZE ];
-	int		m_nPvP[ LVGAP_TABLE_SIZE ];
-	int		m_nEvP[ LVGAP_TABLE_SIZE ];
-	bool	m_bLoaded;
+    // Sparse tables (PVE + EVP)
+    LVGAP_SPARSE_ENTRY  m_pve[32];
+    int                 m_nPveCount;
+    LVGAP_SPARSE_ENTRY  m_evp[32];
+    int                 m_nEvpCount;
+
+    // PvP full matrix [myLv 0..150][targetLv 0..150]
+    int     m_pvp[ LVGAP_PVP_MAX ][ LVGAP_PVP_MAX ];
+
+    bool    m_bLoaded;
 };
