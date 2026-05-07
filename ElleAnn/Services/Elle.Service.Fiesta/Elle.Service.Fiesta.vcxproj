@@ -51,6 +51,7 @@
     <ClInclude Include="FiestaConnection.h" />
     <ClInclude Include="FiestaClient.h" />
     <ClInclude Include="FiestaBriefInfoRing.h" />
+    <ClInclude Include="FiestaWorldModel.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\Shared\ElleCore.Shared.vcxproj">

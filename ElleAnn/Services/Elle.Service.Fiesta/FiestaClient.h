@@ -44,6 +44,7 @@
 #include "FiestaBriefInfoRing.h"
 #include "FiestaConnection.h"
 #include "FiestaPacket.h"
+#include "FiestaWorldModel.h"
 
 #include <atomic>
 #include <chrono>
@@ -232,6 +233,12 @@ public:
      *  or for IPC consumers that want to dump the full table).    */
     const BriefInfoRing& Ring() const { return m_briefRing; }
 
+    /** Phase 6b-Alpha: read-only access to the in-process world model.
+     *  Snapshot rendering is thread-safe; pointer-stability guaranteed
+     *  for the lifetime of the Client. */
+    const WorldModel& World() const { return m_world; }
+    WorldModel&       MutableWorld()      { return m_world; }
+
 private:
     void HandlePacket(const InPacket& pkt);
     void EmitEvent(const std::string& kindJson);
@@ -299,6 +306,11 @@ private:
 
     /* Player handle⇆displayName cache (BriefInfoRing). */
     BriefInfoRing          m_briefRing;
+
+    /* Phase 6b-Alpha: in-process world model.  Mutated by the OnXxx
+     * handlers on the RX thread, read lock-free via SnapshotJson()
+     * from any thread (IPC / diag / tests). */
+    WorldModel             m_world;
 
     /* Region-toggle config. */
     std::string            m_versionKey = "SDO_FIESTA_NEW_VER_KEY";

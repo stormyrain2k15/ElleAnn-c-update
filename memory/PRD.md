@@ -2464,3 +2464,58 @@ Once user picks the right candidate per opcode from
   * `0x044A`, `0x0602` (state-dump ACKs — TBD)
   * `0x0701`/`0x0801`/etc. login-chain decoders (already correct in PDB
      mapping; just not yet observed in captures).
+
+## Session Feb-2026 (continued) — Phase 6b-Alpha: Headless WorldModel
+
+(Full narrative: `/app/memory/CHANGELOG.md`.)
+
+### Status
+- **Phase 6b-Alpha (DONE, packaged as `10-phase6b-worldmodel.patch`, 30 KB,
+  +549 lines)**: Headless world-model now live inside Elle.Service.Fiesta.
+  Every decoder that touches identity/position/entities mutates
+  `Fiesta::WorldModel`, which Cognitive can snapshot via a new
+  `IPC_FIESTA_COMMAND {"op":"get_world"}` op. Reply envelope is
+  `{"kind":"world_snapshot","request_id":"…","snapshot":{self,zone,entities[]}}`.
+- **ShineEngine source ingest (DONE)**: `ShineEngine_Battle_src.zip` and
+  `ShineEngine_ProjectF2_src_v2-1.zip` extracted into
+  `Services/Elle.Service.Fiesta/_re_artifacts/shinengine/`. Analysis
+  confirmed the zips are a consolidated reference skeleton re-using our
+  own Phase 6a PDB extractions + capture findings (same struct widths,
+  same opcode values, many `TODO — packet capture pending` placeholders).
+  Still useful as an authoritative field-name reference for 6b-Beta.
+- **SHINENGINE_MAP.md (NEW)**: Written in the same folder; maps every
+  ShineEngine header to its Elle counterpart and lists the exact 6b-Beta
+  shopping list (HP/MP/Gold/Exp from `ProtoNcMapLoginAck`).
+
+### Tests (all green)
+- `test_fiesta_worldmodel.cpp`: 8/8 PASS — covers self-base populate,
+  player upsert+remove, mob carries mob_id, handle-reuse replaces kind,
+  zone+position+state round-trip, clear_zone wipes entities, self-handle
+  update, full-session simulation.
+- `test_fiesta_decoders.cpp`: still PASS (no regression).
+- `test_fiesta_console_trace.cpp`: still PASS (no regression).
+- Patch apply check: clean application to a scrubbed copy of baseline
+  `91ff662`; post-apply build + test both green.
+
+### Files touched
+- NEW: `FiestaWorldModel.h` (223 lines), `test_fiesta_worldmodel.cpp`
+  (182 lines), `_re_artifacts/shinengine/SHINENGINE_MAP.md` (104 lines),
+  plus extracted sources under `_re_artifacts/shinengine/Battle_src/`
+  and `…/ProjectF2_src/`.
+- MODIFIED: `FiestaClient.h` (add WorldModel member + accessors),
+  `FiestaClient.cpp` (wire UpdateSelfBase/UpsertPlayer/UpsertMob/
+  RemoveEntity/UpdateSelfPosition/SetLoginState into 8 handlers),
+  `FiestaService.cpp` (add `op=="get_world"` branch broadcasting
+  `world_snapshot` event), `Elle.Service.Fiesta.vcxproj` (register
+  new header).
+- DELIVERED: `/app/10-phase6b-worldmodel.patch` (30 KB, +549/-1 lines).
+
+### Next
+- **P0 — Phase 6b-Beta**: Decode `NC_MAP_LOGIN_ACK` (0x1038) per
+  `ProtoNcMapLoginAck` — add HP/MP/Gold/Exp to WorldModel + zone map
+  name from `szMap[8]`; add `DecodeMiscGameTimeAck` (3-byte HH:MM:SS).
+- **P1 — Phase 6c**: Lua behavioural bindings now unblocked.
+  `on_world_tick`, `on_chat_received`, `on_pm_received` hooks exposing
+  `WorldModel::SnapshotJson()` to `elle_settings.lua`.
+- **P1 — user verification** of patches 04..10 still pending (applying
+  to live private-server box + running `--console`).

@@ -1711,3 +1711,67 @@ ANSI colour codes work on Windows 10+ via
 - NEW:  `FiestaConsoleTrace.h`, `test_fiesta_console_trace.cpp`.
 - MODIFIED: `FiestaClient.cpp` (4 hooks), `FiestaConnection.h`
   (TX hook), `FiestaService.cpp` (auto-enable), `Elle.Service.Fiesta.vcxproj`.
+
+## 2026-02-07 — Phase 6b-Alpha: Headless WorldModel + ShineEngine ingest
+
+### Context
+Previous agent finalised Phase 6a (packet decoders, XOR499/LCG cipher,
+live console hex trace) and the user immediately dropped
+`ShineEngine_Battle_src.zip` + `ShineEngine_ProjectF2_src_v2-1.zip`
+containing an "official" ShineEngine source tree. Task: ingest the
+sources, start Phase 6b by giving Elle a coherent in-process picture of
+the game world (who's around, where, what zone) that Cognitive can query.
+
+### What landed
+- `Services/Elle.Service.Fiesta/FiestaWorldModel.h` (NEW, 223 lines) —
+  thread-safe snapshot holding self-char fields (handle, chrregnum,
+  char_name, state, x, y, last_update), zone (mapName, enteredMs), and
+  `unordered_map<handle, WorldEntity>` for players/mobs/npcs. Mutators
+  lock a mutex; `SnapshotJson()` copies-under-lock then renders JSON
+  outside the lock so reads don't stall the RX thread.
+- `Services/Elle.Service.Fiesta/test_fiesta_worldmodel.cpp` (NEW,
+  182 lines) — 8 unit tests including a full-session simulation that
+  mirrors the capture order (seed → char_base → briefinfo_login ×N →
+  regen_mob → move → briefinfo_delete → snapshot). All pass.
+- `Services/Elle.Service.Fiesta/_re_artifacts/shinengine/` (NEW) —
+  ingested zips + `SHINENGINE_MAP.md` cross-reference doc mapping
+  every ShineEngine header to its Elle counterpart and calling out
+  the 6b-Beta shopping list.
+- `Services/Elle.Service.Fiesta/FiestaClient.h` — adds
+  `const WorldModel& World() const` + `WorldModel& MutableWorld()` +
+  `WorldModel m_world` member.
+- `Services/Elle.Service.Fiesta/FiestaClient.cpp` — 8 handler
+  mutations wired: OnLoginCharacter/OnBriefCharacter/OnPlayerListAppear
+  → UpsertPlayer; OnBriefInfoDelete/OnNpcDisappear → RemoveEntity;
+  OnRegenMob → UpsertMob; OnCharBase → UpdateSelfBase; SetState →
+  SetLoginState; MoveTo/Stop → UpdateSelfPosition.
+- `Services/Elle.Service.Fiesta/FiestaService.cpp` — new
+  `op == "get_world"` branch. Renders `m_client.World().SnapshotJson()`,
+  wraps in `{"kind":"world_snapshot","request_id":…,"snapshot":…}`,
+  broadcasts via existing `BroadcastEvent`. Backwards-compatible —
+  every existing op is unchanged.
+- `Services/Elle.Service.Fiesta/Elle.Service.Fiesta.vcxproj` — adds
+  `FiestaWorldModel.h` so MSBuild picks it up on Windows.
+
+### Engine-source-derived insight
+The ShineEngine zips turned out to be a *consolidated reference
+skeleton* built from the same PDB extractions + capture analysis we
+already had (every header cites `Source: E:\ProjectF2\CSCode\…` +
+`Confirmed from Port 91xx captures`). Zero new engine code beyond
+what we'd already extracted, BUT: they confirm our inferred struct
+widths and give us authoritative field names for
+`ProtoNcMapLoginAck` (HP/MP/Gold/Exp, szMap[8]). That's the
+whole Phase 6b-Beta roadmap — no more guessing, just decoding.
+
+### Tests + patch-apply validation
+- 8/8 PASS on `test_fiesta_worldmodel.cpp` (std=c++17, no Windows stub,
+  pure nlohmann + std::).
+- Regression: `test_fiesta_decoders.cpp` (PASS), `test_fiesta_console_trace.cpp`
+  (PASS).
+- Patch apply test: scrubbed copy of baseline `91ff662` → `git apply
+  10-phase6b-worldmodel.patch` (EXIT 0) → build + test both green.
+
+### Delivered
+- `/app/10-phase6b-worldmodel.patch` — 30 KB, +549/-1 lines across
+  4 modified + 3 new files. Applies on top of `PHASE6A-COMPLETE.patch`
+  + `09-phase6-console-trace.patch`.

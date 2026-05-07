@@ -361,6 +361,19 @@ protected:
             m_client.SendRaw(opcode, bytes);
         } else if (op == "disconnect") {
             m_client.Disconnect(j.value("reason", std::string("ipc disconnect")));
+        } else if (op == "get_world") {
+            /* Phase 6b-Alpha: snapshot the in-process WorldModel and
+             * echo it back as an IPC_FIESTA_EVENT so every subscriber
+             * gets the same view. Cognitive can pin request_id into
+             * the reply envelope so caller can correlate. */
+            nlohmann::json snap = m_client.World().SnapshotJson();
+            const std::string reqId = j.value("request_id", std::string(""));
+            nlohmann::json out = {
+                {"kind",     "world_snapshot"},
+                {"snapshot", std::move(snap)},
+            };
+            if (!reqId.empty()) out["request_id"] = reqId;
+            BroadcastEvent(out.dump());
         } else {
             ELLE_WARN("Fiesta: unknown IPC op '%s'", op.c_str());
         }

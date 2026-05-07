@@ -76,6 +76,7 @@ void Client::OnLoginCharacter(const InPacket& pkt) {
     std::string name(nameBuf);
     while (!name.empty() && name.back() == 0) name.pop_back();
     m_briefRing.Insert(head.handle, name);
+    m_world.UpsertPlayer(head.handle, name);
 
     std::ostringstream o;
     o << "{\"kind\":\"player_appear\",\"handle\":" << head.handle
@@ -89,6 +90,7 @@ void Client::OnBriefInfoDelete(const InPacket& pkt) {
     PROTO_NC_BRIEFINFO_BRIEFINFODELETE_CMD del{};
     std::memcpy(&del, pkt.payload.data(), sizeof(del));
     m_briefRing.Remove(del.hnd);
+    m_world.RemoveEntity(del.hnd);
 
     std::ostringstream o;
     o << "{\"kind\":\"entity_disappear\",\"handle\":" << del.hnd << "}";
@@ -104,6 +106,7 @@ void Client::OnRegenMob(const InPacket& pkt) {
     /* Mobs don't carry a display name in REGENMOB — we keep them out
      * of the player ring (they're handle-only) and surface as an
      * event for Cognitive's spatial model. */
+    m_world.UpsertMob(head.handle, head.mob_id);
     std::ostringstream o;
     o << "{\"kind\":\"mob_appear\",\"handle\":" << head.handle
       << ",\"mob_id\":" << head.mob_id << "}";
@@ -115,6 +118,7 @@ void Client::OnNpcDisappear(const InPacket& pkt) {
     PROTO_NC_BRIEFINFO_NPC_DISAPPEAR_CMD del{};
     std::memcpy(&del, pkt.payload.data(), sizeof(del));
     m_briefRing.Remove(del.handle);
+    m_world.RemoveEntity(del.handle);
     std::ostringstream o;
     o << "{\"kind\":\"npc_disappear\",\"handle\":" << del.handle << "}";
     EmitEvent(o.str());
@@ -132,6 +136,7 @@ void Client::OnBriefCharacter(const InPacket& pkt) {
     std::string name(nameBuf);
     while (!name.empty() && name.back() == 0) name.pop_back();
     m_briefRing.Insert(head.handle, name);
+    m_world.UpsertPlayer(head.handle, name);
 
     std::ostringstream o;
     o << "{\"kind\":\"player_update\",\"handle\":" << head.handle
@@ -155,7 +160,10 @@ void Client::OnPlayerListAppear(const InPacket& pkt) {
         if (!r.Bytes(charid, sizeof(charid))) break;
         std::string name(charid, sizeof(charid));
         while (!name.empty() && name.back() == 0) name.pop_back();
-        if (!name.empty()) m_briefRing.Insert(handle, name);
+        if (!name.empty()) {
+            m_briefRing.Insert(handle, name);
+            m_world.UpsertPlayer(handle, name);
+        }
         parsed++;
     }
     std::ostringstream o;
@@ -175,6 +183,8 @@ void Client::OnCharBase(const InPacket& pkt) {
     std::memcpy(nameBuf, head.charid, 16);
     std::string name(nameBuf);
     while (!name.empty() && name.back() == 0) name.pop_back();
+
+    m_world.UpdateSelfBase(head.chrregnum, name);
 
     std::ostringstream o;
     o << "{\"kind\":\"self_base\",\"chrregnum\":" << head.chrregnum
@@ -357,6 +367,7 @@ void Client::SetState(State s) {
     }
     if (previous != s) {
         Fiesta::Trace::OnStateChange(StateName(previous), StateName(s));
+        m_world.SetLoginState(StateName(s));
         std::ostringstream o;
         o << "{\"kind\":\"login_state\",\"state\":\"" << StateName(s) << "\"}";
         EmitEvent(o.str());
@@ -656,6 +667,7 @@ bool Client::MoveTo(uint32_t toX, uint32_t toY, bool run) {
     req.to.x = toX;
     req.to.y = toY;
     m_lastPos = req.to;
+    m_world.UpdateSelfPosition(toX, toY);
     return m_conn.Send(run ? Op::NC_ACT_RUN_REQ : Op::NC_ACT_WALK_REQ,
                        ToBytes(req));
 }
@@ -668,6 +680,7 @@ bool Client::Stop(uint32_t atX, uint32_t atY) {
      * "teleporting" stop-points. */
     SHINE_XY_TYPE xy{ atX, atY };
     m_lastPos = xy;
+    m_world.UpdateSelfPosition(atX, atY);
     return m_conn.Send(Op::NC_ACT_STOP_REQ, ToBytes(xy));
 }
 
